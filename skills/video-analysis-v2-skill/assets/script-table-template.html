@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ title }}</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f6f7fb;color:#222;margin:0;padding:24px}
+    .wrap{max-width:1680px;margin:0 auto}
+    .card{background:#fff;border-radius:16px;padding:20px 24px;box-shadow:0 2px 10px rgba(0,0,0,.06);margin-bottom:20px}
+    h1{margin:0 0 8px;font-size:28px}
+    h2{margin:0 0 12px;font-size:22px}
+    .meta{color:#666;font-size:14px;line-height:1.7}
+    .summary{font-size:17px;line-height:1.9}
+    .insight-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:4px}
+    .insight{border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fbfdff}
+    .insight b{display:block;margin-bottom:4px;color:#111827}
+    .insight div{font-size:14px;line-height:1.8;color:#374151}
+    a{color:#2563eb;text-decoration:none;word-break:break-all}
+    table{width:100%;border-collapse:collapse;table-layout:fixed}
+    th,td{border:1px solid #e5e7eb;vertical-align:top;padding:12px 10px;line-height:1.8;font-size:14px}
+    th{background:#f3f4f6;text-align:left}
+    th:nth-child(1),td:nth-child(1){width:14%}
+    th:nth-child(2),td:nth-child(2){width:8%}
+    th:nth-child(3),td:nth-child(3){width:34%}
+    th:nth-child(4),td:nth-child(4){width:18%}
+    th:nth-child(5),td:nth-child(5){width:26%}
+    .frames{display:flex;gap:8px;margin-top:10px}
+    .frame{flex:1}
+    .frame img{width:100%;border-radius:8px;border:1px solid #e5e7eb;display:block}
+    .cap{font-size:12px;color:#666;margin-top:4px;text-align:center}
+    ul{margin:8px 0 0 20px;padding:0;line-height:1.8}
+    .small{font-size:12px;color:#666}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    {{ title_card }}
+    {{ summary_card }}
+    {{ core_viral_points_card }}
+    {{ replaceable_parts_card }}
+    {{ table_card }}
+    {{ mechanism_card }}
+  </div>
+</body>
+</html>

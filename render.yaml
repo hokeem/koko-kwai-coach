@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: koko-kwai-coach
+    env: python
+    rootDir: video-analysis-v3-web
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: VIDEO_ANALYSIS_WEB_DATA_DIR
+        value: /var/data
+      - key: VIDEO_ANALYSIS_MAX_CONCURRENT_JOBS
+        value: "1"
+      - key: VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC
+        value: "480"
+    disk:
+      name: koko-kwai-coach-data
+      mountPath: /var/data
+      sizeGB: 2

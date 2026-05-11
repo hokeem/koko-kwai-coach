@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+.pycache/
+*.pyc
+
+.video_skill_bin/
+.video_skill_deps/
+
+tmp/
+tmp_*.json
+tmp_*.txt
+
+video_analysis_outputs/
+video-analysis-v3-web/data/

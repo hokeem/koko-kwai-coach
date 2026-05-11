@@ -1,0 +1,3 @@
+display_name: Video Analysis V2
+short_description: Analyze short videos into shareable HTML script tables with audio or keyframe routing.
+default_prompt: Analyze this short video and produce the shareable HTML script table with embedded start and end frames.
