@@ -71,6 +71,7 @@ try:
     from hybrid_v2_pipeline import (
         PRIMARY_FALLBACK_MODELS,
         SUPPLEMENT_FALLBACK_MODELS,
+        enforce_chinese_dialogue_translation,
         run_text_json_prompt_with_fallback,
         run_video_json_prompt_with_fallback,
         unique_models,
@@ -78,6 +79,8 @@ try:
 except Exception:
     PRIMARY_FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-flash-preview"]
     SUPPLEMENT_FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-flash-preview"]
+    def enforce_chinese_dialogue_translation(script_json: dict, key: str, models: list[str]) -> dict:
+        return script_json
     run_text_json_prompt_with_fallback = None
     run_video_json_prompt_with_fallback = None
     def unique_models(*names: str) -> list[str]:
@@ -1510,6 +1513,11 @@ def regenerate_item_outputs(
 ) -> dict[str, Any]:
     output_dir = RESULTS_ROOT / item_id
     output_dir.mkdir(parents=True, exist_ok=True)
+    script_json = enforce_chinese_dialogue_translation(
+        json.loads(json.dumps(script_json or {}, ensure_ascii=False)),
+        GOOGLE_API_KEY,
+        unique_models(*MODEL_CANDIDATES),
+    )
     script_json_path = output_dir / "script_table.json"
     script_json_path.write_text(json.dumps(script_json, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1668,6 +1676,11 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
         for key in ["title", "route", "audio_information_score", "source_url", "whole_video_summary", "core_viral_points", "replaceable_parts", "rows", "mechanism"]:
             if corrected_script.get(key):
                 merged_script[key] = corrected_script.get(key)
+        merged_script = enforce_chinese_dialogue_translation(
+            merged_script,
+            GOOGLE_API_KEY,
+            unique_models(*MODEL_CANDIDATES),
+        )
         updated_item = regenerate_item_outputs(
             parent_job_id,
             item_index,

@@ -475,6 +475,28 @@ ARBITRATION_PROMPT = """你现在负责做最终仲裁。
 }
 """
 
+TRANSLATE_DIALOGUE_PROMPT = """你是一个严格的对白翻译器。
+
+你的任务：
+- 只处理 `dialogue_or_audio`
+- 把非中文对白/旁白翻译成中文
+- 必须忠实 1:1 翻译
+- 只翻译，不改写，不润色，不概括，不补背景解释
+- 保留说话顺序、语气、停顿、换行、称呼、语气词
+- 如果原文已经是中文，就原样返回
+- 如果是环境音/无对白/拟声，可以保守翻译成中文描述
+
+输出严格 JSON：
+{
+  "translations": [
+    {
+      "index": 0,
+      "dialogue_or_audio": "中文忠实翻译"
+    }
+  ]
+}
+"""
+
 PRIMARY_FALLBACK_MODELS = [
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
@@ -839,6 +861,83 @@ def normalize_script_payload(result: dict, source_url: str, title_fallback: str 
     value.setdefault("replaceable_parts", [])
     value.setdefault("analysis_limits", [])
     return value
+
+
+def _contains_chinese(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+
+
+def _contains_latin(text: str) -> bool:
+    return bool(re.search(r"[A-Za-zÀ-ÿ]", str(text or "")))
+
+
+def needs_dialogue_translation(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if _contains_chinese(value) and not _contains_latin(value):
+        return False
+    return _contains_latin(value) and not _contains_chinese(value)
+
+
+def enforce_chinese_dialogue_translation(script_json: dict, key: str, models: list[str]) -> dict:
+    rows = script_json.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return script_json
+
+    targets: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("dialogue_or_audio") or "").strip()
+        if needs_dialogue_translation(text):
+            targets.append(
+                {
+                    "index": index,
+                    "time": row.get("time") or "",
+                    "dialogue_or_audio": text,
+                }
+            )
+
+    if not targets:
+        return script_json
+
+    payload = {"rows": targets}
+    try:
+        translated, _, model_used = run_text_json_prompt_with_fallback(
+            payload,
+            key,
+            models,
+            TRANSLATE_DIALOGUE_PROMPT,
+            "dialogue translation",
+        )
+    except Exception:
+        return script_json
+
+    translation_items = translated.get("translations") or []
+    if not isinstance(translation_items, list):
+        return script_json
+
+    translated_count = 0
+    for item in translation_items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except Exception:
+            continue
+        if index < 0 or index >= len(rows):
+            continue
+        translated_text = str(item.get("dialogue_or_audio") or "").strip()
+        if not translated_text:
+            continue
+        rows[index]["dialogue_or_audio"] = translated_text
+        translated_count += 1
+
+    if translated_count:
+        script_json["rows"] = rows
+        script_json["dialogue_translation_model_used"] = model_used
+    return script_json
 
 
 def run_video_json_prompt(video: Path, key: str, model: str, prompt: str, mime: str = "video/mp4", inline_max_mb: float = 18.0) -> tuple[dict, dict]:
@@ -1683,6 +1782,7 @@ def main() -> int:
         final_result["logic_audit"] = logic_audit
         final_result["arbitration_result"] = arbitration_result
         final_result = enforce_object_reviews(final_result, supplement_result)
+        final_result = enforce_chinese_dialogue_translation(final_result, key, refine_models)
         maybe_extract_frames(video, out_dir, final_result)
         final_json_path.write_text(json.dumps(final_result, ensure_ascii=False, indent=2), encoding="utf-8")
         refine_raw_path.write_text(json.dumps(final_raw, ensure_ascii=False, indent=2), encoding="utf-8")
