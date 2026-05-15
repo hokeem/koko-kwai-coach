@@ -121,6 +121,20 @@ def format_beijing_time(value: object) -> str:
         return compact
 
 
+def parse_iso_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        normalized = text.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
 def html_escape(value: object) -> str:
     return html.escape(str(value or ""), quote=True)
 
@@ -1640,6 +1654,305 @@ def render_product_report(bundle: dict[str, Any]) -> str:
       <div class="meta-line" style="margin-top:14px;">逻辑质量：{html_escape(reasoning.get('logic_quality') or 'n/a')} · 最终脚本 HTML：<a class="inline-link" href="{html_escape(artifacts.get('script_table.html', ''))}" target="_blank" rel="noreferrer">打开</a></div>
     </section>
   </div>
+</body>
+</html>"""
+
+
+def collect_completed_script_records() -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for job_id, job in jobs.items():
+        items = job.get("items") or []
+        if items:
+            for item in items:
+                if item.get("status") != "completed":
+                    continue
+                completed_dt = parse_iso_datetime(item.get("completed_at") or item.get("updated_at") or item.get("created_at"))
+                if not completed_dt:
+                    continue
+                records.append(
+                    {
+                        "entry_id": item.get("id") or "",
+                        "job_id": job_id,
+                        "video_url": item.get("video_url") or "",
+                        "title": item.get("title") or "",
+                        "completed_at": completed_dt,
+                        "completed_at_bj": completed_dt.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                        "reviewed": bool(item.get("reviewed")) or str(item.get("review_status") or "").strip() == "completed",
+                        "edited": bool(item.get("edited")),
+                    }
+                )
+            continue
+        if job.get("status") != "completed":
+            continue
+        completed_dt = parse_iso_datetime(job.get("completed_at") or job.get("updated_at") or job.get("created_at"))
+        if not completed_dt:
+            continue
+        records.append(
+            {
+                "entry_id": job_id,
+                "job_id": job_id,
+                "video_url": job.get("video_url") or "",
+                "title": (job.get("result_json") or {}).get("title") or "",
+                "completed_at": completed_dt,
+                "completed_at_bj": completed_dt.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                "reviewed": bool(job.get("reviewed")) or str(job.get("review_status") or "").strip() == "completed",
+                "edited": bool(job.get("edited")),
+            }
+        )
+    records.sort(key=lambda item: item["completed_at"], reverse=True)
+    return records
+
+
+def build_stats_payload() -> dict[str, Any]:
+    records = collect_completed_script_records()
+    now_dt = datetime.now(timezone.utc)
+    summary = {
+        "last_24h": 0,
+        "last_7d": 0,
+        "last_30d": 0,
+        "review_count_30d": 0,
+        "edited_count_30d": 0,
+        "all_time": len(records),
+    }
+    days_map: dict[str, dict[str, Any]] = {}
+    for record in records:
+        completed_dt: datetime = record["completed_at"]
+        delta = now_dt - completed_dt
+        if delta <= timedelta(hours=24):
+            summary["last_24h"] += 1
+        if delta <= timedelta(days=7):
+            summary["last_7d"] += 1
+        if delta <= timedelta(days=30):
+            summary["last_30d"] += 1
+            if record["reviewed"]:
+                summary["review_count_30d"] += 1
+            if record["edited"]:
+                summary["edited_count_30d"] += 1
+        day_key = completed_dt.astimezone(BEIJING_TZ).strftime("%Y-%m-%d")
+        bucket = days_map.setdefault(
+            day_key,
+            {
+                "date": day_key,
+                "script_count": 0,
+                "review_count": 0,
+                "edited_count": 0,
+                "items": [],
+            },
+        )
+        bucket["script_count"] += 1
+        if record["reviewed"]:
+            bucket["review_count"] += 1
+        if record["edited"]:
+            bucket["edited_count"] += 1
+        bucket["items"].append(
+            {
+                "video_url": record["video_url"],
+                "title": record["title"],
+                "completed_at_bj": record["completed_at_bj"],
+                "reviewed": record["reviewed"],
+                "edited": record["edited"],
+            }
+        )
+    days = [days_map[key] for key in sorted(days_map.keys(), reverse=True)]
+    return {"summary": summary, "days": days}
+
+
+def stats_html() -> str:
+    payload = build_stats_payload()
+    summary = payload["summary"]
+    days = payload["days"]
+    summary_cards = "".join(
+        [
+            f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 24 小时</span><strong>{summary['last_24h']}</strong><small>生成脚本数</small></article>",
+            f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 7 天</span><strong>{summary['last_7d']}</strong><small>生成脚本数</small></article>",
+            f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 30 天</span><strong>{summary['last_30d']}</strong><small>生成脚本数</small></article>",
+            f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 30 天</span><strong>{summary['review_count_30d']}</strong><small>复盘重做次数</small></article>",
+            f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 30 天</span><strong>{summary['edited_count_30d']}</strong><small>直接修改次数</small></article>",
+            f"<article class='stats-summary-card'><span class='stats-summary-label'>累计</span><strong>{summary['all_time']}</strong><small>历史生成脚本数</small></article>",
+        ]
+    )
+    day_cards = []
+    for day in days:
+        item_rows = []
+        for idx, item in enumerate(day.get("items") or [], start=1):
+            review_badge = "<span class='stats-badge yes'>已复盘</span>" if item.get("reviewed") else "<span class='stats-badge'>未复盘</span>"
+            edit_badge = "<span class='stats-badge yes'>已直接修改</span>" if item.get("edited") else "<span class='stats-badge'>未直接修改</span>"
+            item_rows.append(
+                "<article class='stats-item-row'>"
+                f"<div class='stats-item-index'>#{idx}</div>"
+                "<div class='stats-item-copy'>"
+                f"<a class='stats-link' href='{html_escape(item.get('video_url') or '')}' target='_blank' rel='noreferrer'>{html_escape(item.get('video_url') or '')}</a>"
+                f"<div class='stats-item-meta'><span>{html_escape(item.get('completed_at_bj') or '')}</span>{review_badge}{edit_badge}</div>"
+                "</div>"
+                "</article>"
+            )
+        day_body_html = "".join(item_rows) or "<div class='stats-empty'>这一天没有可展示的脚本。</div>"
+        day_cards.append(
+            "<details class='stats-day-card'>"
+            "<summary class='stats-day-summary'>"
+            f"<div class='stats-day-title'>{html_escape(day.get('date') or '')}</div>"
+            "<div class='stats-day-metrics'>"
+            f"<span class='stats-day-chip'>生成 {day.get('script_count') or 0}</span>"
+            f"<span class='stats-day-chip'>复盘 {day.get('review_count') or 0}</span>"
+            f"<span class='stats-day-chip'>修改 {day.get('edited_count') or 0}</span>"
+            "</div>"
+            "</summary>"
+            f"<div class='stats-day-body'>{day_body_html}</div>"
+            "</details>"
+        )
+    day_cards_html = "".join(day_cards) or "<div class='stats-empty'>还没有历史脚本数据。</div>"
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Koko Stats</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
+    * {{ box-sizing: border-box; font-family: 'Readex Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      color: #FF8200;
+      background:
+        radial-gradient(circle at 8% 10%, rgba(255,130,0,.46), transparent 30%),
+        radial-gradient(circle at 86% 12%, rgba(249,115,0,.38), transparent 28%),
+        radial-gradient(circle at 50% 42%, rgba(255,178,84,.20), transparent 36%),
+        linear-gradient(180deg, #FFB15A 0%, #FFD9AF 34%, #FFF1E2 70%, #FFFFFF 100%);
+    }}
+    .stats-shell {{ padding: 24px; }}
+    .stats-wrap {{
+      width: min(1320px, 100%);
+      margin: 0 auto;
+      border-radius: 34px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.72);
+      box-shadow: 0 28px 80px rgba(249,115,0,.16);
+      background:
+        radial-gradient(circle at 12% 16%, rgba(255,130,0,.32), rgba(255,130,0,0) 22%),
+        radial-gradient(circle at 86% 18%, rgba(249,115,0,.26), rgba(249,115,0,0) 22%),
+        radial-gradient(circle at 70% 62%, rgba(255,244,232,.70), rgba(255,244,232,0) 24%),
+        linear-gradient(180deg, rgba(255,207,146,.64) 0%, rgba(255,240,222,.52) 44%, rgba(255,255,255,.62) 100%);
+      backdrop-filter: blur(26px);
+      -webkit-backdrop-filter: blur(26px);
+      padding: 28px;
+    }}
+    .stats-topbar {{ display:flex; align-items:flex-start; justify-content:space-between; gap:20px; flex-wrap:wrap; }}
+    .stats-topbar h1 {{ margin:0; font-size:clamp(3rem, 7vw, 5.4rem); letter-spacing:-.08em; line-height:.88; }}
+    .stats-topbar p {{ margin:14px 0 0; font-size:14px; line-height:1.8; color:#FF8200; opacity:.9; max-width:56ch; }}
+    .action-link {{
+      display:inline-flex; align-items:center; justify-content:center; text-decoration:none;
+      border-radius:999px; padding:10px 14px; color:#FF8200; border:1px solid rgba(255,130,0,.18); background:rgba(255,255,255,.72);
+      font-weight:700; font-size:13px; cursor:pointer;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }}
+    .stats-grid {{
+      display:grid;
+      grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+      gap:18px;
+      margin-top:32px;
+    }}
+    .stats-summary-card {{
+      border:1px solid rgba(255,130,0,.16);
+      border-radius:24px;
+      background:rgba(255,255,255,.58);
+      padding:18px;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      box-shadow: 0 18px 42px rgba(249,115,0,.10);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+    }}
+    .stats-summary-label {{ font-size:12px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; opacity:.82; }}
+    .stats-summary-card strong {{ font-size:40px; line-height:1; color:#1F1F1F; }}
+    .stats-summary-card small {{ font-size:13px; line-height:1.6; color:#FF8200; }}
+    .stats-section {{ margin-top:34px; }}
+    .stats-section-head {{
+      display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px;
+    }}
+    .stats-section-head h2 {{ margin:0; font-size:28px; letter-spacing:-.04em; color:#1F1F1F; }}
+    .stats-section-head p {{ margin:0; font-size:13px; line-height:1.6; color:#FF8200; opacity:.88; }}
+    .stats-day-list {{ display:flex; flex-direction:column; gap:16px; }}
+    .stats-day-card {{
+      border:1px solid rgba(255,130,0,.16);
+      border-radius:24px;
+      background:rgba(255,255,255,.62);
+      overflow:hidden;
+      box-shadow: 0 18px 42px rgba(249,115,0,.08);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+    }}
+    .stats-day-summary {{
+      list-style:none; cursor:pointer; padding:18px 20px; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;
+    }}
+    .stats-day-summary::-webkit-details-marker {{ display:none; }}
+    .stats-day-title {{ font-size:22px; font-weight:800; color:#1F1F1F; letter-spacing:-.03em; }}
+    .stats-day-metrics {{ display:flex; flex-wrap:wrap; gap:10px; }}
+    .stats-day-chip {{
+      display:inline-flex; align-items:center; border-radius:999px; padding:8px 12px;
+      font-size:12px; font-weight:700; color:#FF8200; background:rgba(255,255,255,.74); border:1px solid rgba(255,130,0,.16);
+    }}
+    .stats-day-body {{ padding:0 20px 20px; display:flex; flex-direction:column; gap:12px; }}
+    .stats-item-row {{
+      display:flex; gap:12px; align-items:flex-start;
+      border:1px solid rgba(255,130,0,.12); border-radius:18px; background:rgba(255,255,255,.72);
+      padding:14px;
+    }}
+    .stats-item-index {{
+      min-width:40px; height:40px; border-radius:999px;
+      display:inline-flex; align-items:center; justify-content:center;
+      background:rgba(255,130,0,.12); color:#FF8200; font-size:12px; font-weight:800;
+    }}
+    .stats-item-copy {{ display:flex; flex-direction:column; gap:8px; min-width:0; }}
+    .stats-link {{ color:#2962FF; text-decoration:none; word-break:break-all; font-size:14px; line-height:1.7; }}
+    .stats-item-meta {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:12px; color:#FF8200; }}
+    .stats-badge {{
+      display:inline-flex; align-items:center; border-radius:999px; padding:6px 10px; font-size:11px; font-weight:700;
+      color:#935F14; background:rgba(147,95,20,.12);
+    }}
+    .stats-badge.yes {{ color:#157347; background:rgba(21,115,71,.12); }}
+    .stats-empty {{
+      border:1px dashed rgba(255,130,0,.18); border-radius:18px; background:rgba(255,255,255,.56);
+      padding:18px; font-size:14px; line-height:1.7; color:#FF8200;
+    }}
+    @media (max-width: 760px) {{
+      .stats-shell {{ padding: 12px; }}
+      .stats-wrap {{ padding: 18px; }}
+      .stats-day-summary {{ align-items:flex-start; }}
+      .stats-item-row {{ flex-direction:column; }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="stats-shell">
+    <section class="stats-wrap">
+      <div class="stats-topbar">
+        <div>
+          <button class="action-link" id="back-home" type="button">← 返回 Koko</button>
+          <h1>Stats</h1>
+          <p>这里会按北京时间聚合已有历史任务数据，统计每天生成了多少脚本、分别是哪些链接，以及它们是否触发过复盘重做和直接修改。</p>
+        </div>
+      </div>
+      <div class="stats-grid">{summary_cards}</div>
+      <section class="stats-section">
+        <div class="stats-section-head">
+          <h2>每日统计</h2>
+          <p>按天展开查看具体脚本链接、生成时间以及后续操作情况</p>
+        </div>
+        <div class="stats-day-list">{day_cards_html}</div>
+      </section>
+    </section>
+  </main>
+  <script>
+    const backHomeButton = document.getElementById("back-home");
+    if (backHomeButton) {{
+      backHomeButton.addEventListener("click", () => {{
+        window.location.assign("/");
+      }});
+    }}
+  </script>
 </body>
 </html>"""
 
@@ -3820,6 +4133,7 @@ def page_html() -> str:
               <a href="#workbench">Studio</a>
               <a href="#workbench">Preview</a>
               <a href="/library">Library</a>
+              <a href="/stats">Stats</a>
             </div>
           </div>
           <div class="hero-stage">
@@ -5416,6 +5730,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self.send_html(page_html())
             return
+        if parsed.path == "/stats":
+            self.send_html(stats_html())
+            return
         if parsed.path == "/library":
             self.send_html(library_html())
             return
@@ -5448,6 +5765,13 @@ class AppHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             body = page_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return
+        if parsed.path == "/stats":
+            body = stats_html().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
