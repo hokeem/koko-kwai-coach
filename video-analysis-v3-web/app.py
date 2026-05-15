@@ -2913,25 +2913,43 @@ def page_html() -> str:
       color: var(--muted);
     }}
     .progress-wrap {{
-      margin: 10px 0 18px;
+      margin-top: 14px;
     }}
     .progress-top {{
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      gap: 14px;
       margin-bottom: 8px;
-      color: #FF8200;
+    }}
+    .progress-top-copy {{
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }}
+    .progress-kicker {{
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--ink);
+    }}
+    .progress-stage-copy {{
       font-size: 14px;
-      font-weight: 700;
+      line-height: 1.6;
+      color: var(--muted);
+    }}
+    .progress-percent {{
+      font-size: 18px;
+      font-weight: 800;
+      color: #FF8200;
+      white-space: nowrap;
     }}
     .progress-rail {{
       width: 100%;
-      height: 10px;
+      height: 8px;
       border-radius: 999px;
-      background: rgba(255,130,0,.18);
+      background: rgba(31,31,31,.08);
       overflow: hidden;
-      border: 1px solid rgba(255,130,0,.14);
     }}
     .progress-fill {{
       height: 100%;
@@ -2942,29 +2960,75 @@ def page_html() -> str:
     }}
     .step-list {{
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 14px;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      gap: 0;
+      margin-top: 18px;
+      align-items: start;
     }}
     .step-pill {{
-      border-radius: 16px;
-      padding: 10px 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
       text-align: center;
+      position: relative;
+      padding: 0 4px;
+      background: transparent;
+      border: 0;
+      color: rgba(31,31,31,.42);
       font-size: 12px;
       font-weight: 700;
-      color: #FF8200;
-      background: rgba(255,255,255,.88);
-      border: 1px solid rgba(255,130,0,.16);
+    }}
+    .step-pill::before {{
+      content: "";
+      position: absolute;
+      top: 18px;
+      left: calc(-50% + 18px);
+      width: calc(100% - 36px);
+      height: 2px;
+      background: rgba(31,31,31,.12);
+      z-index: 0;
+    }}
+    .step-pill:first-child::before {{
+      display: none;
+    }}
+    .step-bubble {{
+      width: 36px;
+      height: 36px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255,255,255,.96);
+      border: 2px solid rgba(31,31,31,.12);
+      color: rgba(31,31,31,.55);
+      font-size: 14px;
+      font-weight: 800;
+      position: relative;
+      z-index: 1;
+      box-sizing: border-box;
+    }}
+    .step-pill span:last-child {{
+      line-height: 1.45;
     }}
     .step-pill.active {{
       color: #FF8200;
-      border-color: rgba(255,130,0,.30);
-      background: rgba(255,130,0,.14);
+    }}
+    .step-pill.active .step-bubble {{
+      border-color: rgba(255,130,0,.9);
+      color: #FF8200;
+      background: rgba(255,255,255,.98);
     }}
     .step-pill.done {{
-      color: #FF8200;
-      border-color: rgba(255,130,0,.24);
-      background: rgba(255,244,232,.96);
+      color: var(--ink);
+    }}
+    .step-pill.done::before {{
+      background: rgba(24,163,74,.38);
+    }}
+    .step-pill.done .step-bubble {{
+      border-color: rgba(24,163,74,.72);
+      color: #18A34A;
+      background: rgba(239,251,243,.98);
     }}
     .status-box.ready {{
       color: var(--ink);
@@ -2992,11 +3056,11 @@ def page_html() -> str:
       margin-top: 8px;
     }}
     .batch-overview {{
-      border: 1px solid rgba(255,130,0,.16);
+      border: 1px solid rgba(31,31,31,.08);
       border-radius: 24px;
-      background: rgba(255,255,255,.82);
-      padding: 18px;
-      box-shadow: 0 12px 34px rgba(249,115,0,.08);
+      background: rgba(255,255,255,.92);
+      padding: 18px 20px;
+      box-shadow: 0 16px 42px rgba(15,23,42,.06);
     }}
     .batch-overview-top {{
       display: flex;
@@ -3004,83 +3068,77 @@ def page_html() -> str:
       justify-content: space-between;
       gap: 16px;
       flex-wrap: wrap;
-      margin-bottom: 14px;
+      margin-bottom: 10px;
     }}
     .batch-overview-copy {{
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 10px;
       min-width: 0;
     }}
     .batch-overview-title {{
       font-size: 22px;
-      line-height: 1.08;
-      letter-spacing: -.04em;
+      line-height: 1.12;
+      letter-spacing: -.03em;
       color: var(--ink);
-      font-weight: 700;
+      font-weight: 800;
     }}
     .batch-overview-subtitle {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
       font-size: 14px;
       line-height: 1.6;
+      color: #2962FF;
+      text-decoration: none;
+      max-width: 72ch;
+      word-break: break-all;
+    }}
+    .batch-overview-subtitle::before {{
+      content: "🔗";
+      font-size: 14px;
+      line-height: 1;
+    }}
+    .batch-job-meta {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 13px;
+      line-height: 1.6;
       color: var(--muted);
-      max-width: 60ch;
+    }}
+    .job-copy-btn {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      border: 1px solid rgba(31,31,31,.08);
+      background: rgba(255,255,255,.98);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 700;
     }}
     .batch-meta {{
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
-      margin-top: 10px;
-    }}
-    .focus-card {{
-      border: 1px solid rgba(255,130,0,.18);
-      border-radius: 24px;
-      background:
-        radial-gradient(circle at 10% 10%, rgba(255,130,0,.16), rgba(255,130,0,0) 24%),
-        rgba(255,255,255,.86);
-      padding: 18px;
-      box-shadow: 0 16px 40px rgba(249,115,0,.10);
-    }}
-    .focus-label {{
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      border-radius: 999px;
-      padding: 7px 11px;
-      font-size: 11px;
-      font-weight: 800;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      color: #FF8200;
-      background: rgba(255,255,255,.92);
-      border: 1px solid rgba(255,130,0,.16);
+      margin-top: 14px;
       margin-bottom: 12px;
     }}
-    .focus-title {{
-      margin: 0;
-      font-size: 24px;
-      line-height: 1.14;
-      letter-spacing: -.04em;
-      color: var(--ink);
-    }}
-    .focus-url {{
-      display: inline-block;
-      margin-top: 10px;
-      font-size: 13px;
-      line-height: 1.6;
-      color: #FF8200;
-      text-decoration: none;
-      word-break: break-all;
-    }}
     .focus-note {{
-      margin-top: 10px;
+      margin-top: 0;
       font-size: 14px;
       line-height: 1.65;
       color: var(--muted);
     }}
     .queue-shell {{
-      border: 1px solid rgba(255,130,0,.16);
+      border: 1px solid rgba(31,31,31,.08);
       border-radius: 24px;
-      background: rgba(255,255,255,.78);
+      background: rgba(255,255,255,.92);
       padding: 18px;
     }}
     .queue-header {{
@@ -3105,24 +3163,26 @@ def page_html() -> str:
     }}
     .queue-list {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px;
     }}
     .queue-card {{
-      border: 1px solid rgba(255,130,0,.14);
+      border: 1px solid rgba(31,31,31,.08);
       border-radius: 18px;
-      background: rgba(255,255,255,.88);
-      padding: 14px;
+      background: rgba(255,255,255,.98);
+      padding: 16px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      min-height: 134px;
+      gap: 12px;
+      min-height: 148px;
+      box-shadow: 0 12px 24px rgba(15,23,42,.03);
     }}
     .queue-card.current {{
-      border-color: rgba(255,130,0,.28);
+      border-color: rgba(255,130,0,.34);
       background:
-        radial-gradient(circle at 12% 14%, rgba(255,130,0,.14), rgba(255,130,0,0) 24%),
-        rgba(255,244,232,.94);
+        radial-gradient(circle at 12% 14%, rgba(255,130,0,.12), rgba(255,130,0,0) 24%),
+        rgba(255,255,255,.98);
+      box-shadow: 0 16px 34px rgba(249,115,0,.08);
     }}
     .queue-card-top {{
       display: flex;
@@ -3131,10 +3191,8 @@ def page_html() -> str:
       gap: 10px;
     }}
     .queue-index {{
-      font-size: 11px;
+      font-size: 13px;
       font-weight: 800;
-      letter-spacing: .08em;
-      text-transform: uppercase;
       color: #FF8200;
     }}
     .queue-status {{
@@ -3142,10 +3200,8 @@ def page_html() -> str:
       align-items: center;
       border-radius: 999px;
       padding: 6px 10px;
-      font-size: 11px;
+      font-size: 12px;
       font-weight: 800;
-      letter-spacing: .06em;
-      text-transform: uppercase;
     }}
     .queue-status.waiting {{
       color: var(--wait);
@@ -3165,22 +3221,27 @@ def page_html() -> str:
     }}
     .queue-title {{
       margin: 0;
-      font-size: 16px;
+      font-size: 17px;
       line-height: 1.28;
       letter-spacing: -.02em;
       color: var(--ink);
     }}
     .queue-url {{
-      font-size: 12px;
+      font-size: 13px;
       line-height: 1.55;
-      color: #FF8200;
-      opacity: .88;
+      color: var(--muted);
       word-break: break-all;
     }}
     .queue-stage {{
-      font-size: 13px;
+      font-size: 15px;
       line-height: 1.6;
-      color: var(--muted);
+      color: var(--ink);
+      font-weight: 600;
+    }}
+    .queue-link-icon {{
+      font-size: 13px;
+      color: rgba(31,31,31,.42);
+      margin-right: 8px;
     }}
     .queue-error {{
       font-size: 12px;
@@ -3731,7 +3792,19 @@ def page_html() -> str:
         font-size: 15px;
         max-width: 24ch;
       }}
-      .step-list {{ grid-template-columns: 1fr 1fr; }}
+      .progress-top {{
+        align-items: flex-start;
+      }}
+      .progress-percent {{
+        font-size: 16px;
+      }}
+      .step-list {{ grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 0; }}
+      .step-pill::before {{
+        top: 18px;
+      }}
+      .step-pill:nth-child(4n+1)::before {{
+        display: none;
+      }}
       .queue-list {{ grid-template-columns: 1fr; }}
     }}
   </style>
@@ -3997,6 +4070,20 @@ def page_html() -> str:
       const title = String(item?.title || "").trim();
       if (title) return title;
       return parseVideoDisplayName(item?.video_url || "", idx);
+    }}
+
+    function copyText(text, successMessage = "已复制") {{
+      const value = String(text || "").trim();
+      if (!value) return;
+      if (navigator.clipboard?.writeText) {{
+        navigator.clipboard.writeText(value).then(() => {{
+          showToast("复制成功", successMessage);
+        }}).catch(() => {{
+          showToast("复制失败", "请稍后重试。");
+        }});
+        return;
+      }}
+      showToast("复制失败", "当前环境不支持自动复制。");
     }}
 
     function itemState(item) {{
@@ -4370,17 +4457,28 @@ def page_html() -> str:
       const running = items.filter((item) => itemState(item) === "running").length;
       const waiting = Math.max(0, total - completed - failed - running);
       const currentItem = findCurrentItem(items);
+      if (!currentItem && data.status === "completed") return "";
+      const currentIndex = currentItem ? ((items.indexOf(currentItem) >= 0 ? items.indexOf(currentItem) : 0) + 1) : 0;
+      const stageLabel = STAGE_LABELS[data.stage] || STAGE_LABELS[currentItem?.stage] || "等待拆解";
+      const stageMessage = data.stage_message || currentItem?.stage_message || data.message || "任务已经创建，系统会按顺序逐条拆解。";
       const subtitle = currentItem
         ? `当前正在拆解 ${{displayVideoName(currentItem, currentItem.index || 0)}}，其余任务会按照提交顺序继续排队。`
         : (data.status === "completed"
             ? "这批任务已经跑完了，你可以直接查看已完成脚本。"
             : "任务已经创建，系统会按顺序逐条拆解。");
+      const subtitleNode = currentItem
+        ? `<a class="batch-overview-subtitle" href="${{escapeHtml(currentItem.video_url || "")}}" target="_blank" rel="noreferrer">${{escapeHtml(currentItem.video_url || "")}}</a>`
+        : `<div class="focus-note">${{escapeHtml(subtitle)}}</div>`;
       return `
         <section class="batch-overview">
           <div class="batch-overview-top">
             <div class="batch-overview-copy">
-              <div class="batch-overview-title">${{currentItem ? escapeHtml(displayVideoName(currentItem, currentItem.index || 0)) : "批量任务进度"}}</div>
-              <div class="batch-overview-subtitle">${{currentItem ? `<a class="focus-url" href="${{escapeHtml(currentItem.video_url || "")}}" target="_blank" rel="noreferrer">${{escapeHtml(currentItem.video_url || "")}}</a>` : escapeHtml(subtitle)}}</div>
+              <div class="batch-overview-title">${{currentItem ? escapeHtml(displayVideoName(currentItem, currentIndex - 1)) : "批量任务进度"}}</div>
+              ${{subtitleNode}}
+              <div class="batch-job-meta">
+                <span>任务 ID：${{escapeHtml(data.id || "")}}</span>
+                <button class="job-copy-btn" type="button" data-copy-text="${{escapeHtml(data.id || "")}}" aria-label="复制任务 ID">⧉</button>
+              </div>
             </div>
             <span class="status ${{data.status === "completed" ? "status-completed" : data.status === "failed" ? "status-failed" : data.status === "running" ? "status-running" : "status-queued"}}">${{escapeHtml(data.status || "queued")}}</span>
           </div>
@@ -4391,8 +4489,8 @@ def page_html() -> str:
             <span class="batch-chip">已完成 ${{completed}}</span>
             <span class="batch-chip">失败 ${{failed}}</span>
           </div>
-          <div class="focus-note">${{escapeHtml(data.stage_message || data.message || subtitle)}}</div>
-          ${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}
+          <div class="focus-note">Video ${{currentIndex || 1}}/${{total || 1}} · ${{escapeHtml(stageLabel)}}</div>
+          ${{progressMarkup(data.stage || "queued", stageMessage, data.id)}}
         </section>
       `;
     }}
@@ -4412,7 +4510,7 @@ def page_html() -> str:
               <span class="queue-status ${{state}}">${{itemStateLabel(item)}}</span>
             </div>
             <h4 class="queue-title">${{escapeHtml(title)}}</h4>
-            <div class="queue-url">${{escapeHtml(item.video_url || "")}}</div>
+            <div class="queue-url"><span class="queue-link-icon">🔗</span>${{escapeHtml(item.video_url || "")}}</div>
             <div class="queue-stage">${{escapeHtml(stageLabel)}}</div>
             ${{error}}
           </article>
@@ -4422,7 +4520,7 @@ def page_html() -> str:
         <section class="queue-shell">
           <div class="queue-header">
             <h3>任务队列</h3>
-            <p>这里会按提交顺序显示哪些视频正在拆解、哪些还在等待、哪些已经完成或失败。</p>
+            <p>按提交顺序显示任务执行状态与排队信息</p>
           </div>
           <div class="queue-list">${{cards}}</div>
         </section>
@@ -4493,18 +4591,21 @@ def page_html() -> str:
         const keyIndex = STAGE_ORDER.indexOf(key);
         if (stage === "completed" || index > keyIndex) cls += " done";
         else if (stage === key || (stage === "starting" && key === "download")) cls += " active";
-        return `<div class="${{cls}}">${{STAGE_LABELS[key]}}</div>`;
+        const bubble = stage === "completed" || index > keyIndex ? "✓" : `${{keyIndex + 1}}`;
+        return `<div class="${{cls}}"><span class="step-bubble">${{bubble}}</span><span>${{STAGE_LABELS[key]}}</span></div>`;
       }}).join("");
       return `
         <div class="progress-wrap">
           <div class="progress-top">
-            <span>${{escapeHtml(displayMessage)}}</span>
-            <span>${{percent}}%</span>
+            <div class="progress-top-copy">
+              <span class="progress-kicker">${{escapeHtml(STAGE_LABELS[stage] || "处理中")}}</span>
+              <span class="progress-stage-copy">${{escapeHtml(displayMessage)}}</span>
+            </div>
+            <span class="progress-percent">${{percent}}%</span>
           </div>
           <div class="progress-rail"><div class="progress-fill" style="width:${{percent}}%"></div></div>
           <div class="step-list">${{steps}}</div>
         </div>
-        <small>任务 ID：<code>${{escapeHtml(jobId)}}</code></small>
       `;
     }}
 
@@ -4519,7 +4620,7 @@ def page_html() -> str:
         const completedMessage = reviewRunning
           ? "主分析已完成，复盘任务仍在继续。"
           : (data.message || "分析完成。");
-        setStatus(`<span class="status status-completed">已完成</span><br><br>${{progressMarkup("completed", completedMessage, data.id)}}${{batchResults}}`, true);
+        setStatus(batchResults || `<div class="status-empty"><div class="status-empty-title">分析完成</div><div class="status-empty-copy">${{escapeHtml(completedMessage)}}</div></div>`, true);
         if (reviewRunning) {{
           setTimeout(() => pollJob(jobId), 2500);
         }}
@@ -4589,6 +4690,11 @@ def page_html() -> str:
     }}, true);
 
     document.addEventListener("click", (event) => {{
+      const copyBtn = event.target.closest("[data-copy-text]");
+      if (copyBtn) {{
+        copyText(copyBtn.getAttribute("data-copy-text") || "", "任务 ID 已复制");
+        return;
+      }}
       const expandBtn = event.target.closest("[data-item-expand]");
       if (expandBtn) {{
         const mode = expandBtn.getAttribute("data-item-expand") || "none";
