@@ -13,7 +13,7 @@ import threading
 import time
 import urllib.parse
 from collections import Counter, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -58,6 +58,7 @@ MODEL_CANDIDATES = [
     "gemini-2.5-flash",
     "gemini-3-flash-preview",
 ]
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 job_lock = threading.Lock()
 jobs: dict[str, dict[str, Any]] = {}
@@ -103,6 +104,21 @@ except Exception:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def format_beijing_time(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        normalized = text.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        compact = text[:19].replace("T", " ")
+        return compact
 
 
 def html_escape(value: object) -> str:
@@ -438,6 +454,7 @@ def detect_content_type_decision(
     *,
     existing_type: str = "",
     existing_source: str = "",
+    use_llm: bool = True,
 ) -> dict[str, Any]:
     normalized_existing_type = str(existing_type or "").strip()
     normalized_existing_source = str(existing_source or "").strip().lower()
@@ -448,17 +465,18 @@ def detect_content_type_decision(
             "content_type_reasoning": "Manual override",
             "content_type_confidence": "manual",
         }
-    llm_result = classify_content_type_with_llm(script, bundle, GOOGLE_API_KEY, unique_models(*MODEL_CANDIDATES))
-    if llm_result:
-        content_type = llm_result.get("content_type") or DEFAULT_CONTENT_TYPE
-        confidence = llm_result.get("confidence") or "low"
-        if content_type != DEFAULT_CONTENT_TYPE or confidence in {"high", "medium"}:
-            return {
-                "content_type": content_type,
-                "content_type_source": "auto",
-                "content_type_reasoning": llm_result.get("reasoning") or "LLM semantic classification",
-                "content_type_confidence": confidence,
-            }
+    if use_llm:
+        llm_result = classify_content_type_with_llm(script, bundle, GOOGLE_API_KEY, unique_models(*MODEL_CANDIDATES))
+        if llm_result:
+            content_type = llm_result.get("content_type") or DEFAULT_CONTENT_TYPE
+            confidence = llm_result.get("confidence") or "low"
+            if content_type != DEFAULT_CONTENT_TYPE or confidence in {"high", "medium"}:
+                return {
+                    "content_type": content_type,
+                    "content_type_source": "auto",
+                    "content_type_reasoning": llm_result.get("reasoning") or "LLM semantic classification",
+                    "content_type_confidence": confidence,
+                }
     content_type = keyword_fallback_content_type(script, bundle)
     return {
         "content_type": content_type,
@@ -492,6 +510,7 @@ def detect_content_type_decision_for_output(
     *,
     existing_type: str = "",
     existing_source: str = "",
+    use_llm: bool = True,
 ) -> dict[str, Any]:
     script_json = script or read_json(output_dir / "script_table.json") or {}
     bundle_json = bundle or read_json(output_dir / "evidence_bundle.json") or {}
@@ -505,6 +524,7 @@ def detect_content_type_decision_for_output(
         bundle_json,
         existing_type=existing_type,
         existing_source=existing_source,
+        use_llm=use_llm,
     )
 
 
@@ -1067,6 +1087,7 @@ def sync_library_from_jobs() -> None:
                         read_json(output_dir / "evidence_bundle.json"),
                         existing_type=job.get("content_type") or "",
                         existing_source=job.get("content_type_source") or "",
+                        use_llm=False,
                     ),
                     "entry_id": parent_job_id,
                     "parent_job_id": parent_job_id,
@@ -1098,6 +1119,7 @@ def sync_library_from_jobs() -> None:
                 read_json(output_dir / "evidence_bundle.json"),
                 existing_type=item.get("content_type") or "",
                 existing_source=item.get("content_type_source") or "",
+                use_llm=False,
             )
             item["content_type"] = decision["content_type"]
             item["content_type_source"] = decision["content_type_source"]
@@ -1761,7 +1783,7 @@ def start_review_job(item_id: str, feedback: str) -> tuple[bool, str]:
     return True, parent_job_id
 
 
-def persist_library_entry(parent_job_id: str, item: dict[str, Any]) -> None:
+def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True) -> None:
     script = item.get("result_json") or {}
     output_dir = RESULTS_ROOT / item["id"]
     bundle = read_json(output_dir / "evidence_bundle.json")
@@ -1770,6 +1792,7 @@ def persist_library_entry(parent_job_id: str, item: dict[str, Any]) -> None:
         bundle,
         existing_type=item.get("content_type") or "",
         existing_source=item.get("content_type_source") or "",
+        use_llm=use_llm,
     )
     entry = {
         "entry_id": item["id"],
@@ -1920,7 +1943,7 @@ def regenerate_item_outputs(
                 save_jobs()
             item = jobs[parent_job_id]["items"][item_index]
         if persist_library:
-            persist_library_entry(parent_job_id, item)
+            persist_library_entry(parent_job_id, item, use_llm=False)
         return public_item_view(item)
 
     script_json = enforce_chinese_dialogue_translation(
@@ -4195,7 +4218,7 @@ def library_html() -> str:
     counts = Counter(entry.get("content_type") or DEFAULT_CONTENT_TYPE for entry in entries)
     ordered_counts = [(label, counts.get(label, 0)) for label in LIBRARY_FILTER_LABELS]
     filter_options = "".join(
-        f"<option value='{html_escape(label)}'>{html_escape(label)} ({count})</option>"
+        f"<option value='{html_escape(label)}' data-content-type-option='{html_escape(label)}'>{html_escape(label)} ({count})</option>"
         for label, count in ordered_counts
     )
     content_type_options = "".join(
@@ -4203,21 +4226,21 @@ def library_html() -> str:
         for label in LIBRARY_FILTER_LABELS
     )
     chips = "".join(
-        f"<span class='batch-chip'>{html_escape(label)} · {count}</span>"
+        f"<span class='batch-chip' data-content-type-chip='{html_escape(label)}'>{html_escape(label)} · {count}</span>"
         for label, count in ordered_counts
     ) or "<span class='batch-chip'>No scripts yet</span>"
     cards = []
     for entry in entries:
         source_video_url = f"/results/{entry.get('entry_id')}/source.mp4"
-        created_at = str(entry.get("created_at") or "")[:19].replace("T", " ")
+        created_at = format_beijing_time(entry.get("created_at") or "")
         content_type = entry.get("content_type") or DEFAULT_CONTENT_TYPE
         content_type_source = entry.get("content_type_source") or "auto"
-        manual_badge = "<span class='library-time'>Manual</span>" if content_type_source == "manual" else ""
+        manual_badge = "<span class='library-time' data-manual-badge='true'>Manual</span>" if content_type_source == "manual" else "<span class='library-time' data-manual-badge='true' hidden>Manual</span>"
         cards.append(
             f"<article class='library-card' data-content-type='{html_escape(content_type)}'>"
             "<div class='library-card-top'>"
             f"<button class='batch-chip batch-chip-button' type='button' data-edit-content-type='{html_escape(entry.get('entry_id') or '')}' data-current-content-type='{html_escape(content_type)}'>{html_escape(content_type)}</button>"
-            f"<span class='library-time'>{html_escape(created_at or 'Unknown time')}</span>"
+            f"<span class='library-time' data-created-at>{html_escape(created_at or 'Unknown time')}</span>"
             "</div>"
             f"{manual_badge}"
             f"<a class='video-origin-link' href='{html_escape(entry.get('video_url') or '')}' target='_blank' rel='noreferrer'>{html_escape(entry.get('video_url') or '')}</a>"
@@ -4418,6 +4441,7 @@ def library_html() -> str:
     const contentTypeSelect = document.getElementById("content-type-select");
     const contentTypeCancel = document.getElementById("content-type-cancel");
     const contentTypeSave = document.getElementById("content-type-save");
+    const libraryFilterLabels = {json.dumps(LIBRARY_FILTER_LABELS, ensure_ascii=False)};
     let pendingDeleteButton = null;
     let pendingExportChoice = null;
     let pendingContentTypeEntryId = "";
@@ -4463,6 +4487,42 @@ def library_html() -> str:
       contentTypeSelect.value = currentType || "{DEFAULT_CONTENT_TYPE}";
       contentTypeOverlay.classList.add("open");
       contentTypeOverlay.setAttribute("aria-hidden", "false");
+    }}
+
+    function refreshLibraryCounts() {{
+      const counts = Object.fromEntries(libraryFilterLabels.map((label) => [label, 0]));
+      document.querySelectorAll(".library-card").forEach((card) => {{
+        const label = card.getAttribute("data-content-type") || "{DEFAULT_CONTENT_TYPE}";
+        counts[label] = (counts[label] || 0) + 1;
+      }});
+      document.querySelectorAll("[data-content-type-option]").forEach((option) => {{
+        const label = option.getAttribute("data-content-type-option") || "";
+        option.textContent = `${{label}} (${{counts[label] || 0}})`;
+      }});
+      document.querySelectorAll("[data-content-type-chip]").forEach((chip) => {{
+        const label = chip.getAttribute("data-content-type-chip") || "";
+        chip.textContent = `${{label}} · ${{counts[label] || 0}}`;
+      }});
+    }}
+
+    function applyLibraryEntryUpdate(entry) {{
+      if (!entry || !entry.entry_id) return;
+      const card = document.querySelector(`.library-card button[data-edit-content-type="${{entry.entry_id}}"]`)?.closest(".library-card");
+      if (!card) return;
+      const label = entry.content_type || "{DEFAULT_CONTENT_TYPE}";
+      card.setAttribute("data-content-type", label);
+      const button = card.querySelector("[data-edit-content-type]");
+      if (button) {{
+        button.textContent = label;
+        button.setAttribute("data-current-content-type", label);
+      }}
+      const manualBadge = card.querySelector("[data-manual-badge]");
+      if (manualBadge) {{
+        const isManual = (entry.content_type_source || "") === "manual";
+        manualBadge.hidden = !isManual;
+      }}
+      refreshLibraryCounts();
+      applyLibraryFilter();
     }}
 
     async function downloadScript(url, button) {{
@@ -4578,7 +4638,10 @@ def library_html() -> str:
           }});
           const data = await response.json();
           if (!response.ok) throw new Error(data.error || "Update failed");
-          window.location.reload();
+          applyLibraryEntryUpdate(data.entry || null);
+          closeContentTypeOverlay();
+          contentTypeSave.textContent = originalText;
+          contentTypeSave.disabled = false;
         }} catch (error) {{
           alert("修改分类失败，请重试。");
           contentTypeSave.textContent = originalText;
