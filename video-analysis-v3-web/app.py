@@ -3213,6 +3213,12 @@ def page_html() -> str:
       line-height: 1.6;
       color: var(--muted);
     }}
+    .detail-controls {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+    }}
     .item-stack {{
       display: flex;
       flex-direction: column;
@@ -3805,6 +3811,7 @@ def page_html() -> str:
     let toastTimer = null;
     let pendingExportChoice = null;
     const reviewTracker = Object.create(null);
+    const itemOpenState = Object.create(null);
     const STAGE_ORDER = ["queued", "download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output", "completed"];
     const STAGE_LABELS = {{
       queued: "等待拆解",
@@ -4029,7 +4036,6 @@ def page_html() -> str:
         <details class="editor-disclosure">
           <summary class="editor-summary">
             <span>直接修改</span>
-            <span class="editor-summary-copy">展开后可直接修改标题、脚本行和核心爆点 <span class="editor-language-note">${{currentLanguageLabel(item)}}</span></span>
           </summary>
           <div class="editor-shell" data-editor-item="${{item.id}}" data-editor-lang="${{escapeHtml(item.display_language || "zh")}}">
             <div class="editor-field">
@@ -4265,39 +4271,28 @@ def page_html() -> str:
 
     function renderItemCard(item, idx, open = false) {{
       const title = escapeHtml(item.title || `视频 ${{idx + 1}}`);
-      const contentType = item.content_type ? `<span class="batch-chip">${{escapeHtml(item.content_type)}}</span>` : "";
-      const languageChip = `<span class="batch-chip">${{escapeHtml(currentLanguageLabel(item))}}</span>`;
       const editor = buildEditorMarkup(item);
       const review = buildReviewMarkup(item);
       const toggleButton = item.display_language === "pt"
         ? `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="zh">切回中文</button>`
         : `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="pt">转换成葡语</button>`;
       const links = [
-        item.html_url ? `<a class="action-link" href="${{item.html_url}}" target="_blank" rel="noreferrer">打开预览</a>` : "",
         (item.zh_docx_url || item.pt_docx_url) ? `<button class="action-link" type="button" data-open-export-modal="${{escapeHtml(item.zh_docx_url || "")}}" data-open-export-modal-pt="${{escapeHtml(item.pt_docx_url || "")}}">导出脚本</button>` : "",
         toggleButton,
       ].join("");
       const iframe = item.html_url ? `<iframe src="${{item.html_url}}" loading="lazy"></iframe>` : "";
       const error = item.error ? `<code>${{escapeHtml(item.error)}}</code>` : "";
       return `
-        <details class="item-card" ${{open ? "open" : ""}}>
+        <details class="item-card" data-item-id="${{item.id}}" ${{open ? "open" : ""}}>
           <summary>
             <span>${{idx + 1}}. ${{title}}</span>
-            <span>${{escapeHtml(item.status || "")}}</span>
+            <span>${{escapeHtml(item.status === "completed" ? "已完成" : item.status === "failed" ? "失败" : item.status || "")}}</span>
           </summary>
-          <div class="item-meta">
-            <span>${{escapeHtml(item.stage_message || "")}}</span>
-            ${{contentType}}
-            ${{languageChip}}
-          </div>
           <div class="item-body">
             <div class="item-sections">
               ${{review}}
               ${{editor}}
-              <div class="item-actions-shell">
-                <div class="editor-label">预览与导出</div>
-                <div class="link-row">${{links}}</div>
-              </div>
+              <div class="item-actions-shell"><div class="link-row">${{links}}</div></div>
             </div>
             ${{error}}
             ${{iframe}}
@@ -4375,12 +4370,21 @@ def page_html() -> str:
     function renderDetailResults(items) {{
       const detailItems = (items || []).filter((item) => item.status === "completed" || item.status === "failed");
       if (!detailItems.length) return "";
-      const cards = detailItems.map((item, idx) => renderItemCard(item, idx, idx === 0)).join("");
+      const controls = detailItems.length > 1 ? `
+        <div class="detail-controls">
+          <button class="action-link" type="button" data-item-expand="all">全部展开</button>
+          <button class="action-link" type="button" data-item-expand="none">全部收起</button>
+        </div>
+      ` : "";
+      const cards = detailItems.map((item, idx) => {{
+        const open = Object.prototype.hasOwnProperty.call(itemOpenState, item.id) ? !!itemOpenState[item.id] : false;
+        return renderItemCard(item, idx, open);
+      }}).join("");
       return `
         <section class="detail-section">
           <div class="detail-header">
             <h3>结果详情</h3>
-            <p>已经完成或失败的任务会在这里展开，方便你继续预览、导出、复盘和人工修改。</p>
+            ${{controls}}
           </div>
           <div class="item-stack">${{cards}}</div>
         </section>
@@ -4512,7 +4516,27 @@ def page_html() -> str:
       }}
     }});
 
+    document.addEventListener("toggle", (event) => {{
+      const detail = event.target;
+      if (!(detail instanceof HTMLDetailsElement)) return;
+      if (!detail.classList.contains("item-card")) return;
+      const itemId = detail.getAttribute("data-item-id") || "";
+      if (!itemId) return;
+      itemOpenState[itemId] = detail.open;
+    }}, true);
+
     document.addEventListener("click", (event) => {{
+      const expandBtn = event.target.closest("[data-item-expand]");
+      if (expandBtn) {{
+        const mode = expandBtn.getAttribute("data-item-expand") || "none";
+        document.querySelectorAll(".item-card").forEach((detail) => {{
+          if (!(detail instanceof HTMLDetailsElement)) return;
+          detail.open = mode === "all";
+          const itemId = detail.getAttribute("data-item-id") || "";
+          if (itemId) itemOpenState[itemId] = detail.open;
+        }});
+        return;
+      }}
       const exportCancel = event.target.closest("#export-choice-cancel");
       if (exportCancel) {{
         closeExportChoice();
