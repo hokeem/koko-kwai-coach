@@ -2981,11 +2981,238 @@ def page_html() -> str:
       background: rgba(255,255,255,.84);
       border: 1px solid rgba(255,130,0,.16);
     }}
+    .batch-dashboard {{
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      margin-top: 8px;
+    }}
+    .batch-overview {{
+      border: 1px solid rgba(255,130,0,.16);
+      border-radius: 24px;
+      background: rgba(255,255,255,.82);
+      padding: 18px;
+      box-shadow: 0 12px 34px rgba(249,115,0,.08);
+    }}
+    .batch-overview-top {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }}
+    .batch-overview-copy {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+    }}
+    .batch-overview-title {{
+      font-size: 22px;
+      line-height: 1.08;
+      letter-spacing: -.04em;
+      color: var(--ink);
+      font-weight: 700;
+    }}
+    .batch-overview-subtitle {{
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--muted);
+      max-width: 60ch;
+    }}
+    .batch-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 10px;
+    }}
+    .focus-card {{
+      border: 1px solid rgba(255,130,0,.18);
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at 10% 10%, rgba(255,130,0,.16), rgba(255,130,0,0) 24%),
+        rgba(255,255,255,.86);
+      padding: 18px;
+      box-shadow: 0 16px 40px rgba(249,115,0,.10);
+    }}
+    .focus-label {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 7px 11px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: #FF8200;
+      background: rgba(255,255,255,.92);
+      border: 1px solid rgba(255,130,0,.16);
+      margin-bottom: 12px;
+    }}
+    .focus-title {{
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.14;
+      letter-spacing: -.04em;
+      color: var(--ink);
+    }}
+    .focus-url {{
+      display: inline-block;
+      margin-top: 10px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #FF8200;
+      text-decoration: none;
+      word-break: break-all;
+    }}
+    .focus-note {{
+      margin-top: 10px;
+      font-size: 14px;
+      line-height: 1.65;
+      color: var(--muted);
+    }}
+    .queue-shell {{
+      border: 1px solid rgba(255,130,0,.16);
+      border-radius: 24px;
+      background: rgba(255,255,255,.78);
+      padding: 18px;
+    }}
+    .queue-header {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }}
+    .queue-header h3 {{
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: -.03em;
+      color: var(--ink);
+    }}
+    .queue-header p {{
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+    }}
+    .queue-list {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 12px;
+    }}
+    .queue-card {{
+      border: 1px solid rgba(255,130,0,.14);
+      border-radius: 18px;
+      background: rgba(255,255,255,.88);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 134px;
+    }}
+    .queue-card.current {{
+      border-color: rgba(255,130,0,.28);
+      background:
+        radial-gradient(circle at 12% 14%, rgba(255,130,0,.14), rgba(255,130,0,0) 24%),
+        rgba(255,244,232,.94);
+    }}
+    .queue-card-top {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }}
+    .queue-index {{
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: #FF8200;
+    }}
+    .queue-status {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }}
+    .queue-status.waiting {{
+      color: var(--wait);
+      background: rgba(147,95,20,.12);
+    }}
+    .queue-status.running {{
+      color: #FF8200;
+      background: rgba(255,130,0,.12);
+    }}
+    .queue-status.completed {{
+      color: var(--ok);
+      background: rgba(21,115,71,.12);
+    }}
+    .queue-status.failed {{
+      color: var(--err);
+      background: rgba(180,35,24,.12);
+    }}
+    .queue-title {{
+      margin: 0;
+      font-size: 16px;
+      line-height: 1.28;
+      letter-spacing: -.02em;
+      color: var(--ink);
+    }}
+    .queue-url {{
+      font-size: 12px;
+      line-height: 1.55;
+      color: #FF8200;
+      opacity: .88;
+      word-break: break-all;
+    }}
+    .queue-stage {{
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+    }}
+    .queue-error {{
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--err);
+    }}
+    .detail-section {{
+      border: 1px solid rgba(255,130,0,.16);
+      border-radius: 24px;
+      background: rgba(255,255,255,.74);
+      padding: 18px;
+    }}
+    .detail-header {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }}
+    .detail-header h3 {{
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: -.03em;
+      color: var(--ink);
+    }}
+    .detail-header p {{
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+    }}
     .item-stack {{
       display: flex;
       flex-direction: column;
       gap: 14px;
-      margin-top: 12px;
     }}
     .item-card {{
       border: 1px solid rgba(255,130,0,.16);
@@ -3482,6 +3709,7 @@ def page_html() -> str:
         max-width: 24ch;
       }}
       .step-list {{ grid-template-columns: 1fr 1fr; }}
+      .queue-list {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -3574,31 +3802,31 @@ def page_html() -> str:
     const reviewTracker = Object.create(null);
     const STAGE_ORDER = ["queued", "download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output", "completed"];
     const STAGE_LABELS = {{
-      queued: "Queued",
-      download: "Download",
-      media_prep: "Media prep",
-      gemini_analysis: "Gemini analysis",
-      v2_analysis: "V2 analysis",
-      consistency_audit: "Consistency audit",
-      targeted_recheck: "Targeted recheck",
-      arbitration: "Arbitration",
-      final_output: "Final output",
-      completed: "Completed",
-      failed: "Failed",
-      starting: "Starting"
+      queued: "等待拆解",
+      download: "下载视频",
+      media_prep: "媒体预处理",
+      gemini_analysis: "AI 主分析",
+      v2_analysis: "本地分析",
+      consistency_audit: "一致性审查",
+      targeted_recheck: "条件复核",
+      arbitration: "结果仲裁",
+      final_output: "生成脚本",
+      completed: "已完成",
+      failed: "失败",
+      starting: "准备中"
     }};
     const STAGE_COPY = {{
-      queued: "Task created. Preparing analysis.",
-      starting: "Preparing the workflow.",
-      download: "Downloading the source video.",
-      media_prep: "Reading the source video structure.",
-      gemini_analysis: "Running the Gemini global analysis pass.",
-      v2_analysis: "Running the v2 local analysis pass.",
-      consistency_audit: "Comparing both tracks and checking story logic.",
-      targeted_recheck: "Rechecking only the risky evidence windows.",
-      arbitration: "Selecting the safest story spine.",
-      final_output: "Building the final script, export, and HTML.",
-      completed: "Analysis completed."
+      queued: "任务已创建，正在排队等待拆解。",
+      starting: "正在准备分析流程。",
+      download: "正在下载源视频。",
+      media_prep: "正在读取视频结构与基础信息。",
+      gemini_analysis: "正在进行 AI 主分析。",
+      v2_analysis: "正在进行本地分析与对照。",
+      consistency_audit: "正在检查双轨结论是否一致。",
+      targeted_recheck: "正在复核风险较高的片段。",
+      arbitration: "正在选择最稳妥的故事主轴。",
+      final_output: "正在生成最终脚本、预览和导出文件。",
+      completed: "分析完成。"
     }};
     const REVIEW_STAGE_ORDER = ["queued", "plan", "recheck", "rebuild", "completed"];
     const REVIEW_STAGE_LABELS = {{
@@ -3667,6 +3895,51 @@ def page_html() -> str:
 
     function escapeHtml(value) {{
       return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }}
+
+    function parseVideoDisplayName(url, idx = 0) {{
+      const fallback = `Video ${{idx + 1}}`;
+      const text = String(url || "").trim();
+      if (!text) return fallback;
+      try {{
+        const parsed = new URL(text);
+        const parts = parsed.pathname.split("/").filter(Boolean);
+        const handle = parts.find((part) => part.startsWith("@")) || "";
+        const videoIndex = parts.indexOf("video");
+        const videoId = videoIndex >= 0 && parts[videoIndex + 1] ? parts[videoIndex + 1] : "";
+        if (handle && videoId) return `${{handle}} / ${{videoId}}`;
+        if (handle) return handle;
+        if (videoId) return `video / ${{videoId}}`;
+        return parsed.hostname.replace(/^www\\./, "");
+      }} catch (error) {{
+        return fallback;
+      }}
+    }}
+
+    function displayVideoName(item, idx = 0) {{
+      const title = String(item?.title || "").trim();
+      if (title) return title;
+      return parseVideoDisplayName(item?.video_url || "", idx);
+    }}
+
+    function itemState(item) {{
+      const status = String(item?.status || "").trim();
+      if (status === "completed") return "completed";
+      if (status === "failed") return "failed";
+      if (status === "running") return "running";
+      return "waiting";
+    }}
+
+    function itemStateLabel(item) {{
+      const state = itemState(item);
+      if (state === "completed") return "已完成";
+      if (state === "failed") return "失败";
+      if (state === "running") return "正在拆解";
+      return "等待拆解";
+    }}
+
+    function findCurrentItem(items) {{
+      return (items || []).find((item) => itemState(item) === "running") || null;
     }}
 
     function collectUrls() {{
@@ -4019,17 +4292,125 @@ def page_html() -> str:
       `;
     }}
 
+    function renderBatchOverview(data, items) {{
+      const total = data.total_items || items.length || 0;
+      const completed = data.completed_items || 0;
+      const failed = data.failed_items || 0;
+      const running = items.filter((item) => itemState(item) === "running").length;
+      const waiting = Math.max(0, total - completed - failed - running);
+      const currentItem = findCurrentItem(items);
+      const subtitle = currentItem
+        ? `当前正在拆解 ${{displayVideoName(currentItem, currentItem.index || 0)}}，其余任务会按照提交顺序继续排队。`
+        : (data.status === "completed"
+            ? "这批任务已经跑完了，你可以直接查看已完成脚本。"
+            : "任务已经创建，系统会按顺序逐条拆解。");
+      return `
+        <section class="batch-overview">
+          <div class="batch-overview-top">
+            <div class="batch-overview-copy">
+              <div class="batch-overview-title">Batch analysis dashboard</div>
+              <div class="batch-overview-subtitle">${{escapeHtml(subtitle)}}</div>
+            </div>
+            <span class="status ${{data.status === "completed" ? "status-completed" : data.status === "failed" ? "status-failed" : data.status === "running" ? "status-running" : "status-queued"}}">${{escapeHtml(data.status || "queued")}}</span>
+          </div>
+          <div class="batch-meta">
+            <span class="batch-chip">总数 ${{total}}</span>
+            <span class="batch-chip">正在拆解 ${{running}}</span>
+            <span class="batch-chip">等待拆解 ${{waiting}}</span>
+            <span class="batch-chip">已完成 ${{completed}}</span>
+            <span class="batch-chip">失败 ${{failed}}</span>
+          </div>
+          ${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}
+        </section>
+      `;
+    }}
+
+    function renderCurrentFocus(items) {{
+      const currentItem = findCurrentItem(items);
+      if (!currentItem) return "";
+      const title = displayVideoName(currentItem, currentItem.index || 0);
+      const stageLabel = STAGE_LABELS[currentItem.stage] || itemStateLabel(currentItem);
+      const stageMessage = currentItem.stage_message || STAGE_COPY[currentItem.stage] || "正在拆解。";
+      const stageIndex = Math.max(0, STAGE_ORDER.indexOf(currentItem.stage || "queued"));
+      const percent = Math.max(8, Math.round(((stageIndex + 1) / STAGE_ORDER.length) * 100));
+      return `
+        <section class="focus-card">
+          <div class="focus-label">Now analyzing</div>
+          <h3 class="focus-title">${{escapeHtml(title)}}</h3>
+          <a class="focus-url" href="${{escapeHtml(currentItem.video_url || "")}}" target="_blank" rel="noreferrer">${{escapeHtml(currentItem.video_url || "")}}</a>
+          <div class="batch-meta" style="margin-top:14px;">
+            <span class="batch-chip">${{escapeHtml(stageLabel)}}</span>
+            <span class="batch-chip">顺位 ${{Number(currentItem.index || 0) + 1}}</span>
+          </div>
+          <div class="focus-note">${{escapeHtml(stageMessage)}}</div>
+          <div class="progress-wrap">
+            <div class="progress-top">
+              <span>${{escapeHtml(stageMessage)}}</span>
+              <span>${{percent}}%</span>
+            </div>
+            <div class="progress-rail"><div class="progress-fill" style="width:${{percent}}%"></div></div>
+          </div>
+        </section>
+      `;
+    }}
+
+    function renderQueueList(items) {{
+      const cards = (items || []).map((item, idx) => {{
+        const state = itemState(item);
+        const title = displayVideoName(item, idx);
+        const stageLabel = state === "waiting"
+          ? `等待拆解 · 排队第 ${{idx + 1}} 位`
+          : (item.stage_message || STAGE_LABELS[item.stage] || itemStateLabel(item));
+        const error = item.error ? `<div class="queue-error">${{escapeHtml(item.error)}}</div>` : "";
+        return `
+          <article class="queue-card ${{state === "running" ? "current" : ""}}">
+            <div class="queue-card-top">
+              <div class="queue-index">Video ${{idx + 1}}</div>
+              <span class="queue-status ${{state}}">${{itemStateLabel(item)}}</span>
+            </div>
+            <h4 class="queue-title">${{escapeHtml(title)}}</h4>
+            <div class="queue-url">${{escapeHtml(item.video_url || "")}}</div>
+            <div class="queue-stage">${{escapeHtml(stageLabel)}}</div>
+            ${{error}}
+          </article>
+        `;
+      }}).join("");
+      return `
+        <section class="queue-shell">
+          <div class="queue-header">
+            <h3>Queue</h3>
+            <p>这里会按提交顺序显示哪些视频正在拆解、哪些还在等待、哪些已经完成或失败。</p>
+          </div>
+          <div class="queue-list">${{cards}}</div>
+        </section>
+      `;
+    }}
+
+    function renderDetailResults(items) {{
+      const detailItems = (items || []).filter((item) => item.status === "completed" || item.status === "failed");
+      if (!detailItems.length) return "";
+      const cards = detailItems.map((item, idx) => renderItemCard(item, idx, idx === 0)).join("");
+      return `
+        <section class="detail-section">
+          <div class="detail-header">
+            <h3>Detailed results</h3>
+            <p>已经完成或失败的任务会在这里展开，方便你继续预览、导出、复盘和人工修改。</p>
+          </div>
+          <div class="item-stack">${{cards}}</div>
+        </section>
+      `;
+    }}
+
     function renderBatchResults(data) {{
       const items = Array.isArray(data.items) ? data.items : [];
-      const summary = `
-        <div class="batch-summary">
-          <span class="batch-chip">Total ${{data.total_items || items.length}}</span>
-          <span class="batch-chip">Completed ${{data.completed_items || 0}}</span>
-          <span class="batch-chip">Failed ${{data.failed_items || 0}}</span>
+      return `
+        <div class="batch-dashboard">
+          ${{renderBatchOverview(data, items)}}
+          ${{renderCurrentFocus(items)}}
+          ${{renderQueueList(items)}}
+          ${{renderDetailResults(items)}}
         </div>
       `;
-      const cards = items.map((item, idx) => renderItemCard(item, idx, idx === 0)).join("");
-      return summary + `<div class="item-stack">${{cards}}</div>`;
     }}
 
     function checkReviewTransitions(items) {{
@@ -4099,13 +4480,10 @@ def page_html() -> str:
         return;
       }}
       const badge = data.status === "running" ? "status-running" : "status-queued";
-      const batchSummary = Array.isArray(data.items) && data.items.length ? `
-        <div class="batch-summary">
-          <span class="batch-chip">Total ${{data.total_items || data.items.length}}</span>
-          <span class="batch-chip">Completed ${{data.completed_items || 0}}</span>
-          <span class="batch-chip">Failed ${{data.failed_items || 0}}</span>
-        </div>` : "";
-      setStatus(`<span class="status ${{badge}}">${{data.status}}</span><br><br>${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}${{batchSummary}}`);
+      const runningMarkup = Array.isArray(data.items) && data.items.length
+        ? renderBatchResults(data)
+        : `${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}`;
+      setStatus(`<span class="status ${{badge}}">${{data.status}}</span><br><br>${{runningMarkup}}`);
       setTimeout(() => pollJob(jobId), 2500);
     }}
 
