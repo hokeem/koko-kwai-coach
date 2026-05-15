@@ -3374,27 +3374,40 @@ def page_html() -> str:
     .editor-summary {{
       list-style: none;
       cursor: pointer;
+      position: relative;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 12px;
+      justify-content: center;
       padding: 14px 16px;
       color: #FF8200;
-      font-size: 13px;
+      font-size: 15px;
       font-weight: 800;
-      letter-spacing: .04em;
-      text-transform: uppercase;
+      letter-spacing: 0;
+      text-transform: none;
+      text-align: center;
     }}
     .editor-summary::-webkit-details-marker {{
       display: none;
     }}
     .editor-summary::after {{
-      content: "＋";
-      font-size: 18px;
+      content: "▾";
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 16px;
       line-height: 1;
     }}
     .editor-disclosure[open] .editor-summary::after {{
-      content: "－";
+      content: "▴";
+    }}
+    .editor-summary-title {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      padding-right: 22px;
+      box-sizing: border-box;
     }}
     .editor-summary-copy {{
       font-size: 12px;
@@ -4078,7 +4091,7 @@ def page_html() -> str:
       return `
         <details class="editor-disclosure">
           <summary class="editor-summary">
-            <span>直接修改</span>
+            <span class="editor-summary-title">直接修改</span>
           </summary>
           <div class="editor-shell" data-editor-item="${{item.id}}" data-editor-lang="${{escapeHtml(item.display_language || "zh")}}">
             <div class="editor-field">
@@ -4115,18 +4128,22 @@ def page_html() -> str:
       const reviewState = status ? `<div class="review-note">${{escapeHtml(status)}}${{message ? ` · ${{escapeHtml(message)}}` : ""}}</div>` : "";
       const reviewProgress = buildReviewProgressMarkup(stage, status, message);
       return `
-        <div class="review-shell" data-review-item="${{item.id}}">
-          <div class="editor-label">复盘重做</div>
-          <div class="review-note">直接用自然语言告诉 Koko 这条脚本哪里理解错了。系统会拿你的反馈和原始分析结果做对照，必要时只复核关键片段，然后重新生成脚本。</div>
-          ${{editedBadge.replace("Manual edits exist", "已有人工修改")}}
-          ${{reviewedBadge.replace("Reviewed version active", "当前是复盘版本")}}
-          ${{reviewProgress}}
-          ${{reviewState}}
-          <textarea class="editor-textarea" data-review-feedback placeholder="例如：真正的核心是丈夫吹嘘自己人脉广，但连续打电话都没人来帮忙，当前故事主轴理解错了。">${{escapeHtml(feedback)}}</textarea>
-          <div class="link-row">
-            <button class="action-link" type="button" data-run-review="${{item.id}}">${{status === "running" ? "复盘中..." : "复盘重做"}}</button>
+        <details class="editor-disclosure">
+          <summary class="editor-summary">
+            <span class="editor-summary-title">复盘重做</span>
+          </summary>
+          <div class="review-shell" data-review-item="${{item.id}}">
+            <div class="review-note">直接用自然语言告诉 Koko 这条脚本哪里理解错了。系统会拿你的反馈和原始分析结果做对照，必要时只复核关键片段，然后重新生成脚本。</div>
+            ${{editedBadge.replace("Manual edits exist", "已有人工修改")}}
+            ${{reviewedBadge.replace("Reviewed version active", "当前是复盘版本")}}
+            ${{reviewProgress}}
+            ${{reviewState}}
+            <textarea class="editor-textarea" data-review-feedback placeholder="例如：真正的核心是丈夫吹嘘自己人脉广，但连续打电话都没人来帮忙，当前故事主轴理解错了。">${{escapeHtml(feedback)}}</textarea>
+            <div class="link-row">
+              <button class="action-link" type="button" data-run-review="${{item.id}}">${{status === "running" ? "复盘中..." : "复盘重做"}}</button>
+            </div>
           </div>
-        </div>
+        </details>
       `;
     }}
 
