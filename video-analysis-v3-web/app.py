@@ -3894,11 +3894,13 @@ def page_html() -> str:
     const exportChoicePt = document.getElementById("export-choice-pt");
     let activeJobId = "";
     let activeReviewItemId = "";
+    let jobPollTimer = null;
     let toastTimer = null;
     let pendingExportChoice = null;
     const reviewTracker = Object.create(null);
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
+    const ACTIVE_JOB_STORAGE_KEY = "koko_active_job_id";
     const STAGE_ORDER = ["queued", "download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output", "completed"];
     const STAGE_LABELS = {{
       queued: "等待拆解",
@@ -3982,6 +3984,24 @@ def page_html() -> str:
       statusBox.className = ready ? "status-box visible ready" : "status-box visible";
       statusBox.innerHTML = html;
       ensureDetailIframes(statusBox);
+    }}
+
+    function schedulePoll(jobId, delay = 2500) {{
+      if (jobPollTimer) clearTimeout(jobPollTimer);
+      jobPollTimer = setTimeout(() => pollJob(jobId), delay);
+    }}
+
+    function persistActiveJobId(jobId) {{
+      const value = String(jobId || "").trim();
+      if (!value) {{
+        window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+        return;
+      }}
+      window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, value);
+    }}
+
+    function readPersistedActiveJobId() {{
+      return String(window.localStorage.getItem(ACTIVE_JOB_STORAGE_KEY) || "").trim();
     }}
 
     function showToast(title, copy) {{
@@ -4611,7 +4631,13 @@ def page_html() -> str:
 
     async function pollJob(jobId) {{
       activeJobId = jobId;
+      persistActiveJobId(jobId);
       const res = await fetch(`/api/jobs/${{jobId}}`);
+      if (!res.ok) {{
+        persistActiveJobId("");
+        setStatus(`<span class="status status-failed">失败</span><br><br><code>无法恢复这条任务，可能已经不存在了。</code>`);
+        return;
+      }}
       const data = await res.json();
       const batchResults = renderBatchResults(data);
       const reviewRunning = hasRunningReview(data.items);
@@ -4622,7 +4648,7 @@ def page_html() -> str:
           : (data.message || "分析完成。");
         setStatus(batchResults || `<div class="status-empty"><div class="status-empty-title">分析完成</div><div class="status-empty-copy">${{escapeHtml(completedMessage)}}</div></div>`, true);
         if (reviewRunning) {{
-          setTimeout(() => pollJob(jobId), 2500);
+          schedulePoll(jobId, 2500);
         }}
         return;
       }}
@@ -4636,7 +4662,7 @@ def page_html() -> str:
         ? renderBatchResults(data)
         : `${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}`;
       setStatus(`<span class="status ${{badge}}">${{jobStatusLabel(data.status)}}</span><br><br>${{runningMarkup}}`);
-      setTimeout(() => pollJob(jobId), 2500);
+      schedulePoll(jobId, 2500);
     }}
 
     submitBtn.addEventListener("click", async () => {{
@@ -4658,6 +4684,7 @@ def page_html() -> str:
           throw new Error(data.error || "任务创建失败");
         }}
         activeJobId = data.id;
+        persistActiveJobId(data.id);
         setStatus(`<span class="status status-queued">排队中</span><br><br>${{progressMarkup("queued", "任务已创建，正在准备分析。", data.id)}}`);
         pollJob(data.id);
       }} catch (error) {{
@@ -4666,6 +4693,12 @@ def page_html() -> str:
         submitBtn.disabled = false;
       }}
     }});
+
+    const restoredJobId = readPersistedActiveJobId();
+    if (restoredJobId) {{
+      setStatus(`<span class="status status-queued">恢复任务中</span><br><br>${{progressMarkup("queued", "正在恢复刷新前的任务展示。", restoredJobId)}}`);
+      pollJob(restoredJobId);
+    }}
 
     videoInput.addEventListener("keydown", (event) => {{
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {{
