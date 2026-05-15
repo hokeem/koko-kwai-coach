@@ -2887,6 +2887,10 @@ def page_html() -> str:
       color: var(--muted);
       line-height: 1.7;
       box-shadow: none;
+      display: none;
+    }}
+    .status-box.visible {{
+      display: block;
     }}
     .status-empty {{
       display: flex;
@@ -3840,7 +3844,7 @@ def page_html() -> str:
     }};
 
     function setStatus(html, ready = false) {{
-      statusBox.className = ready ? "status-box ready" : "status-box";
+      statusBox.className = ready ? "status-box visible ready" : "status-box visible";
       statusBox.innerHTML = html;
     }}
 
