@@ -3812,6 +3812,7 @@ def page_html() -> str:
     let pendingExportChoice = null;
     const reviewTracker = Object.create(null);
     const itemOpenState = Object.create(null);
+    const detailIframeCache = new Map();
     const STAGE_ORDER = ["queued", "download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output", "completed"];
     const STAGE_LABELS = {{
       queued: "等待拆解",
@@ -3850,9 +3851,51 @@ def page_html() -> str:
       failed: "复盘失败"
     }};
 
+    function preserveDetailIframes() {{
+      statusBox.querySelectorAll(".item-card[data-item-id] iframe[data-preview-item-id]").forEach((frame) => {{
+        const itemId = frame.getAttribute("data-preview-item-id") || "";
+        const src = frame.getAttribute("src") || "";
+        if (!itemId || !src) return;
+        detailIframeCache.set(itemId, {{ src, node: frame }});
+      }});
+    }}
+
+    function ensureDetailIframes(root = document) {{
+      root.querySelectorAll(".item-card[data-item-id]").forEach((detail) => {{
+        if (!(detail instanceof HTMLDetailsElement)) return;
+        const slot = detail.querySelector(".item-preview-slot");
+        if (!(slot instanceof HTMLDivElement)) return;
+        const itemId = slot.getAttribute("data-preview-item-id") || detail.getAttribute("data-item-id") || "";
+        const url = slot.getAttribute("data-preview-url") || "";
+        if (!url) {{
+          slot.replaceChildren();
+          return;
+        }}
+        if (!detail.open) {{
+          slot.replaceChildren();
+          return;
+        }}
+        const cached = detailIframeCache.get(itemId);
+        if (cached && cached.src === url && cached.node instanceof HTMLIFrameElement) {{
+          if (slot.firstElementChild !== cached.node) {{
+            slot.replaceChildren(cached.node);
+          }}
+          return;
+        }}
+        const iframe = document.createElement("iframe");
+        iframe.loading = "lazy";
+        iframe.src = url;
+        iframe.setAttribute("data-preview-item-id", itemId);
+        slot.replaceChildren(iframe);
+        detailIframeCache.set(itemId, {{ src: url, node: iframe }});
+      }});
+    }}
+
     function setStatus(html, ready = false) {{
+      preserveDetailIframes();
       statusBox.className = ready ? "status-box visible ready" : "status-box visible";
       statusBox.innerHTML = html;
+      ensureDetailIframes(statusBox);
     }}
 
     function showToast(title, copy) {{
@@ -4280,7 +4323,9 @@ def page_html() -> str:
         (item.zh_docx_url || item.pt_docx_url) ? `<button class="action-link" type="button" data-open-export-modal="${{escapeHtml(item.zh_docx_url || "")}}" data-open-export-modal-pt="${{escapeHtml(item.pt_docx_url || "")}}">导出脚本</button>` : "",
         toggleButton,
       ].join("");
-      const iframe = item.html_url ? `<iframe src="${{item.html_url}}" loading="lazy"></iframe>` : "";
+      const previewSlot = item.html_url
+        ? `<div class="item-preview-slot" data-preview-item-id="${{item.id}}" data-preview-url="${{item.html_url}}"></div>`
+        : "";
       const error = item.error ? `<code>${{escapeHtml(item.error)}}</code>` : "";
       return `
         <details class="item-card" data-item-id="${{item.id}}" ${{open ? "open" : ""}}>
@@ -4295,7 +4340,7 @@ def page_html() -> str:
               <div class="item-actions-shell"><div class="link-row">${{links}}</div></div>
             </div>
             ${{error}}
-            ${{iframe}}
+            ${{previewSlot}}
           </div>
         </details>
       `;
@@ -4523,6 +4568,7 @@ def page_html() -> str:
       const itemId = detail.getAttribute("data-item-id") || "";
       if (!itemId) return;
       itemOpenState[itemId] = detail.open;
+      ensureDetailIframes(detail.parentElement || detail);
     }}, true);
 
     document.addEventListener("click", (event) => {{
