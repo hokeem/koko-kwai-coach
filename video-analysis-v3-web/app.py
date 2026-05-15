@@ -526,32 +526,88 @@ REVIEW_REFINE_PROMPT = """你是一个“复盘重做”脚本整理器。
 }
 """
 
+PORTUGUESE_TRANSLATION_PROMPT = """你会收到一个脚本 JSON。你的任务不是重写，不是总结，不是润色，而是把所有面向用户展示的中文文本严格直译成葡萄牙语（pt-BR）。
 
-def write_script_docx(output_dir: Path, script: dict[str, Any], video_url: str) -> Path | None:
+硬规则：
+1. 必须保留原 JSON 结构、字段名、数组长度、对象层级。
+2. 只翻译“值里的自然语言文本”，不要改字段名。
+3. 所有翻译必须尽量 1:1 忠实直译，不要概括，不要补充解释，不要删减，不要美化。
+4. `dialogue_or_audio` 必须做逐句忠实翻译，不能保留中文，不能改写成摘要。
+5. 时间、URL、文件路径、frame 路径、source_url、数字、布尔值保持原样。
+6. `无`、空值占位等，翻成最直接的葡语占位，例如 `Sem conteúdo`，但不要删除字段。
+7. 输出必须是可解析 JSON，不要带 Markdown。
+"""
+
+
+def language_copy(locale: str) -> dict[str, str]:
+    if locale == "pt":
+        return {
+            "title": "Roteiro do vídeo",
+            "source_url": "Link de origem",
+            "content_type": "Tipo de conteúdo",
+            "summary": "Resumo geral do vídeo",
+            "mechanism": "Mecanismo",
+            "rows": "Linhas do roteiro",
+            "row": "Linha",
+            "dialogue": "Diálogo/narração",
+        }
+    return {
+        "title": "Video Script",
+        "source_url": "Source URL",
+        "content_type": "Content Type",
+        "summary": "Whole Video Summary",
+        "mechanism": "Mechanism",
+        "rows": "Script Rows",
+        "row": "Row",
+        "dialogue": "Dialogue / audio",
+    }
+
+
+def translate_script_to_portuguese(script_json: dict[str, Any], key: str, models: list[str]) -> dict[str, Any]:
+    if not key or run_text_json_prompt_with_fallback is None:
+        raise RuntimeError("Portuguese translation helpers are unavailable.")
+    payload = json.loads(json.dumps(script_json or {}, ensure_ascii=False))
+    translated, _, _ = run_text_json_prompt_with_fallback(
+        payload,
+        key,
+        models,
+        PORTUGUESE_TRANSLATION_PROMPT,
+        "portuguese translation",
+    )
+    merged = json.loads(json.dumps(script_json or {}, ensure_ascii=False))
+    for field in ["title", "whole_video_summary", "core_viral_points", "replaceable_parts", "rows", "mechanism"]:
+        if field in translated:
+            merged[field] = translated[field]
+    merged["display_language"] = "pt"
+    return merged
+
+
+def write_script_docx(output_dir: Path, script: dict[str, Any], video_url: str, *, suffix: str = "", locale: str = "zh") -> Path | None:
     if Document is None:
         return None
-    path = output_dir / "script_export.docx"
+    labels = language_copy(locale)
+    path = output_dir / f"script_export{suffix}.docx"
     try:
         doc = Document()
-        doc.add_heading(script.get("title") or "Video Script", 0)
-        doc.add_paragraph(f"Source URL: {video_url}")
-        doc.add_paragraph(f"Content Type: {detect_content_type(script)}")
+        doc.add_heading(script.get("title") or labels["title"], 0)
+        doc.add_paragraph(f"{labels['source_url']}: {video_url}")
+        doc.add_paragraph(f"{labels['content_type']}: {detect_content_type(script)}")
         summary = script.get("whole_video_summary") or ""
         if summary:
-            doc.add_heading("Whole Video Summary", level=1)
+            doc.add_heading(labels["summary"], level=1)
             doc.add_paragraph(summary)
         mechanism = script.get("mechanism") or {}
         if mechanism:
-            doc.add_heading("Mechanism", level=1)
+            doc.add_heading(labels["mechanism"], level=1)
             for key in ["name", "reason", "backfire_point", "story_question"]:
                 value = mechanism.get(key)
                 if value:
                     doc.add_paragraph(f"{key}: {value}")
         rows = choose_script_rows(script)
         if rows:
-            doc.add_heading("Script Rows", level=1)
+            doc.add_heading(labels["rows"], level=1)
             for idx, row in enumerate(rows, start=1):
-                title = row.get("time") or row.get("start") or f"Row {idx}"
+                title = row.get("time") or row.get("start") or f"{labels['row']} {idx}"
                 doc.add_heading(f"{idx}. {title}", level=2)
                 for key in ["visual_content", "action", "dialogue_or_audio", "integrated_summary", "logic_status"]:
                     value = row.get(key)
@@ -609,6 +665,43 @@ def delete_library_entry(entry_id: str) -> bool:
         shutil.rmtree(output_dir, ignore_errors=True)
         removed = True
     return removed
+
+
+def generate_script_variant_outputs(output_dir: Path, item_id: str, script_json: dict[str, Any], video_url: str, *, locale: str) -> dict[str, Any]:
+    if locale == "pt":
+        json_name = "script_table_pt.json"
+        html_name = "script_table_pt.html"
+        suffix = "_pt"
+    else:
+        json_name = "script_table.json"
+        html_name = "script_table.html"
+        suffix = ""
+    script_json = json.loads(json.dumps(script_json or {}, ensure_ascii=False))
+    script_json["display_language"] = locale
+    json_path = output_dir / json_name
+    write_json_atomic(json_path, script_json)
+    render_script = V2_SKILL_ROOT / "scripts" / "render_script_table.py"
+    subprocess.run(
+        [
+            os.environ.get("PYTHON_BIN", "python3"),
+            str(render_script),
+            str(json_path),
+            "--output",
+            str(output_dir / html_name),
+            "--locale",
+            locale,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    docx_path = write_script_docx(output_dir, script_json, video_url, suffix=suffix, locale=locale)
+    return {
+        "script_json": script_json,
+        "json_url": f"/results/{item_id}/{json_name}",
+        "html_url": f"/results/{item_id}/{html_name}",
+        "docx_url": f"/results/{item_id}/{docx_path.name}" if docx_path and docx_path.exists() else "",
+    }
 
 
 def should_try_next_model(error_text: str) -> bool:
@@ -1338,11 +1431,18 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "report_url": item.get("report_url") or "",
         "evidence_url": item.get("evidence_url") or "",
         "docx_url": item.get("docx_url") or "",
+        "zh_docx_url": item.get("zh_docx_url") or item.get("docx_url") or "",
+        "pt_docx_url": item.get("pt_docx_url") or "",
+        "zh_html_url": item.get("zh_html_url") or item.get("html_url") or "",
+        "pt_html_url": item.get("pt_html_url") or "",
         "error": item.get("error") or "",
         "artifacts": item.get("artifacts") or {},
         "result_json": item.get("result_json"),
+        "zh_result_json": item.get("zh_result_json") or item.get("result_json"),
+        "pt_result_json": item.get("pt_result_json"),
         "content_type": item.get("content_type") or "",
         "title": item.get("title") or "",
+        "display_language": item.get("display_language") or "zh",
         "review_status": item.get("review_status") or "",
         "review_stage": item.get("review_stage") or "",
         "review_message": item.get("review_message") or "",
@@ -1459,6 +1559,10 @@ def persist_library_entry(parent_job_id: str, item: dict[str, Any]) -> None:
         "report_url": item.get("report_url") or "",
         "evidence_url": item.get("evidence_url") or "",
         "docx_url": item.get("docx_url") or "",
+        "zh_docx_url": item.get("zh_docx_url") or item.get("docx_url") or "",
+        "pt_docx_url": item.get("pt_docx_url") or "",
+        "zh_html_url": item.get("zh_html_url") or item.get("html_url") or "",
+        "pt_html_url": item.get("pt_html_url") or "",
         "source": "edited" if item.get("edited") else "ai",
         "saved_at": item.get("saved_to_library_at") or now_iso(),
     }
@@ -1483,11 +1587,18 @@ def find_item_context(item_id: str) -> tuple[str, int, dict[str, Any]] | None:
                     "report_url": job.get("report_url") or "",
                     "evidence_url": job.get("evidence_url") or "",
                     "docx_url": job.get("docx_url") or "",
+                    "zh_docx_url": job.get("zh_docx_url") or job.get("docx_url") or "",
+                    "pt_docx_url": job.get("pt_docx_url") or "",
+                    "zh_html_url": job.get("zh_html_url") or job.get("html_url") or "",
+                    "pt_html_url": job.get("pt_html_url") or "",
                     "artifacts": job.get("artifacts") or {},
                     "error": job.get("error") or "",
                     "result_json": json.loads(json.dumps(job.get("result_json") or {}, ensure_ascii=False)),
+                    "zh_result_json": json.loads(json.dumps(job.get("zh_result_json") or job.get("result_json") or {}, ensure_ascii=False)),
+                    "pt_result_json": json.loads(json.dumps(job.get("pt_result_json") or {}, ensure_ascii=False)),
                     "content_type": job.get("content_type") or "",
                     "title": job.get("title") or "",
+                    "display_language": job.get("display_language") or "zh",
                     "review_status": job.get("review_status") or "",
                     "review_message": job.get("review_message") or "",
                     "review_feedback": job.get("review_feedback") or "",
@@ -1541,35 +1652,69 @@ def regenerate_item_outputs(
     video_url: str,
     script_json: dict[str, Any],
     persist_library: bool = False,
+    target_language: str = "zh",
 ) -> dict[str, Any]:
     output_dir = RESULTS_ROOT / item_id
     output_dir.mkdir(parents=True, exist_ok=True)
+    if target_language == "pt":
+        pt_script = translate_script_to_portuguese(
+            json.loads(json.dumps(script_json or {}, ensure_ascii=False)),
+            GOOGLE_API_KEY,
+            unique_models(*MODEL_CANDIDATES),
+        )
+        pt_variant = generate_script_variant_outputs(output_dir, item_id, pt_script, video_url, locale="pt")
+        with job_lock:
+            existing_item = jobs[parent_job_id]["items"][item_index]
+            zh_result_json = existing_item.get("zh_result_json") or existing_item.get("result_json") or {}
+            zh_html_url = existing_item.get("zh_html_url") or existing_item.get("html_url") or f"/results/{item_id}/script_table.html"
+            zh_docx_url = existing_item.get("zh_docx_url") or existing_item.get("docx_url") or ""
+        update_payload = {
+            "pt_result_json": pt_variant["script_json"],
+            "pt_html_url": pt_variant["html_url"],
+            "pt_docx_url": pt_variant["docx_url"],
+            "result_json": pt_variant["script_json"],
+            "html_url": pt_variant["html_url"],
+            "docx_url": pt_variant["docx_url"],
+            "zh_result_json": zh_result_json,
+            "zh_html_url": zh_html_url,
+            "zh_docx_url": zh_docx_url,
+            "display_language": "pt",
+            "title": pt_variant["script_json"].get("title") or "Roteiro do vídeo",
+            "updated_at": now_iso(),
+        }
+        update_job_item(parent_job_id, item_index, **update_payload)
+        with job_lock:
+            job = jobs.get(parent_job_id)
+            if job and (job.get("id") == item_id or len(job.get("items") or []) == 1):
+                job.update(update_payload)
+                save_jobs()
+            item = jobs[parent_job_id]["items"][item_index]
+        if persist_library:
+            persist_library_entry(parent_job_id, item)
+        return public_item_view(item)
+
     script_json = enforce_chinese_dialogue_translation(
         json.loads(json.dumps(script_json or {}, ensure_ascii=False)),
         GOOGLE_API_KEY,
         unique_models(*MODEL_CANDIDATES),
     )
-    script_json_path = output_dir / "script_table.json"
-    script_json_path.write_text(json.dumps(script_json, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    render_script = V2_SKILL_ROOT / "scripts" / "render_script_table.py"
-    subprocess.run(
-        [os.environ.get("PYTHON_BIN", "python3"), str(render_script), str(script_json_path), "--output", str(output_dir / "script_table.html")],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    docx_path = write_script_docx(output_dir, script_json, video_url)
-    docx_url = f"/results/{item_id}/{docx_path.name}" if docx_path and docx_path.exists() else ""
+    zh_variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="zh")
     content_type = detect_content_type_for_output(output_dir, script_json, read_json(output_dir / "evidence_bundle.json"))
 
     update_payload = {
-        "result_json": script_json,
+        "result_json": zh_variant["script_json"],
+        "zh_result_json": zh_variant["script_json"],
+        "pt_result_json": None,
         "original_result_json": jobs[parent_job_id]["items"][item_index].get("original_result_json") or script_json,
         "title": script_json.get("title") or "Video Script",
         "content_type": content_type,
-        "docx_url": docx_url,
-        "html_url": f"/results/{item_id}/script_table.html",
+        "docx_url": zh_variant["docx_url"],
+        "zh_docx_url": zh_variant["docx_url"],
+        "pt_docx_url": "",
+        "html_url": zh_variant["html_url"],
+        "zh_html_url": zh_variant["html_url"],
+        "pt_html_url": "",
+        "display_language": "zh",
         "artifacts": summarize_artifacts(item_id, output_dir),
         "edited": True,
         "updated_at": now_iso(),
@@ -1580,12 +1725,19 @@ def regenerate_item_outputs(
     with job_lock:
         job = jobs.get(parent_job_id)
         if job and (job.get("id") == item_id or len(job.get("items") or []) == 1):
-            job["result_json"] = script_json
+            job["result_json"] = zh_variant["script_json"]
+            job["zh_result_json"] = zh_variant["script_json"]
+            job["pt_result_json"] = None
             job["original_result_json"] = job.get("original_result_json") or script_json
             job["title"] = script_json.get("title") or "Video Script"
             job["content_type"] = content_type
-            job["docx_url"] = docx_url
-            job["html_url"] = f"/results/{item_id}/script_table.html"
+            job["docx_url"] = zh_variant["docx_url"]
+            job["zh_docx_url"] = zh_variant["docx_url"]
+            job["pt_docx_url"] = ""
+            job["html_url"] = zh_variant["html_url"]
+            job["zh_html_url"] = zh_variant["html_url"]
+            job["pt_html_url"] = ""
+            job["display_language"] = "zh"
             job["artifacts"] = summarize_artifacts(item_id, output_dir)
             job["updated_at"] = now_iso()
             save_jobs()
@@ -1593,6 +1745,63 @@ def regenerate_item_outputs(
     if persist_library:
         persist_library_entry(parent_job_id, item)
     return public_item_view(item)
+
+
+def set_item_display_language(item_id: str, language: str) -> dict[str, Any]:
+    context = find_item_context(item_id)
+    if not context:
+        raise RuntimeError("Script item not found.")
+    parent_job_id, item_index, item = context
+    if item.get("status") != "completed":
+        raise RuntimeError("Only completed scripts can switch languages.")
+    if language not in {"zh", "pt"}:
+        raise RuntimeError("Unsupported language.")
+    output_dir = RESULTS_ROOT / item_id
+    if language == "pt":
+        pt_script = item.get("pt_result_json") or {}
+        if not pt_script:
+            base_script = item.get("zh_result_json") or item.get("result_json") or {}
+            pt_item = regenerate_item_outputs(
+                parent_job_id,
+                item_index,
+                item_id,
+                item.get("video_url") or "",
+                base_script,
+                persist_library=False,
+                target_language="pt",
+            )
+            return pt_item
+        update_job_item(
+            parent_job_id,
+            item_index,
+            result_json=pt_script,
+            html_url=item.get("pt_html_url") or f"/results/{item_id}/script_table_pt.html",
+            docx_url=item.get("pt_docx_url") or "",
+            display_language="pt",
+            title=pt_script.get("title") or item.get("title") or "",
+        )
+    else:
+        zh_script = item.get("zh_result_json") or item.get("result_json") or {}
+        update_job_item(
+            parent_job_id,
+            item_index,
+            result_json=zh_script,
+            html_url=item.get("zh_html_url") or f"/results/{item_id}/script_table.html",
+            docx_url=item.get("zh_docx_url") or "",
+            display_language="zh",
+            title=zh_script.get("title") or item.get("title") or "",
+        )
+    with job_lock:
+        job = jobs.get(parent_job_id)
+        item_ref = jobs[parent_job_id]["items"][item_index]
+        if job and (job.get("id") == item_id or len(job.get("items") or []) == 1):
+            job["result_json"] = item_ref.get("result_json")
+            job["html_url"] = item_ref.get("html_url")
+            job["docx_url"] = item_ref.get("docx_url")
+            job["display_language"] = item_ref.get("display_language") or language
+            job["title"] = item_ref.get("title") or job.get("title") or ""
+            save_jobs()
+    return public_item_view(item_ref)
 
 
 def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, feedback: str) -> None:
@@ -1836,12 +2045,19 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                         error="",
                         completed_at=now_iso(),
                         html_url=f"/results/{item['id']}/script_table.html",
+                        zh_html_url=f"/results/{item['id']}/script_table.html",
+                        pt_html_url="",
                         report_url=product["report_url"],
                         evidence_url=product["evidence_url"],
                         docx_url=docx_url,
+                        zh_docx_url=docx_url,
+                        pt_docx_url="",
                         artifacts=summarize_artifacts(item["id"], output_dir),
                         result_json=script_json,
+                        zh_result_json=script_json,
+                        pt_result_json=None,
                         original_result_json=script_json,
+                        display_language="zh",
                         tried_models=tried,
                         stage="completed",
                         stage_message="Completed.",
@@ -1915,13 +2131,20 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
                 "created_at": now_iso(),
                 "updated_at": now_iso(),
                 "html_url": "",
+                "zh_html_url": "",
+                "pt_html_url": "",
                 "report_url": "",
                 "evidence_url": "",
                 "docx_url": "",
+                "zh_docx_url": "",
+                "pt_docx_url": "",
                 "artifacts": {},
                 "error": "",
                 "result_json": None,
+                "zh_result_json": None,
+                "pt_result_json": None,
                 "original_result_json": None,
+                "display_language": "zh",
                 "content_type": "",
                 "title": "",
                 "review_status": "",
@@ -1941,12 +2164,19 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "html_url": "",
+        "zh_html_url": "",
+        "pt_html_url": "",
         "report_url": "",
         "evidence_url": "",
         "docx_url": "",
+        "zh_docx_url": "",
+        "pt_docx_url": "",
         "artifacts": {},
         "error": "",
         "result_json": None,
+        "zh_result_json": None,
+        "pt_result_json": None,
+        "display_language": "zh",
         "stage": "queued",
         "stage_message": "Queued.",
         "items": items,
@@ -2563,6 +2793,48 @@ def page_html() -> str:
       font-size: 13px;
       line-height: 1.55;
     }}
+    .choice-overlay {{
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(255, 130, 0, 0.14);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      z-index: 70;
+    }}
+    .choice-overlay.open {{
+      display: flex;
+    }}
+    .choice-dialog {{
+      width: min(460px, 100%);
+      border-radius: 24px;
+      border: 1px solid rgba(255,255,255,.82);
+      background: rgba(255,255,255,.92);
+      box-shadow: 0 24px 60px rgba(249,115,0,.18);
+      padding: 22px;
+      color: #FF8200;
+    }}
+    .choice-dialog h3 {{
+      margin: 0 0 10px;
+      font-size: 24px;
+      line-height: 1.2;
+    }}
+    .choice-dialog p {{
+      margin: 0 0 18px;
+      font-size: 14px;
+      line-height: 1.7;
+      color: #FF8200;
+      opacity: .9;
+    }}
+    .choice-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: flex-end;
+    }}
     .editor-shell {{
       margin-bottom: 14px;
       border: 1px solid rgba(255,130,0,.16);
@@ -2612,6 +2884,10 @@ def page_html() -> str:
       text-transform: none;
       opacity: .82;
       margin-left: auto;
+    }}
+    .editor-language-note {{
+      margin-left: 6px;
+      color: rgba(255,130,0,.78);
     }}
     .editor-grid {{
       display: grid;
@@ -2985,6 +3261,17 @@ def page_html() -> str:
     <div class="toast-title" id="app-toast-title"></div>
     <div class="toast-copy" id="app-toast-copy"></div>
   </div>
+  <div id="export-choice-overlay" class="choice-overlay" aria-hidden="true">
+    <div class="choice-dialog" role="dialog" aria-modal="true" aria-labelledby="export-choice-title">
+      <h3 id="export-choice-title">导出脚本</h3>
+      <p>请选择要导出的版本。葡语版本会保持严格直译，不做概括改写。</p>
+      <div class="choice-actions">
+        <button class="action-link" id="export-choice-cancel" type="button">取消</button>
+        <button class="action-link" id="export-choice-zh" type="button">导出中文版本</button>
+        <button class="action-link primary" id="export-choice-pt" type="button">导出葡语版本</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     const videoInput = document.getElementById("video-url");
@@ -2994,9 +3281,14 @@ def page_html() -> str:
     const appToast = document.getElementById("app-toast");
     const appToastTitle = document.getElementById("app-toast-title");
     const appToastCopy = document.getElementById("app-toast-copy");
+    const exportChoiceOverlay = document.getElementById("export-choice-overlay");
+    const exportChoiceCancel = document.getElementById("export-choice-cancel");
+    const exportChoiceZh = document.getElementById("export-choice-zh");
+    const exportChoicePt = document.getElementById("export-choice-pt");
     let activeJobId = "";
     let activeReviewItemId = "";
     let toastTimer = null;
+    let pendingExportChoice = null;
     const reviewTracker = Object.create(null);
     const STAGE_ORDER = ["queued", "download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output", "completed"];
     const STAGE_LABELS = {{
@@ -3052,6 +3344,24 @@ def page_html() -> str:
         appToast.classList.remove("show");
         appToast.setAttribute("aria-hidden", "true");
       }}, 2600);
+    }}
+
+    function currentLanguageLabel(item) {{
+      return (item.display_language || "zh") === "pt" ? "Portuguese view" : "Chinese view";
+    }}
+
+    function closeExportChoice() {{
+      pendingExportChoice = null;
+      if (!exportChoiceOverlay) return;
+      exportChoiceOverlay.classList.remove("open");
+      exportChoiceOverlay.setAttribute("aria-hidden", "true");
+    }}
+
+    function openExportChoice(urls) {{
+      pendingExportChoice = urls || null;
+      if (!exportChoiceOverlay) return;
+      exportChoiceOverlay.classList.add("open");
+      exportChoiceOverlay.setAttribute("aria-hidden", "false");
     }}
 
     if (heroPanel) {{
@@ -3150,9 +3460,9 @@ def page_html() -> str:
         <details class="editor-disclosure">
           <summary class="editor-summary">
             <span>Direct edits</span>
-            <span class="editor-summary-copy">Open to adjust title, rows, and core points</span>
+            <span class="editor-summary-copy">Open to adjust title, rows, and core points <span class="editor-language-note">${{currentLanguageLabel(item)}}</span></span>
           </summary>
-          <div class="editor-shell" data-editor-item="${{item.id}}">
+          <div class="editor-shell" data-editor-item="${{item.id}}" data-editor-lang="${{escapeHtml(item.display_language || "zh")}}">
             <div class="editor-field">
               <div class="editor-label">Title</div>
               <input class="editor-input" data-edit-field="title" value="${{escapeHtml(normalizedText(script.title || item.title || "", "Video Script"))}}">
@@ -3259,6 +3569,7 @@ def page_html() -> str:
         mechanism_reason: root.querySelector('[data-edit-field="mechanism_reason"]')?.value || "",
         core_viral_points,
         rows,
+        target_language: root.getAttribute("data-editor-lang") || "zh",
       }};
     }}
 
@@ -3324,6 +3635,35 @@ def page_html() -> str:
       }}
     }}
 
+    async function switchDisplayLanguage(itemId, language, button) {{
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = language === "pt" ? "转换中..." : "切换中...";
+      try {{
+        const response = await fetch(`/api/items/${{itemId}}/display-language`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ language }}),
+        }});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Language switch failed");
+        if (activeJobId) {{
+          pollJob(activeJobId);
+        }} else {{
+          window.location.reload();
+        }}
+        if (language === "pt") {{
+          showToast("已切换成葡语", "编辑区、预览区和导出选项都已切换到葡语版本。");
+        }} else {{
+          showToast("已切回中文", "编辑区、预览区和导出选项都已切回中文版本。");
+        }}
+      }} catch (error) {{
+        showToast("切换失败", String(error.message || error));
+        button.disabled = false;
+        button.textContent = original;
+      }}
+    }}
+
     async function runReview(itemId, button) {{
       const feedback = collectReviewFeedback(itemId).trim();
       if (!feedback) {{
@@ -3357,11 +3697,16 @@ def page_html() -> str:
     function renderItemCard(item, idx, open = false) {{
       const title = escapeHtml(item.title || `Video ${{idx + 1}}`);
       const contentType = item.content_type ? `<span class="batch-chip">${{escapeHtml(item.content_type)}}</span>` : "";
+      const languageChip = `<span class="batch-chip">${{escapeHtml(currentLanguageLabel(item))}}</span>`;
       const editor = buildEditorMarkup(item);
       const review = buildReviewMarkup(item);
+      const toggleButton = item.display_language === "pt"
+        ? `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="zh">切回中文</button>`
+        : `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="pt">转换成葡语</button>`;
       const links = [
         item.html_url ? `<a class="action-link" href="${{item.html_url}}" target="_blank" rel="noreferrer">Open preview</a>` : "",
-        item.docx_url ? `<button class="action-link" type="button" data-download-script="${{item.docx_url}}">导出脚本</button>` : "",
+        (item.zh_docx_url || item.pt_docx_url) ? `<button class="action-link" type="button" data-open-export-modal="${{escapeHtml(item.zh_docx_url || "")}}" data-open-export-modal-pt="${{escapeHtml(item.pt_docx_url || "")}}">导出脚本</button>` : "",
+        toggleButton,
       ].join("");
       const iframe = item.html_url ? `<iframe src="${{item.html_url}}" loading="lazy"></iframe>` : "";
       const error = item.error ? `<code>${{escapeHtml(item.error)}}</code>` : "";
@@ -3374,6 +3719,7 @@ def page_html() -> str:
           <div class="item-meta">
             <span>${{escapeHtml(item.stage_message || "")}}</span>
             ${{contentType}}
+            ${{languageChip}}
           </div>
           <div class="item-body">
             <div class="item-sections">
@@ -3515,7 +3861,34 @@ def page_html() -> str:
       }}
     }});
 
+    document.addEventListener("keydown", (event) => {{
+      if (event.key === "Escape") {{
+        closeExportChoice();
+      }}
+    }});
+
     document.addEventListener("click", (event) => {{
+      const exportCancel = event.target.closest("#export-choice-cancel");
+      if (exportCancel) {{
+        closeExportChoice();
+        return;
+      }}
+      const exportZhBtn = event.target.closest("#export-choice-zh");
+      if (exportZhBtn) {{
+        if (pendingExportChoice?.zh) downloadScript(pendingExportChoice.zh, exportZhBtn);
+        closeExportChoice();
+        return;
+      }}
+      const exportPtBtn = event.target.closest("#export-choice-pt");
+      if (exportPtBtn) {{
+        if (!pendingExportChoice?.pt) {{
+          showToast("葡语版本未准备好", "请先点一次“转换成葡语”，再导出葡语版本。");
+        }} else {{
+          downloadScript(pendingExportChoice.pt, exportPtBtn);
+        }}
+        closeExportChoice();
+        return;
+      }}
       const saveBtn = event.target.closest("[data-save-edits]");
       if (saveBtn) {{
         persistItemEdits(saveBtn.getAttribute("data-save-edits"), "save", saveBtn);
@@ -3529,6 +3902,23 @@ def page_html() -> str:
       const libraryBtn = event.target.closest("[data-save-library]");
       if (libraryBtn) {{
         persistItemEdits(libraryBtn.getAttribute("data-save-library"), "library", libraryBtn);
+        return;
+      }}
+      const toggleLanguageBtn = event.target.closest("[data-toggle-language]");
+      if (toggleLanguageBtn) {{
+        switchDisplayLanguage(
+          toggleLanguageBtn.getAttribute("data-toggle-language"),
+          toggleLanguageBtn.getAttribute("data-language-target") || "zh",
+          toggleLanguageBtn,
+        );
+        return;
+      }}
+      const exportModalBtn = event.target.closest("[data-open-export-modal]");
+      if (exportModalBtn) {{
+        openExportChoice({{
+          zh: exportModalBtn.getAttribute("data-open-export-modal") || "",
+          pt: exportModalBtn.getAttribute("data-open-export-modal-pt") || "",
+        }});
         return;
       }}
       const downloadBtn = event.target.closest("[data-download-script]");
@@ -3571,7 +3961,11 @@ def library_html() -> str:
             "</div>"
             "<div class='link-row'>"
             + (f"<button class='action-link' type='button' data-open-preview='{html_escape(entry.get('html_url') or '')}'>打开预览</button>" if entry.get("html_url") else "")
-            + (f"<button class='action-link' type='button' data-download-script='{html_escape(entry.get('docx_url') or '')}'>导出脚本</button>" if entry.get("docx_url") else "")
+            + (
+                f"<button class='action-link' type='button' data-open-export-modal='{html_escape(entry.get('zh_docx_url') or entry.get('docx_url') or '')}' data-open-export-modal-pt='{html_escape(entry.get('pt_docx_url') or '')}'>导出脚本</button>"
+                if entry.get("zh_docx_url") or entry.get("docx_url") or entry.get("pt_docx_url")
+                else ""
+            )
             + f"<button class='action-link action-link-danger' type='button' data-delete-entry='{html_escape(entry.get('entry_id') or '')}'>删除</button>"
             + "</div>"
             "</article>"
@@ -3714,13 +4108,29 @@ def library_html() -> str:
       </div>
     </div>
   </div>
+  <div class="confirm-overlay" id="export-choice-overlay" aria-hidden="true">
+    <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="export-choice-title">
+      <h3 id="export-choice-title">导出脚本</h3>
+      <p>请选择要导出的版本。葡语版本会保持严格直译，不做概括改写。</p>
+      <div class="confirm-actions">
+        <button class="action-link" id="export-choice-cancel" type="button">取消</button>
+        <button class="action-link" id="export-choice-zh" type="button">导出中文版本</button>
+        <button class="action-link" id="export-choice-pt" type="button">导出葡语版本</button>
+      </div>
+    </div>
+  </div>
   <script>
     const backHomeButton = document.getElementById("back-home");
     const contentFilter = document.getElementById("content-filter");
     const deleteConfirmOverlay = document.getElementById("delete-confirm-overlay");
     const deleteConfirmCancel = document.getElementById("delete-confirm-cancel");
     const deleteConfirmApprove = document.getElementById("delete-confirm-approve");
+    const exportChoiceOverlay = document.getElementById("export-choice-overlay");
+    const exportChoiceCancel = document.getElementById("export-choice-cancel");
+    const exportChoiceZh = document.getElementById("export-choice-zh");
+    const exportChoicePt = document.getElementById("export-choice-pt");
     let pendingDeleteButton = null;
+    let pendingExportChoice = null;
 
     function closeDeleteConfirm() {{
       if (!deleteConfirmOverlay) return;
@@ -3734,6 +4144,49 @@ def library_html() -> str:
       pendingDeleteButton = button;
       deleteConfirmOverlay.classList.add("open");
       deleteConfirmOverlay.setAttribute("aria-hidden", "false");
+    }}
+
+    function closeExportChoice() {{
+      if (!exportChoiceOverlay) return;
+      exportChoiceOverlay.classList.remove("open");
+      exportChoiceOverlay.setAttribute("aria-hidden", "true");
+      pendingExportChoice = null;
+    }}
+
+    function openExportChoice(zhUrl, ptUrl) {{
+      if (!exportChoiceOverlay) return;
+      pendingExportChoice = {{ zh: zhUrl || "", pt: ptUrl || "" }};
+      exportChoiceOverlay.classList.add("open");
+      exportChoiceOverlay.setAttribute("aria-hidden", "false");
+    }}
+
+    async function downloadScript(url, button) {{
+      if (!url) return;
+      const originalText = button ? button.textContent : "";
+      if (button) {{
+        button.textContent = "导出中...";
+        button.disabled = true;
+      }}
+      try {{
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = url.split("/").pop() || "script_export.docx";
+        link.rel = "noopener";
+        link.target = "_self";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => {{
+          alert("导出脚本已开始下载。");
+        }}, 150);
+      }} catch (error) {{
+        alert("导出脚本失败，请重试。");
+      }} finally {{
+        if (button) {{
+          button.textContent = originalText;
+          button.disabled = false;
+        }}
+      }}
     }}
 
     function applyLibraryFilter() {{
@@ -3769,14 +4222,27 @@ def library_html() -> str:
       deleteConfirmCancel.addEventListener("click", closeDeleteConfirm);
     }}
 
+    if (exportChoiceCancel) {{
+      exportChoiceCancel.addEventListener("click", closeExportChoice);
+    }}
+
     if (deleteConfirmOverlay) {{
       deleteConfirmOverlay.addEventListener("click", (event) => {{
         if (event.target === deleteConfirmOverlay) closeDeleteConfirm();
       }});
     }}
 
+    if (exportChoiceOverlay) {{
+      exportChoiceOverlay.addEventListener("click", (event) => {{
+        if (event.target === exportChoiceOverlay) closeExportChoice();
+      }});
+    }}
+
     document.addEventListener("keydown", (event) => {{
-      if (event.key === "Escape") closeDeleteConfirm();
+      if (event.key === "Escape") {{
+        closeDeleteConfirm();
+        closeExportChoice();
+      }}
     }});
 
     if (deleteConfirmApprove) {{
@@ -3819,30 +4285,28 @@ def library_html() -> str:
         openDeleteConfirm(deleteBtn);
         return;
       }}
-      const downloadBtn = event.target.closest("[data-download-script]");
-      if (!downloadBtn) return;
-      const url = downloadBtn.getAttribute("data-download-script");
-      if (!url) return;
-      const originalText = downloadBtn.textContent;
-      downloadBtn.textContent = "导出中...";
-      downloadBtn.disabled = true;
-      try {{
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = url.split("/").pop() || "script_export.docx";
-        link.rel = "noopener";
-        link.target = "_self";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => {{
-          alert("导出脚本已开始下载。");
-        }}, 150);
-      }} catch (error) {{
-        alert("导出脚本失败，请重试。");
-      }} finally {{
-        downloadBtn.textContent = originalText;
-        downloadBtn.disabled = false;
+      const exportModalBtn = event.target.closest("[data-open-export-modal]");
+      if (exportModalBtn) {{
+        openExportChoice(
+          exportModalBtn.getAttribute("data-open-export-modal") || "",
+          exportModalBtn.getAttribute("data-open-export-modal-pt") || "",
+        );
+        return;
+      }}
+      if (event.target.closest("#export-choice-zh")) {{
+        if (pendingExportChoice?.zh) {{
+          downloadScript(pendingExportChoice.zh, exportChoiceZh);
+        }}
+        closeExportChoice();
+        return;
+      }}
+      if (event.target.closest("#export-choice-pt")) {{
+        if (!pendingExportChoice?.pt) {{
+          alert("请先在结果页点一次“转换成葡语”，再导出葡语版本。");
+        }} else {{
+          downloadScript(pendingExportChoice.pt, exportChoicePt);
+        }}
+        closeExportChoice();
       }}
     }});
   </script>
@@ -4017,7 +4481,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        item_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/(save|save-to-library)", parsed.path)
+        item_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/(save|save-to-library|display-language)", parsed.path)
         if item_match:
             item_id, action = item_match.groups()
             context = find_item_context(item_id)
@@ -4029,11 +4493,20 @@ class AppHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self.send_json({"error": "Invalid JSON body."}, status=400)
                 return
+            if action == "display-language":
+                try:
+                    updated_item = set_item_display_language(item_id, str(payload.get("language") or "zh").strip().lower())
+                except Exception as exc:
+                    self.send_json({"error": friendly_error(str(exc))}, status=500)
+                    return
+                self.send_json({"ok": True, "item": updated_item})
+                return
             parent_job_id, item_index, item = context
             if not item.get("result_json"):
                 self.send_json({"error": "No script is available for editing yet."}, status=400)
                 return
             try:
+                target_language = str(payload.get("target_language") or item.get("display_language") or "zh").strip().lower()
                 updated_script = apply_script_edits(item.get("result_json") or {}, payload)
                 updated_item = regenerate_item_outputs(
                     parent_job_id,
@@ -4042,6 +4515,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     item.get("video_url") or "",
                     updated_script,
                     persist_library=(action == "save-to-library"),
+                    target_language=target_language,
                 )
             except Exception as exc:
                 self.send_json({"error": friendly_error(str(exc))}, status=500)
