@@ -102,20 +102,57 @@ def html_escape(value: object) -> str:
     return html.escape(str(value or ""), quote=True)
 
 
+def read_json_file(path: Path, *, default: Any, backup_on_error: bool = True) -> Any:
+    if not path.exists():
+        return default
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return default
+    if not raw.strip():
+        if backup_on_error:
+            try:
+                broken = path.with_suffix(path.suffix + f".empty-{int(time.time())}.bak")
+                path.replace(broken)
+            except Exception:
+                pass
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        if backup_on_error:
+            try:
+                broken = path.with_suffix(path.suffix + f".broken-{int(time.time())}.bak")
+                path.replace(broken)
+            except Exception:
+                pass
+        return default
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.replace(path)
+
+
+def write_json_atomic(path: Path, payload: Any) -> None:
+    write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def load_jobs() -> None:
     global jobs
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
-    if not JOBS_FILE.exists():
+    jobs = read_json_file(JOBS_FILE, default={})
+    if not isinstance(jobs, dict):
         jobs = {}
-        return
-    jobs = json.loads(JOBS_FILE.read_text(encoding="utf-8"))
     backfill_completed_jobs()
     sync_library_from_jobs()
 
 
 def save_jobs() -> None:
-    JOBS_FILE.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(JOBS_FILE, jobs)
 
 
 def enqueue_job(job_id: str) -> None:
@@ -196,31 +233,25 @@ def start_job_workers() -> None:
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    data = read_json_file(path, default={})
+    return data if isinstance(data, dict) else {}
 
 
 def load_library_entries() -> list[dict[str, Any]]:
-    if not LIBRARY_FILE.exists():
+    data = read_json_file(LIBRARY_FILE, default=[])
+    if not isinstance(data, list):
         return []
-    try:
-        data = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
-        if not isinstance(data, list):
-            return []
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
-            content_type = str(entry.get("content_type") or "").strip()
-            if content_type not in ALLOWED_CONTENT_TYPES:
-                entry["content_type"] = DEFAULT_CONTENT_TYPE
-        return data
-    except Exception:
-        return []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        content_type = str(entry.get("content_type") or "").strip()
+        if content_type not in ALLOWED_CONTENT_TYPES:
+            entry["content_type"] = DEFAULT_CONTENT_TYPE
+    return data
 
 
 def save_library_entries(entries: list[dict[str, Any]]) -> None:
-    LIBRARY_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(LIBRARY_FILE, entries)
 
 
 def split_video_urls(raw: str) -> list[str]:
