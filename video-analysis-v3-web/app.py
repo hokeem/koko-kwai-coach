@@ -3752,15 +3752,16 @@ def page_html() -> str:
             <div class="composer-head">
               <div></div>
             </div>
-            <label for="video-url">Video links</label>
-            <textarea id="video-url" placeholder="Paste one link per line&#10;https://www.kwai.com/@.../video/...&#10;https://www.kwai.com/@.../video/..."></textarea>
+            <label for="video-url">视频链接</label>
+            <textarea id="video-url" placeholder="每行粘贴一个链接&#10;https://www.kwai.com/@.../video/...&#10;https://www.kwai.com/@.../video/..."></textarea>
             <div class="actions">
-              <button id="submit-btn">Generate scripts</button>
+              <button id="submit-btn">开始拆解脚本</button>
             </div>
           </div>
           <div id="status-box" class="status-box">
             <div class="status-empty">
-              <div class="status-empty-title">Ready.</div>
+              <div class="status-empty-title">已就绪。</div>
+              <div class="status-empty-copy">输入一个或多个视频链接后，系统会在这里实时显示拆解进度。</div>
             </div>
           </div>
         </div>
@@ -3830,12 +3831,12 @@ def page_html() -> str:
     }};
     const REVIEW_STAGE_ORDER = ["queued", "plan", "recheck", "rebuild", "completed"];
     const REVIEW_STAGE_LABELS = {{
-      queued: "Queued",
-      plan: "Review plan",
-      recheck: "Video recheck",
-      rebuild: "Rebuild",
-      completed: "Ready",
-      failed: "Failed"
+      queued: "排队中",
+      plan: "制定复盘计划",
+      recheck: "回看视频",
+      rebuild: "重建脚本",
+      completed: "复盘完成",
+      failed: "复盘失败"
     }};
 
     function setStatus(html, ready = false) {{
@@ -3857,7 +3858,7 @@ def page_html() -> str:
     }}
 
     function currentLanguageLabel(item) {{
-      return (item.display_language || "zh") === "pt" ? "Portuguese view" : "Chinese view";
+      return (item.display_language || "zh") === "pt" ? "葡语视图" : "中文视图";
     }}
 
     function closeExportChoice() {{
@@ -3897,8 +3898,17 @@ def page_html() -> str:
       return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }}
 
+    function jobStatusLabel(status) {{
+      const text = String(status || "").trim();
+      if (text === "completed") return "已完成";
+      if (text === "failed") return "失败";
+      if (text === "running") return "运行中";
+      if (text === "queued") return "排队中";
+      return text || "排队中";
+    }}
+
     function parseVideoDisplayName(url, idx = 0) {{
-      const fallback = `Video ${{idx + 1}}`;
+      const fallback = `视频 ${{idx + 1}}`;
       const text = String(url || "").trim();
       if (!text) return fallback;
       try {{
@@ -3971,14 +3981,14 @@ def page_html() -> str:
         : [{{ label: "要点", text: "无" }}];
       const corePointBlocks = corePoints.map((point, idx) => `
         <div class="editor-row-card" data-core-point-index="${{idx}}">
-          <div class="editor-row-title">Core point ${{idx + 1}}</div>
+          <div class="editor-row-title">核心爆点 ${{idx + 1}}</div>
           <div class="editor-grid">
             <div class="editor-field">
-              <div class="editor-label">Label</div>
+              <div class="editor-label">标签</div>
               <input class="editor-input" data-core-point-field="label" value="${{escapeHtml(normalizedText(point.label, "要点"))}}">
             </div>
             <div class="editor-field">
-              <div class="editor-label">Text</div>
+              <div class="editor-label">内容</div>
               <textarea class="editor-textarea" data-core-point-field="text">${{escapeHtml(normalizedText(point.text))}}</textarea>
             </div>
           </div>
@@ -3986,26 +3996,26 @@ def page_html() -> str:
       `).join("");
       const rowBlocks = rows.map((row, idx) => `
         <div class="editor-row-card" data-row-index="${{idx}}">
-          <div class="editor-row-title">Row ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
+          <div class="editor-row-title">脚本行 ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
           <div class="editor-grid">
             <div class="editor-field">
-              <div class="editor-label">Time</div>
+              <div class="editor-label">时间</div>
               <input class="editor-input" data-row-field="time" value="${{escapeHtml(normalizedText(row.time))}}">
             </div>
             <div class="editor-field">
-              <div class="editor-label">Visual</div>
+              <div class="editor-label">画面</div>
               <textarea class="editor-textarea" data-row-field="visual_content">${{escapeHtml(normalizedText(row.visual_content))}}</textarea>
             </div>
             <div class="editor-field">
-              <div class="editor-label">Action</div>
+              <div class="editor-label">动作</div>
               <textarea class="editor-textarea" data-row-field="action">${{escapeHtml(normalizedText(row.action))}}</textarea>
             </div>
             <div class="editor-field">
-              <div class="editor-label">Dialogue / audio</div>
+              <div class="editor-label">对白 / 音频</div>
               <textarea class="editor-textarea" data-row-field="dialogue_or_audio">${{escapeHtml(normalizedText(row.dialogue_or_audio))}}</textarea>
             </div>
             <div class="editor-field">
-              <div class="editor-label">Integrated summary</div>
+              <div class="editor-label">整合总结</div>
               <textarea class="editor-textarea" data-row-field="integrated_summary">${{escapeHtml(normalizedText(row.integrated_summary))}}</textarea>
             </div>
           </div>
@@ -4014,20 +4024,20 @@ def page_html() -> str:
       return `
         <details class="editor-disclosure">
           <summary class="editor-summary">
-            <span>Direct edits</span>
-            <span class="editor-summary-copy">Open to adjust title, rows, and core points <span class="editor-language-note">${{currentLanguageLabel(item)}}</span></span>
+            <span>直接修改</span>
+            <span class="editor-summary-copy">展开后可直接修改标题、脚本行和核心爆点 <span class="editor-language-note">${{currentLanguageLabel(item)}}</span></span>
           </summary>
           <div class="editor-shell" data-editor-item="${{item.id}}" data-editor-lang="${{escapeHtml(item.display_language || "zh")}}">
             <div class="editor-field">
-              <div class="editor-label">Title</div>
-              <input class="editor-input" data-edit-field="title" value="${{escapeHtml(normalizedText(script.title || item.title || "", "Video Script"))}}">
+              <div class="editor-label">标题</div>
+              <input class="editor-input" data-edit-field="title" value="${{escapeHtml(normalizedText(script.title || item.title || "", "视频脚本"))}}">
             </div>
             <div class="editor-field">
-              <div class="editor-label">Whole video summary</div>
+              <div class="editor-label">整体梗概</div>
               <textarea class="editor-textarea" data-edit-field="whole_video_summary">${{escapeHtml(normalizedText(script.whole_video_summary))}}</textarea>
             </div>
             <div class="editor-field">
-              <div class="editor-label">Mechanism reason</div>
+              <div class="editor-label">机制说明</div>
               <textarea class="editor-textarea" data-edit-field="mechanism_reason">${{escapeHtml(normalizedText(mechanismReason))}}</textarea>
             </div>
             ${{corePointBlocks}}
@@ -4053,13 +4063,13 @@ def page_html() -> str:
       const reviewProgress = buildReviewProgressMarkup(stage, status, message);
       return `
         <div class="review-shell" data-review-item="${{item.id}}">
-          <div class="editor-label">Review and rebuild</div>
-          <div class="review-note">Describe the core mistake in natural language. Koko will compare your feedback against the original AI analysis, revisit the prior evidence, re-check the video only when needed, and rebuild the script without rerunning the entire workflow.</div>
-          ${{editedBadge}}
-          ${{reviewedBadge}}
+          <div class="editor-label">复盘重做</div>
+          <div class="review-note">直接用自然语言告诉 Koko 这条脚本哪里理解错了。系统会拿你的反馈和原始分析结果做对照，必要时只复核关键片段，然后重新生成脚本。</div>
+          ${{editedBadge.replace("Manual edits exist", "已有人工修改")}}
+          ${{reviewedBadge.replace("Reviewed version active", "当前是复盘版本")}}
           ${{reviewProgress}}
           ${{reviewState}}
-          <textarea class="editor-textarea" data-review-feedback placeholder="Example: The real core is that the husband bragged about his network, but nobody actually came to help him. The current story spine is wrong.">${{escapeHtml(feedback)}}</textarea>
+          <textarea class="editor-textarea" data-review-feedback placeholder="例如：真正的核心是丈夫吹嘘自己人脉广，但连续打电话都没人来帮忙，当前故事主轴理解错了。">${{escapeHtml(feedback)}}</textarea>
           <div class="link-row">
             <button class="action-link" type="button" data-run-review="${{item.id}}">${{status === "running" ? "复盘中..." : "复盘重做"}}</button>
           </div>
@@ -4087,11 +4097,11 @@ def page_html() -> str:
         else if (normalizedStage === "failed" && stageIndex === -1 && key === "rebuild") cls += " failed";
         return `<div class="${{cls}}">${{REVIEW_STAGE_LABELS[key]}}</div>`;
       }}).join("");
-      const badge = normalizedStage === "failed" ? "Failed" : (REVIEW_STAGE_LABELS[normalizedStage] || "Review");
+      const badge = normalizedStage === "failed" ? "复盘失败" : (REVIEW_STAGE_LABELS[normalizedStage] || "复盘中");
       return `
         <div class="review-progress">
           <div class="review-progress-top">
-            <span>${{escapeHtml(message || "Preparing review.")}}</span>
+            <span>${{escapeHtml(message || "正在准备复盘。")}}</span>
             <span>${{badge}} · ${{percent}}%</span>
           </div>
           <div class="review-progress-rail"><div class="${{fillClass}}" style="width:${{percent}}%"></div></div>
@@ -4250,7 +4260,7 @@ def page_html() -> str:
     }}
 
     function renderItemCard(item, idx, open = false) {{
-      const title = escapeHtml(item.title || `Video ${{idx + 1}}`);
+      const title = escapeHtml(item.title || `视频 ${{idx + 1}}`);
       const contentType = item.content_type ? `<span class="batch-chip">${{escapeHtml(item.content_type)}}</span>` : "";
       const languageChip = `<span class="batch-chip">${{escapeHtml(currentLanguageLabel(item))}}</span>`;
       const editor = buildEditorMarkup(item);
@@ -4259,7 +4269,7 @@ def page_html() -> str:
         ? `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="zh">切回中文</button>`
         : `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="pt">转换成葡语</button>`;
       const links = [
-        item.html_url ? `<a class="action-link" href="${{item.html_url}}" target="_blank" rel="noreferrer">Open preview</a>` : "",
+        item.html_url ? `<a class="action-link" href="${{item.html_url}}" target="_blank" rel="noreferrer">打开预览</a>` : "",
         (item.zh_docx_url || item.pt_docx_url) ? `<button class="action-link" type="button" data-open-export-modal="${{escapeHtml(item.zh_docx_url || "")}}" data-open-export-modal-pt="${{escapeHtml(item.pt_docx_url || "")}}">导出脚本</button>` : "",
         toggleButton,
       ].join("");
@@ -4281,7 +4291,7 @@ def page_html() -> str:
               ${{review}}
               ${{editor}}
               <div class="item-actions-shell">
-                <div class="editor-label">Preview and export</div>
+                <div class="editor-label">预览与导出</div>
                 <div class="link-row">${{links}}</div>
               </div>
             </div>
@@ -4308,8 +4318,8 @@ def page_html() -> str:
         <section class="batch-overview">
           <div class="batch-overview-top">
             <div class="batch-overview-copy">
-              <div class="batch-overview-title">Batch analysis dashboard</div>
-              <div class="batch-overview-subtitle">${{escapeHtml(subtitle)}}</div>
+              <div class="batch-overview-title">${{currentItem ? escapeHtml(displayVideoName(currentItem, currentItem.index || 0)) : "批量任务进度"}}</div>
+              <div class="batch-overview-subtitle">${{currentItem ? `<a class="focus-url" href="${{escapeHtml(currentItem.video_url || "")}}" target="_blank" rel="noreferrer">${{escapeHtml(currentItem.video_url || "")}}</a>` : escapeHtml(subtitle)}}</div>
             </div>
             <span class="status ${{data.status === "completed" ? "status-completed" : data.status === "failed" ? "status-failed" : data.status === "running" ? "status-running" : "status-queued"}}">${{escapeHtml(data.status || "queued")}}</span>
           </div>
@@ -4320,36 +4330,8 @@ def page_html() -> str:
             <span class="batch-chip">已完成 ${{completed}}</span>
             <span class="batch-chip">失败 ${{failed}}</span>
           </div>
+          <div class="focus-note">${{escapeHtml(data.stage_message || data.message || subtitle)}}</div>
           ${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}
-        </section>
-      `;
-    }}
-
-    function renderCurrentFocus(items) {{
-      const currentItem = findCurrentItem(items);
-      if (!currentItem) return "";
-      const title = displayVideoName(currentItem, currentItem.index || 0);
-      const stageLabel = STAGE_LABELS[currentItem.stage] || itemStateLabel(currentItem);
-      const stageMessage = currentItem.stage_message || STAGE_COPY[currentItem.stage] || "正在拆解。";
-      const stageIndex = Math.max(0, STAGE_ORDER.indexOf(currentItem.stage || "queued"));
-      const percent = Math.max(8, Math.round(((stageIndex + 1) / STAGE_ORDER.length) * 100));
-      return `
-        <section class="focus-card">
-          <div class="focus-label">Now analyzing</div>
-          <h3 class="focus-title">${{escapeHtml(title)}}</h3>
-          <a class="focus-url" href="${{escapeHtml(currentItem.video_url || "")}}" target="_blank" rel="noreferrer">${{escapeHtml(currentItem.video_url || "")}}</a>
-          <div class="batch-meta" style="margin-top:14px;">
-            <span class="batch-chip">${{escapeHtml(stageLabel)}}</span>
-            <span class="batch-chip">顺位 ${{Number(currentItem.index || 0) + 1}}</span>
-          </div>
-          <div class="focus-note">${{escapeHtml(stageMessage)}}</div>
-          <div class="progress-wrap">
-            <div class="progress-top">
-              <span>${{escapeHtml(stageMessage)}}</span>
-              <span>${{percent}}%</span>
-            </div>
-            <div class="progress-rail"><div class="progress-fill" style="width:${{percent}}%"></div></div>
-          </div>
         </section>
       `;
     }}
@@ -4365,7 +4347,7 @@ def page_html() -> str:
         return `
           <article class="queue-card ${{state === "running" ? "current" : ""}}">
             <div class="queue-card-top">
-              <div class="queue-index">Video ${{idx + 1}}</div>
+              <div class="queue-index">视频 ${{idx + 1}}</div>
               <span class="queue-status ${{state}}">${{itemStateLabel(item)}}</span>
             </div>
             <h4 class="queue-title">${{escapeHtml(title)}}</h4>
@@ -4378,7 +4360,7 @@ def page_html() -> str:
       return `
         <section class="queue-shell">
           <div class="queue-header">
-            <h3>Queue</h3>
+            <h3>任务队列</h3>
             <p>这里会按提交顺序显示哪些视频正在拆解、哪些还在等待、哪些已经完成或失败。</p>
           </div>
           <div class="queue-list">${{cards}}</div>
@@ -4393,7 +4375,7 @@ def page_html() -> str:
       return `
         <section class="detail-section">
           <div class="detail-header">
-            <h3>Detailed results</h3>
+            <h3>结果详情</h3>
             <p>已经完成或失败的任务会在这里展开，方便你继续预览、导出、复盘和人工修改。</p>
           </div>
           <div class="item-stack">${{cards}}</div>
@@ -4406,7 +4388,6 @@ def page_html() -> str:
       return `
         <div class="batch-dashboard">
           ${{renderBatchOverview(data, items)}}
-          ${{renderCurrentFocus(items)}}
           ${{renderQueueList(items)}}
           ${{renderDetailResults(items)}}
         </div>
@@ -4453,7 +4434,7 @@ def page_html() -> str:
           <div class="progress-rail"><div class="progress-fill" style="width:${{percent}}%"></div></div>
           <div class="step-list">${{steps}}</div>
         </div>
-        <small>Task ID: <code>${{escapeHtml(jobId)}}</code></small>
+        <small>任务 ID：<code>${{escapeHtml(jobId)}}</code></small>
       `;
     }}
 
@@ -4466,9 +4447,9 @@ def page_html() -> str:
       checkReviewTransitions(data.items);
       if (data.status === "completed") {{
         const completedMessage = reviewRunning
-          ? "Analysis completed. Review is still running."
-          : (data.message || "Analysis completed.");
-        setStatus(`<span class="status status-completed">completed</span><br><br>${{progressMarkup("completed", completedMessage, data.id)}}${{batchResults}}`, true);
+          ? "主分析已完成，复盘任务仍在继续。"
+          : (data.message || "分析完成。");
+        setStatus(`<span class="status status-completed">已完成</span><br><br>${{progressMarkup("completed", completedMessage, data.id)}}${{batchResults}}`, true);
         if (reviewRunning) {{
           setTimeout(() => pollJob(jobId), 2500);
         }}
@@ -4476,25 +4457,25 @@ def page_html() -> str:
       }}
       if (data.status === "failed") {{
         const partial = Array.isArray(data.items) && data.items.length ? batchResults : "";
-        setStatus(`<span class="status status-failed">failed</span><br><br>${{progressMarkup("failed", data.message || "Analysis failed.", data.id)}}<code>${{escapeHtml(data.error || "Unknown error")}}</code>${{partial}}`);
+        setStatus(`<span class="status status-failed">失败</span><br><br>${{progressMarkup("failed", data.message || "分析失败。", data.id)}}<code>${{escapeHtml(data.error || "未知错误")}}</code>${{partial}}`);
         return;
       }}
       const badge = data.status === "running" ? "status-running" : "status-queued";
       const runningMarkup = Array.isArray(data.items) && data.items.length
         ? renderBatchResults(data)
         : `${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}`;
-      setStatus(`<span class="status ${{badge}}">${{data.status}}</span><br><br>${{runningMarkup}}`);
+      setStatus(`<span class="status ${{badge}}">${{jobStatusLabel(data.status)}}</span><br><br>${{runningMarkup}}`);
       setTimeout(() => pollJob(jobId), 2500);
     }}
 
     submitBtn.addEventListener("click", async () => {{
       const videoUrls = collectUrls();
       if (!videoUrls.length) {{
-        setStatus("Please paste at least one public video link first.");
+        setStatus("请先粘贴至少一个公开视频链接。");
         return;
       }}
       submitBtn.disabled = true;
-      setStatus("Creating task...");
+      setStatus("正在创建任务...");
       try {{
         const res = await fetch("/api/jobs", {{
           method: "POST",
@@ -4503,13 +4484,13 @@ def page_html() -> str:
         }});
         const data = await res.json();
         if (!res.ok) {{
-          throw new Error(data.error || "Task creation failed");
+          throw new Error(data.error || "任务创建失败");
         }}
         activeJobId = data.id;
-        setStatus(`<span class="status status-queued">queued</span><br><br>${{progressMarkup("queued", "Task created. Preparing analysis.", data.id)}}`);
+        setStatus(`<span class="status status-queued">排队中</span><br><br>${{progressMarkup("queued", "任务已创建，正在准备分析。", data.id)}}`);
         pollJob(data.id);
       }} catch (error) {{
-        setStatus(`<span class="status status-failed">failed</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
       }} finally {{
         submitBtn.disabled = false;
       }}
