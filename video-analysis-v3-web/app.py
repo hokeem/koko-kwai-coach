@@ -22,17 +22,24 @@ from uuid import uuid4
 
 
 PORT = int(os.environ.get("PORT", 8310))
-PIPELINE_TIMEOUT_SEC = int(os.environ.get("VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC", "480"))
+PIPELINE_TIMEOUT_SEC = int(os.environ.get("VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC", "720"))
 MAX_CONCURRENT_ANALYSES = max(1, int(os.environ.get("VIDEO_ANALYSIS_MAX_CONCURRENT_JOBS", "1")))
+
+
+def stage_timeout(name: str, default: int) -> int:
+    env_name = f"VIDEO_ANALYSIS_STAGE_TIMEOUT_{name.upper()}"
+    return int(os.environ.get(env_name, str(default)))
+
+
 STAGE_TIMEOUTS_SEC = {
-    "download": 150,
-    "media_prep": 45,
-    "gemini_analysis": 210,
-    "v2_analysis": 150,
-    "consistency_audit": 90,
-    "targeted_recheck": 180,
-    "arbitration": 60,
-    "final_output": 180,
+    "download": stage_timeout("download", 180),
+    "media_prep": stage_timeout("media_prep", 60),
+    "gemini_analysis": stage_timeout("gemini_analysis", 240),
+    "v2_analysis": stage_timeout("v2_analysis", 360),
+    "consistency_audit": stage_timeout("consistency_audit", 120),
+    "targeted_recheck": stage_timeout("targeted_recheck", 240),
+    "arbitration": stage_timeout("arbitration", 90),
+    "final_output": stage_timeout("final_output", 240),
 }
 BASE = Path(__file__).resolve().parent
 REPO_ROOT = BASE.parent
