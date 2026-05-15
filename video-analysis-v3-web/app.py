@@ -254,6 +254,8 @@ def load_library_entries() -> list[dict[str, Any]]:
         content_type = str(entry.get("content_type") or "").strip()
         if content_type not in ALLOWED_CONTENT_TYPES:
             entry["content_type"] = DEFAULT_CONTENT_TYPE
+        source = str(entry.get("content_type_source") or "").strip().lower()
+        entry["content_type_source"] = source if source in {"auto", "manual"} else "auto"
     return data
 
 
@@ -315,9 +317,96 @@ LIBRARY_FILTER_LABELS = [
     "整蛊",
     DEFAULT_CONTENT_TYPE,
 ]
+CONTENT_TYPE_CHOICE_TEXT = "、".join(LIBRARY_FILTER_LABELS)
+
+CONTENT_TYPE_CLASSIFY_PROMPT = f"""你是一个短视频脚本分类器。
+
+你会收到已经整理完成的脚本信息，尤其是：
+1. 标题
+2. 故事梗概（whole_video_summary）
+3. 包袱机制原因
+4. 核心爆点
+5. 可选的路由说明
+
+你的任务不是改写脚本，而是根据“最终语义”从固定分类白名单里选一个最合适的类型。
+
+分类原则：
+1. 先判断是否明显属于夫妻/情侣/伴侣关系主轴。
+2. 如果属于夫妻关系，再判断是否更具体地属于：
+   - 夫妻吵架：围绕现实事务、争执、互相打脸、找人帮忙失败等
+   - 夫妻出轨：第三者、抓奸、伪装、暧昧越界
+   - 夫妻好色：明显偷看、好色、被抓包
+   - 妻管严：一方被另一方强势管束，最后反抗失败或主动回归原秩序
+   - 夫妻欺骗：一方制造假象欺骗另一方
+   - 夫妻算计：关系中的小博弈、小算计、小心机
+   - 夫妻整蛊：伴侣之间用道具/时机实施整蛊
+   - 夫妻黄段子：带有明显性暗示与误解反差
+3. 如果不是夫妻类，再看是否属于：撬墙角、偷吃东西、赖账、骗子、偷奸耍滑、整蛊。
+4. 如果证据不够，不要硬判，直接给 `待分类`。
+5. 只能从这个白名单里选：{CONTENT_TYPE_CHOICE_TEXT}
+
+输出严格 JSON：
+{{
+  "content_type": "白名单中的一个值",
+  "confidence": "high/medium/low",
+  "reasoning": "一句话说明为什么是这个类，重点讲语义依据"
+}}
+"""
 
 
 def detect_content_type(script: dict[str, Any], bundle: dict[str, Any] | None = None) -> str:
+    return detect_content_type_decision(script, bundle).get("content_type") or DEFAULT_CONTENT_TYPE
+
+
+def classify_content_type_with_llm(
+    script: dict[str, Any],
+    bundle: dict[str, Any] | None,
+    key: str,
+    models: list[str],
+) -> dict[str, Any] | None:
+    if not key or run_text_json_prompt_with_fallback is None:
+        return None
+    routing = (bundle or {}).get("routing") or script.get("type_router") or {}
+    payload = {
+        "title": script.get("title") or "",
+        "whole_video_summary": script.get("whole_video_summary") or "",
+        "mechanism_reason": ((script.get("mechanism") or {}).get("reason") or ""),
+        "core_viral_points": script.get("core_viral_points") or [],
+        "replaceable_parts": script.get("replaceable_parts") or [],
+        "routing": {
+            "primary_type": routing.get("primary_type") or "",
+            "subtype_guess": routing.get("subtype_guess") or "",
+            "reasoning_summary": routing.get("reasoning_summary") or "",
+        },
+        "allowed_content_types": LIBRARY_FILTER_LABELS,
+    }
+    try:
+        result, _, _ = run_text_json_prompt_with_fallback(
+            payload,
+            key,
+            models,
+            CONTENT_TYPE_CLASSIFY_PROMPT,
+            "content type classification",
+        )
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+    content_type = str(result.get("content_type") or "").strip()
+    if content_type not in ALLOWED_CONTENT_TYPES and content_type != DEFAULT_CONTENT_TYPE:
+        content_type = DEFAULT_CONTENT_TYPE
+    confidence = str(result.get("confidence") or "").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "low"
+    return {
+        "content_type": content_type or DEFAULT_CONTENT_TYPE,
+        "reasoning": str(result.get("reasoning") or "").strip(),
+        "confidence": confidence,
+        "source": "auto",
+    }
+
+
+def keyword_fallback_content_type(script: dict[str, Any], bundle: dict[str, Any] | None = None) -> str:
     routing = (bundle or {}).get("routing") or script.get("type_router") or {}
     primary = routing.get("primary_type") or ""
     subtype = routing.get("subtype_guess") or ""
@@ -343,11 +432,67 @@ def detect_content_type(script: dict[str, Any], bundle: dict[str, Any] | None = 
     return DEFAULT_CONTENT_TYPE
 
 
+def detect_content_type_decision(
+    script: dict[str, Any],
+    bundle: dict[str, Any] | None = None,
+    *,
+    existing_type: str = "",
+    existing_source: str = "",
+) -> dict[str, Any]:
+    normalized_existing_type = str(existing_type or "").strip()
+    normalized_existing_source = str(existing_source or "").strip().lower()
+    if normalized_existing_source == "manual" and (normalized_existing_type in ALLOWED_CONTENT_TYPES or normalized_existing_type == DEFAULT_CONTENT_TYPE):
+        return {
+            "content_type": normalized_existing_type or DEFAULT_CONTENT_TYPE,
+            "content_type_source": "manual",
+            "content_type_reasoning": "Manual override",
+            "content_type_confidence": "manual",
+        }
+    llm_result = classify_content_type_with_llm(script, bundle, GOOGLE_API_KEY, unique_models(*MODEL_CANDIDATES))
+    if llm_result:
+        content_type = llm_result.get("content_type") or DEFAULT_CONTENT_TYPE
+        confidence = llm_result.get("confidence") or "low"
+        if content_type != DEFAULT_CONTENT_TYPE or confidence in {"high", "medium"}:
+            return {
+                "content_type": content_type,
+                "content_type_source": "auto",
+                "content_type_reasoning": llm_result.get("reasoning") or "LLM semantic classification",
+                "content_type_confidence": confidence,
+            }
+    content_type = keyword_fallback_content_type(script, bundle)
+    return {
+        "content_type": content_type,
+        "content_type_source": "auto",
+        "content_type_reasoning": "Keyword/routing fallback",
+        "content_type_confidence": "low" if content_type == DEFAULT_CONTENT_TYPE else "medium",
+    }
+
+
 def detect_content_type_for_output(
     output_dir: Path,
     script: dict[str, Any] | None = None,
     bundle: dict[str, Any] | None = None,
+    *,
+    existing_type: str = "",
+    existing_source: str = "",
 ) -> str:
+    return detect_content_type_decision_for_output(
+        output_dir,
+        script,
+        bundle,
+        existing_type=existing_type,
+        existing_source=existing_source,
+    ).get("content_type") or DEFAULT_CONTENT_TYPE
+
+
+def detect_content_type_decision_for_output(
+    output_dir: Path,
+    script: dict[str, Any] | None = None,
+    bundle: dict[str, Any] | None = None,
+    *,
+    existing_type: str = "",
+    existing_source: str = "",
+) -> dict[str, Any]:
     script_json = script or read_json(output_dir / "script_table.json") or {}
     bundle_json = bundle or read_json(output_dir / "evidence_bundle.json") or {}
     type_router = read_json(output_dir / "type_router.json") or {}
@@ -355,7 +500,12 @@ def detect_content_type_for_output(
         bundle_json = {**bundle_json, "routing": type_router}
     if type_router and not script_json.get("type_router"):
         script_json = {**script_json, "type_router": type_router}
-    return detect_content_type(script_json, bundle_json)
+    return detect_content_type_decision(
+        script_json,
+        bundle_json,
+        existing_type=existing_type,
+        existing_source=existing_source,
+    )
 
 
 def choose_script_rows(script: dict[str, Any]) -> list[dict[str, Any]]:
@@ -598,7 +748,8 @@ def write_script_docx(output_dir: Path, script: dict[str, Any], video_url: str, 
         doc = Document()
         doc.add_heading(script.get("title") or labels["title"], 0)
         doc.add_paragraph(f"{labels['source_url']}: {video_url}")
-        doc.add_paragraph(f"{labels['content_type']}: {detect_content_type(script)}")
+        existing_content_type = str(script.get("content_type") or "").strip()
+        doc.add_paragraph(f"{labels['content_type']}: {existing_content_type if existing_content_type else keyword_fallback_content_type(script)}")
         summary = script.get("whole_video_summary") or ""
         if summary:
             doc.add_heading(labels["summary"], level=1)
@@ -672,6 +823,47 @@ def delete_library_entry(entry_id: str) -> bool:
         shutil.rmtree(output_dir, ignore_errors=True)
         removed = True
     return removed
+
+
+def update_library_entry_content_type(entry_id: str, content_type: str) -> dict[str, Any] | None:
+    if content_type not in ALLOWED_CONTENT_TYPES and content_type != DEFAULT_CONTENT_TYPE:
+        raise RuntimeError("Unsupported content type.")
+    updated_entry: dict[str, Any] | None = None
+    with job_lock:
+        entries = load_library_entries()
+        found = False
+        for entry in entries:
+            if entry.get("entry_id") != entry_id:
+                continue
+            entry["content_type"] = content_type
+            entry["content_type_source"] = "manual"
+            entry["content_type_reasoning"] = "Manual override"
+            entry["content_type_confidence"] = "manual"
+            updated_entry = dict(entry)
+            found = True
+            break
+        if not found:
+            return None
+        save_library_entries(entries)
+
+        for job_id, job in jobs.items():
+            if job.get("id") == entry_id:
+                job["content_type"] = content_type
+                job["content_type_source"] = "manual"
+                job["content_type_reasoning"] = "Manual override"
+                job["content_type_confidence"] = "manual"
+                job["updated_at"] = now_iso()
+            for item in job.get("items") or []:
+                if item.get("id") != entry_id:
+                    continue
+                item["content_type"] = content_type
+                item["content_type_source"] = "manual"
+                item["content_type_reasoning"] = "Manual override"
+                item["content_type_confidence"] = "manual"
+                item["updated_at"] = now_iso()
+                job["updated_at"] = now_iso()
+        save_jobs()
+    return updated_entry
 
 
 def generate_script_variant_outputs(output_dir: Path, item_id: str, script_json: dict[str, Any], video_url: str, *, locale: str) -> dict[str, Any]:
@@ -869,12 +1061,18 @@ def sync_library_from_jobs() -> None:
                 docx_path = write_script_docx(output_dir, script_json, job.get("video_url") or "")
                 docx_url = f"/results/{parent_job_id}/{docx_path.name}" if docx_path and docx_path.exists() else ""
                 entry = {
+                    **detect_content_type_decision_for_output(
+                        output_dir,
+                        script_json,
+                        read_json(output_dir / "evidence_bundle.json"),
+                        existing_type=job.get("content_type") or "",
+                        existing_source=job.get("content_type_source") or "",
+                    ),
                     "entry_id": parent_job_id,
                     "parent_job_id": parent_job_id,
                     "created_at": job.get("completed_at") or job.get("updated_at") or now_iso(),
                     "video_url": job.get("video_url") or "",
                     "title": script_json.get("title") or "Video Script",
-                    "content_type": detect_content_type_for_output(output_dir, script_json, read_json(output_dir / "evidence_bundle.json")),
                     "whole_video_summary": script_json.get("whole_video_summary") or "",
                     "html_url": job.get("html_url") or f"/results/{parent_job_id}/script_table.html",
                     "report_url": job.get("report_url") or f"/results/{parent_job_id}/product_report.html",
@@ -894,7 +1092,17 @@ def sync_library_from_jobs() -> None:
                 docx_path = write_script_docx(output_dir, script_json, item.get("video_url") or "")
                 if docx_path and docx_path.exists():
                     item["docx_url"] = f"/results/{item['id']}/{docx_path.name}"
-            item["content_type"] = item.get("content_type") or detect_content_type_for_output(output_dir, script_json, read_json(output_dir / "evidence_bundle.json"))
+            decision = detect_content_type_decision_for_output(
+                output_dir,
+                script_json,
+                read_json(output_dir / "evidence_bundle.json"),
+                existing_type=item.get("content_type") or "",
+                existing_source=item.get("content_type_source") or "",
+            )
+            item["content_type"] = decision["content_type"]
+            item["content_type_source"] = decision["content_type_source"]
+            item["content_type_reasoning"] = decision["content_type_reasoning"]
+            item["content_type_confidence"] = decision["content_type_confidence"]
             item["title"] = item.get("title") or script_json.get("title") or "Video Script"
             persist_library_entry(parent_job_id, item)
             existing_entries[item.get("id")] = item
@@ -1448,6 +1656,9 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "zh_result_json": item.get("zh_result_json") or item.get("result_json"),
         "pt_result_json": item.get("pt_result_json"),
         "content_type": item.get("content_type") or "",
+        "content_type_source": item.get("content_type_source") or "auto",
+        "content_type_reasoning": item.get("content_type_reasoning") or "",
+        "content_type_confidence": item.get("content_type_confidence") or "",
         "title": item.get("title") or "",
         "display_language": item.get("display_language") or "zh",
         "review_status": item.get("review_status") or "",
@@ -1554,13 +1765,22 @@ def persist_library_entry(parent_job_id: str, item: dict[str, Any]) -> None:
     script = item.get("result_json") or {}
     output_dir = RESULTS_ROOT / item["id"]
     bundle = read_json(output_dir / "evidence_bundle.json")
+    decision = detect_content_type_decision(
+        script,
+        bundle,
+        existing_type=item.get("content_type") or "",
+        existing_source=item.get("content_type_source") or "",
+    )
     entry = {
         "entry_id": item["id"],
         "parent_job_id": parent_job_id,
         "created_at": item.get("completed_at") or now_iso(),
         "video_url": item.get("video_url"),
         "title": item.get("title") or script.get("title") or "Untitled Script",
-        "content_type": item.get("content_type") or detect_content_type(script, bundle),
+        "content_type": decision["content_type"],
+        "content_type_source": decision["content_type_source"],
+        "content_type_reasoning": decision["content_type_reasoning"],
+        "content_type_confidence": decision["content_type_confidence"],
         "whole_video_summary": script.get("whole_video_summary") or "",
         "html_url": item.get("html_url") or "",
         "report_url": item.get("report_url") or "",
@@ -1604,6 +1824,9 @@ def find_item_context(item_id: str) -> tuple[str, int, dict[str, Any]] | None:
                     "zh_result_json": json.loads(json.dumps(job.get("zh_result_json") or job.get("result_json") or {}, ensure_ascii=False)),
                     "pt_result_json": json.loads(json.dumps(job.get("pt_result_json") or {}, ensure_ascii=False)),
                     "content_type": job.get("content_type") or "",
+                    "content_type_source": job.get("content_type_source") or "auto",
+                    "content_type_reasoning": job.get("content_type_reasoning") or "",
+                    "content_type_confidence": job.get("content_type_confidence") or "",
                     "title": job.get("title") or "",
                     "display_language": job.get("display_language") or "zh",
                     "review_status": job.get("review_status") or "",
@@ -1706,15 +1929,26 @@ def regenerate_item_outputs(
         unique_models(*MODEL_CANDIDATES),
     )
     zh_variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="zh")
-    content_type = detect_content_type_for_output(output_dir, script_json, read_json(output_dir / "evidence_bundle.json"))
+    existing_item = jobs[parent_job_id]["items"][item_index]
+    decision = detect_content_type_decision_for_output(
+        output_dir,
+        script_json,
+        read_json(output_dir / "evidence_bundle.json"),
+        existing_type=existing_item.get("content_type") or "",
+        existing_source=existing_item.get("content_type_source") or "",
+    )
+    content_type = decision["content_type"]
 
     update_payload = {
         "result_json": zh_variant["script_json"],
         "zh_result_json": zh_variant["script_json"],
         "pt_result_json": None,
-        "original_result_json": jobs[parent_job_id]["items"][item_index].get("original_result_json") or script_json,
+        "original_result_json": existing_item.get("original_result_json") or script_json,
         "title": script_json.get("title") or "Video Script",
         "content_type": content_type,
+        "content_type_source": decision["content_type_source"],
+        "content_type_reasoning": decision["content_type_reasoning"],
+        "content_type_confidence": decision["content_type_confidence"],
         "docx_url": zh_variant["docx_url"],
         "zh_docx_url": zh_variant["docx_url"],
         "pt_docx_url": "",
@@ -1738,6 +1972,9 @@ def regenerate_item_outputs(
             job["original_result_json"] = job.get("original_result_json") or script_json
             job["title"] = script_json.get("title") or "Video Script"
             job["content_type"] = content_type
+            job["content_type_source"] = decision["content_type_source"]
+            job["content_type_reasoning"] = decision["content_type_reasoning"]
+            job["content_type_confidence"] = decision["content_type_confidence"]
             job["docx_url"] = zh_variant["docx_url"]
             job["zh_docx_url"] = zh_variant["docx_url"]
             job["pt_docx_url"] = ""
@@ -2044,7 +2281,12 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                     script_json = read_json(output_dir / "script_table.json") or read_json(output_dir / "analysis_result.json") or result_json or {}
                     docx_path = write_script_docx(output_dir, script_json, item["video_url"])
                     docx_url = f"/results/{item['id']}/{docx_path.name}" if docx_path and docx_path.exists() else ""
-                    content_type = detect_content_type_for_output(output_dir, script_json, read_json(output_dir / "evidence_bundle.json"))
+                    decision = detect_content_type_decision_for_output(
+                        output_dir,
+                        script_json,
+                        read_json(output_dir / "evidence_bundle.json"),
+                    )
+                    content_type = decision["content_type"]
                     update_job_item(
                         parent_job_id,
                         item_index,
@@ -2069,6 +2311,9 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                         stage="completed",
                         stage_message="Completed.",
                         content_type=content_type,
+                        content_type_source=decision["content_type_source"],
+                        content_type_reasoning=decision["content_type_reasoning"],
+                        content_type_confidence=decision["content_type_confidence"],
                         title=script_json.get("title") or "Video Script",
                     )
                     persist_library_entry(parent_job_id, jobs[parent_job_id]["items"][item_index])
@@ -2153,6 +2398,9 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
                 "original_result_json": None,
                 "display_language": "zh",
                 "content_type": "",
+                "content_type_source": "auto",
+                "content_type_reasoning": "",
+                "content_type_confidence": "",
                 "title": "",
                 "review_status": "",
                 "review_stage": "",
@@ -2184,6 +2432,10 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
         "zh_result_json": None,
         "pt_result_json": None,
         "display_language": "zh",
+        "content_type": "",
+        "content_type_source": "auto",
+        "content_type_reasoning": "",
+        "content_type_confidence": "",
         "stage": "queued",
         "stage_message": "Queued.",
         "items": items,
@@ -3946,6 +4198,10 @@ def library_html() -> str:
         f"<option value='{html_escape(label)}'>{html_escape(label)} ({count})</option>"
         for label, count in ordered_counts
     )
+    content_type_options = "".join(
+        f"<option value='{html_escape(label)}'>{html_escape(label)}</option>"
+        for label in LIBRARY_FILTER_LABELS
+    )
     chips = "".join(
         f"<span class='batch-chip'>{html_escape(label)} · {count}</span>"
         for label, count in ordered_counts
@@ -3954,12 +4210,16 @@ def library_html() -> str:
     for entry in entries:
         source_video_url = f"/results/{entry.get('entry_id')}/source.mp4"
         created_at = str(entry.get("created_at") or "")[:19].replace("T", " ")
+        content_type = entry.get("content_type") or DEFAULT_CONTENT_TYPE
+        content_type_source = entry.get("content_type_source") or "auto"
+        manual_badge = "<span class='library-time'>Manual</span>" if content_type_source == "manual" else ""
         cards.append(
-            f"<article class='library-card' data-content-type='{html_escape(entry.get('content_type') or DEFAULT_CONTENT_TYPE)}'>"
+            f"<article class='library-card' data-content-type='{html_escape(content_type)}'>"
             "<div class='library-card-top'>"
-            f"<span class='batch-chip'>{html_escape(entry.get('content_type') or DEFAULT_CONTENT_TYPE)}</span>"
+            f"<button class='batch-chip batch-chip-button' type='button' data-edit-content-type='{html_escape(entry.get('entry_id') or '')}' data-current-content-type='{html_escape(content_type)}'>{html_escape(content_type)}</button>"
             f"<span class='library-time'>{html_escape(created_at or 'Unknown time')}</span>"
             "</div>"
+            f"{manual_badge}"
             f"<a class='video-origin-link' href='{html_escape(entry.get('video_url') or '')}' target='_blank' rel='noreferrer'>{html_escape(entry.get('video_url') or '')}</a>"
             f"<div class='video-frame-wrap'><video class='video-frame' data-first-frame muted playsinline preload='metadata' src='{html_escape(source_video_url)}'></video></div>"
             "<div class='library-copy'>"
@@ -4021,6 +4281,9 @@ def library_html() -> str:
       font-size:12px; font-weight:700; color:#FF8200; background:rgba(255,255,255,.58); border:1px solid rgba(255,130,0,.16);
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
+    }}
+    .batch-chip-button {{
+      cursor: pointer;
     }}
     .library-stats {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; }}
     .library-toolbar {{ display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap; margin-top:42px; margin-bottom:14px; }}
@@ -4126,6 +4389,21 @@ def library_html() -> str:
       </div>
     </div>
   </div>
+  <div class="confirm-overlay" id="content-type-overlay" aria-hidden="true">
+    <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="content-type-title">
+      <h3 id="content-type-title">修改分类</h3>
+      <p>你可以直接人工指定脚本库里的分类。人工分类会优先保留，不会被后续自动分类覆盖。</p>
+      <div class="confirm-actions" style="justify-content:stretch; flex-direction:column; align-items:stretch;">
+        <select id="content-type-select" class="filter-select">
+          {content_type_options}
+        </select>
+        <div class="confirm-actions" style="margin-top:16px;">
+          <button class="action-link" id="content-type-cancel" type="button">取消</button>
+          <button class="action-link primary" id="content-type-save" type="button">保存分类</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <script>
     const backHomeButton = document.getElementById("back-home");
     const contentFilter = document.getElementById("content-filter");
@@ -4136,8 +4414,13 @@ def library_html() -> str:
     const exportChoiceCancel = document.getElementById("export-choice-cancel");
     const exportChoiceZh = document.getElementById("export-choice-zh");
     const exportChoicePt = document.getElementById("export-choice-pt");
+    const contentTypeOverlay = document.getElementById("content-type-overlay");
+    const contentTypeSelect = document.getElementById("content-type-select");
+    const contentTypeCancel = document.getElementById("content-type-cancel");
+    const contentTypeSave = document.getElementById("content-type-save");
     let pendingDeleteButton = null;
     let pendingExportChoice = null;
+    let pendingContentTypeEntryId = "";
 
     function closeDeleteConfirm() {{
       if (!deleteConfirmOverlay) return;
@@ -4165,6 +4448,21 @@ def library_html() -> str:
       pendingExportChoice = {{ zh: zhUrl || "", pt: ptUrl || "" }};
       exportChoiceOverlay.classList.add("open");
       exportChoiceOverlay.setAttribute("aria-hidden", "false");
+    }}
+
+    function closeContentTypeOverlay() {{
+      if (!contentTypeOverlay) return;
+      contentTypeOverlay.classList.remove("open");
+      contentTypeOverlay.setAttribute("aria-hidden", "true");
+      pendingContentTypeEntryId = "";
+    }}
+
+    function openContentTypeOverlay(entryId, currentType) {{
+      if (!contentTypeOverlay || !contentTypeSelect) return;
+      pendingContentTypeEntryId = entryId || "";
+      contentTypeSelect.value = currentType || "{DEFAULT_CONTENT_TYPE}";
+      contentTypeOverlay.classList.add("open");
+      contentTypeOverlay.setAttribute("aria-hidden", "false");
     }}
 
     async function downloadScript(url, button) {{
@@ -4233,6 +4531,10 @@ def library_html() -> str:
       exportChoiceCancel.addEventListener("click", closeExportChoice);
     }}
 
+    if (contentTypeCancel) {{
+      contentTypeCancel.addEventListener("click", closeContentTypeOverlay);
+    }}
+
     if (deleteConfirmOverlay) {{
       deleteConfirmOverlay.addEventListener("click", (event) => {{
         if (event.target === deleteConfirmOverlay) closeDeleteConfirm();
@@ -4245,12 +4547,45 @@ def library_html() -> str:
       }});
     }}
 
+    if (contentTypeOverlay) {{
+      contentTypeOverlay.addEventListener("click", (event) => {{
+        if (event.target === contentTypeOverlay) closeContentTypeOverlay();
+      }});
+    }}
+
     document.addEventListener("keydown", (event) => {{
       if (event.key === "Escape") {{
         closeDeleteConfirm();
         closeExportChoice();
+        closeContentTypeOverlay();
       }}
     }});
+
+    if (contentTypeSave) {{
+      contentTypeSave.addEventListener("click", async () => {{
+        if (!pendingContentTypeEntryId || !contentTypeSelect) {{
+          closeContentTypeOverlay();
+          return;
+        }}
+        const originalText = contentTypeSave.textContent;
+        contentTypeSave.textContent = "保存中...";
+        contentTypeSave.disabled = true;
+        try {{
+          const response = await fetch(`/api/library/${{pendingContentTypeEntryId}}/content-type`, {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ content_type: contentTypeSelect.value }}),
+          }});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Update failed");
+          window.location.reload();
+        }} catch (error) {{
+          alert("修改分类失败，请重试。");
+          contentTypeSave.textContent = originalText;
+          contentTypeSave.disabled = false;
+        }}
+      }});
+    }}
 
     if (deleteConfirmApprove) {{
       deleteConfirmApprove.addEventListener("click", async () => {{
@@ -4290,6 +4625,14 @@ def library_html() -> str:
       const deleteBtn = event.target.closest("[data-delete-entry]");
       if (deleteBtn) {{
         openDeleteConfirm(deleteBtn);
+        return;
+      }}
+      const editTypeBtn = event.target.closest("[data-edit-content-type]");
+      if (editTypeBtn) {{
+        openContentTypeOverlay(
+          editTypeBtn.getAttribute("data-edit-content-type") || "",
+          editTypeBtn.getAttribute("data-current-content-type") || "{DEFAULT_CONTENT_TYPE}",
+        );
         return;
       }}
       const exportModalBtn = event.target.closest("[data-open-export-modal]");
@@ -4542,6 +4885,24 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": result}, status=400)
                 return
             self.send_json({"ok": True, "job_id": result, "item_id": item_id}, status=202)
+            return
+        library_type_match = re.fullmatch(r"/api/library/([0-9a-f]{32})/content-type", parsed.path)
+        if library_type_match:
+            entry_id = library_type_match.group(1)
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            try:
+                updated = update_library_entry_content_type(entry_id, str(payload.get("content_type") or "").strip())
+            except Exception as exc:
+                self.send_json({"error": friendly_error(str(exc))}, status=400)
+                return
+            if not updated:
+                self.send_json({"error": "Library entry not found."}, status=404)
+                return
+            self.send_json({"ok": True, "entry": updated})
             return
         if parsed.path != "/api/jobs":
             self.send_error(HTTPStatus.NOT_FOUND)
