@@ -408,17 +408,29 @@ def recompute_job_status(job_id: str) -> None:
     items = job.get("items") or []
     if not items:
         return
-    statuses = [str(item.get("status") or "") for item in items]
-    if any(status == "running" for status in statuses):
+    statuses = [str(item.get("status") or "").strip() for item in items]
+    review_statuses = [str(item.get("review_status") or "").strip() for item in items]
+    completed_count = sum(1 for status in statuses if status == "completed")
+    failed_count = sum(1 for status in statuses if status == "failed")
+    if any(status == "running" for status in statuses) or any(status == "running" for status in review_statuses):
         job["status"] = "running"
     elif any(status == "queued" for status in statuses):
         job["status"] = "queued"
-    elif all(status == "completed" for status in statuses):
+    elif completed_count == len(items):
+        job["status"] = "completed"
+        job["completed_at"] = job.get("completed_at") or now_iso()
+    elif completed_count > 0 and completed_count + failed_count == len(items):
         job["status"] = "completed"
         job["completed_at"] = job.get("completed_at") or now_iso()
     else:
         job["status"] = "failed"
         job["completed_at"] = now_iso()
+    if job["status"] == "completed":
+        job["stage"] = "completed"
+        job["stage_message"] = f"Completed {completed_count}/{len(items)} items. Failed {failed_count}."
+    elif job["status"] == "failed":
+        job["stage"] = "failed"
+        job["stage_message"] = job.get("stage_message") or "All batch items failed."
     job["updated_at"] = now_iso()
 
 
@@ -5376,6 +5388,7 @@ def page_html() -> str:
     let jobPollTimer = null;
     let toastTimer = null;
     let pendingExportChoice = null;
+    let restoringActiveJob = false;
     const reviewTracker = Object.create(null);
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
@@ -6179,24 +6192,38 @@ def page_html() -> str:
       try {{
         res = await fetch(`/api/jobs/${{jobId}}`);
       }} catch (error) {{
+        if (restoringActiveJob) {{
+          restoringActiveJob = false;
+          setIdleState();
+          showToast("恢复失败", "没能恢复上次任务展示，页面已回到初始状态。");
+          return;
+        }}
         setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
         schedulePoll(jobId, 4000);
         return;
       }}
       if (!res.ok) {{
+        restoringActiveJob = false;
         persistActiveJobId("");
-        setStatus(`<span class="status status-failed">失败</span><br><br><code>无法恢复这条任务，可能已经不存在了。</code>`);
-        updateStopAllButtonState(false);
+        setIdleState();
+        showToast("无法恢复任务", "这条任务可能已经不存在或已失效。");
         return;
       }}
       let data;
       try {{
         data = await readJsonSafely(res);
       }} catch (error) {{
+        if (restoringActiveJob) {{
+          restoringActiveJob = false;
+          setIdleState();
+          showToast("恢复失败", "服务返回异常，未能恢复上次任务展示。");
+          return;
+        }}
         setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
         schedulePoll(jobId, 4000);
         return;
       }}
+      restoringActiveJob = false;
       const batchResults = renderBatchResults(data);
       const reviewRunning = hasRunningReview(data.items);
       checkReviewTransitions(data.items);
@@ -6286,8 +6313,8 @@ def page_html() -> str:
 
     const restoredJobId = readPersistedActiveJobId();
     if (restoredJobId) {{
+      restoringActiveJob = true;
       updateStopAllButtonState(true);
-      setStatus(`<span class="status status-queued">恢复任务中</span><br><br>${{progressMarkup("queued", "正在恢复刷新前的任务展示。", restoredJobId)}}`);
       pollJob(restoredJobId);
     }} else {{
       updateStopAllButtonState(false);
@@ -7055,6 +7082,7 @@ class AppHandler(BaseHTTPRequestHandler):
             reconcile_stale_jobs()
             job_id = parsed.path.split("/")[-1]
             with job_lock:
+                recompute_job_status(job_id)
                 job = jobs.get(job_id)
             if not job:
                 self.send_json({"error": "Job not found."}, status=404)
