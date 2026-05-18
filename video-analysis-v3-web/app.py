@@ -27,6 +27,9 @@ PIPELINE_TIMEOUT_SEC = int(os.environ.get("VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC",
 MAX_CONCURRENT_ANALYSES = max(1, int(os.environ.get("VIDEO_ANALYSIS_MAX_CONCURRENT_JOBS", "1")))
 RUNNING_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_RUNNING_STALE_SEC", "1800"))
 REVIEW_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_REVIEW_STALE_SEC", "1800"))
+SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTION_DAYS", "3"))
+SOURCE_VIDEO_EXTENDED_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_EXTENDED_RETENTION_DAYS", "30"))
+RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "14"))
 
 
 def stage_timeout(name: str, default: int) -> int:
@@ -65,6 +68,22 @@ MODEL_CANDIDATES = [
     "gemini-3-flash-preview",
 ]
 BEIJING_TZ = timezone(timedelta(hours=8))
+SOURCE_VIDEO_NAME = "source.mp4"
+RAW_ARTIFACT_NAMES = {
+    "primary_analysis_raw_gemini.json",
+    "v2_local_raw_gemini.json",
+    "comparison_raw_gemini.json",
+    "logic_audit_raw_gemini.json",
+    "supplement_raw_gemini.json",
+    "arbitration_raw_gemini.json",
+    "audio_multiview_raw_gemini.json",
+    "final_refine_raw_gemini.json",
+    "review_plan_raw_gemini.json",
+    "review_video_recheck_raw_gemini.json",
+    "review_refine_raw_gemini.json",
+    "analysis_raw_gemini.json",
+    "observations_raw_gemini.json",
+}
 
 job_lock = threading.Lock()
 jobs: dict[str, dict[str, Any]] = {}
@@ -201,6 +220,124 @@ def log_runtime_warning(event: str, message: str, **extra: Any) -> None:
         print(f"[warning] {event}: {message}")
 
 
+def log_runtime_info(event: str, message: str, **extra: Any) -> None:
+    payload = {"level": "info", "event": event, "message": message}
+    if extra:
+        payload.update(extra)
+    try:
+        print(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        print(f"[info] {event}: {message}")
+
+
+def best_timestamp_from_values(*values: object) -> datetime | None:
+    for value in values:
+        dt = parse_iso_datetime(value)
+        if dt:
+            return dt
+    return None
+
+
+def collect_cleanup_metadata() -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for job_id, job in jobs.items():
+        items = job.get("items") or []
+        if items:
+            for item in items:
+                item_id = str(item.get("id") or "").strip()
+                if not item_id:
+                    continue
+                metadata[item_id] = {
+                    "status": str(item.get("status") or "").strip(),
+                    "reviewed": bool(item.get("reviewed")) or str(item.get("review_status") or "").strip() == "completed",
+                    "edited": bool(item.get("edited")),
+                    "updated_at": best_timestamp_from_values(
+                        item.get("completed_at"),
+                        item.get("updated_at"),
+                        item.get("created_at"),
+                    ),
+                }
+        else:
+            metadata[job_id] = {
+                "status": str(job.get("status") or "").strip(),
+                "reviewed": bool(job.get("reviewed")) or str(job.get("review_status") or "").strip() == "completed",
+                "edited": bool(job.get("edited")),
+                "updated_at": best_timestamp_from_values(
+                    job.get("completed_at"),
+                    job.get("updated_at"),
+                    job.get("created_at"),
+                ),
+            }
+    return metadata
+
+
+def cleanup_old_results(*, now_dt: datetime | None = None) -> dict[str, int]:
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    now_dt = now_dt or datetime.now(timezone.utc)
+    metadata = collect_cleanup_metadata()
+    cleaned_source = 0
+    cleaned_raw = 0
+    skipped_running = 0
+    for output_dir in RESULTS_ROOT.iterdir():
+        if not output_dir.is_dir():
+            continue
+        item_id = output_dir.name
+        info = metadata.get(item_id) or {}
+        status = str(info.get("status") or "").strip()
+        if status in {"queued", "running"}:
+            skipped_running += 1
+            continue
+        updated_at = info.get("updated_at")
+        if not isinstance(updated_at, datetime):
+            try:
+                updated_at = datetime.fromtimestamp(output_dir.stat().st_mtime, timezone.utc)
+            except Exception:
+                updated_at = now_dt
+        age_days = max(0.0, (now_dt - updated_at).total_seconds() / 86400.0)
+        reviewed_or_edited = bool(info.get("reviewed")) or bool(info.get("edited"))
+        source_retention_days = SOURCE_VIDEO_EXTENDED_RETENTION_DAYS if reviewed_or_edited else SOURCE_VIDEO_RETENTION_DAYS
+
+        source_path = output_dir / SOURCE_VIDEO_NAME
+        if source_path.exists() and age_days > source_retention_days:
+            try:
+                source_path.unlink()
+                cleaned_source += 1
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                log_runtime_warning(
+                    "cleanup_source_failed",
+                    "Could not remove expired source video.",
+                    path=str(source_path),
+                    error=str(exc),
+                )
+
+        if age_days > RAW_ARTIFACT_RETENTION_DAYS:
+            for name in RAW_ARTIFACT_NAMES:
+                raw_path = output_dir / name
+                if not raw_path.exists():
+                    continue
+                try:
+                    raw_path.unlink()
+                    cleaned_raw += 1
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    log_runtime_warning(
+                        "cleanup_raw_failed",
+                        "Could not remove expired raw artifact.",
+                        path=str(raw_path),
+                        error=str(exc),
+                    )
+    summary = {
+        "cleaned_source_videos": cleaned_source,
+        "cleaned_raw_artifacts": cleaned_raw,
+        "skipped_running_dirs": skipped_running,
+    }
+    log_runtime_info("cleanup_results_complete", "Finished automatic cleanup of old result artifacts.", **summary)
+    return summary
+
+
 def load_jobs() -> None:
     global jobs
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -209,6 +346,10 @@ def load_jobs() -> None:
     if not isinstance(jobs, dict):
         jobs = {}
     backfill_completed_jobs()
+    try:
+        cleanup_old_results()
+    except Exception as exc:
+        log_runtime_warning("cleanup_results_skipped", "Automatic result cleanup failed during startup.", error=str(exc))
     try:
         sync_library_from_jobs()
     except Exception as exc:
@@ -6112,6 +6253,7 @@ def library_html() -> str:
     cards = []
     for entry in entries:
         source_video_url = f"/results/{entry.get('entry_id')}/source.mp4"
+        source_video_exists = (RESULTS_ROOT / str(entry.get("entry_id") or "") / SOURCE_VIDEO_NAME).exists()
         created_at = format_beijing_time(entry.get("created_at") or "")
         content_type = entry.get("content_type") or DEFAULT_CONTENT_TYPE
         content_type_source = entry.get("content_type_source") or "auto"
@@ -6124,8 +6266,12 @@ def library_html() -> str:
             "</div>"
             f"{manual_badge}"
             f"<a class='video-origin-link' href='{html_escape(entry.get('video_url') or '')}' target='_blank' rel='noreferrer'>{html_escape(entry.get('video_url') or '')}</a>"
-            f"<div class='video-frame-wrap'><video class='video-frame' data-first-frame muted playsinline preload='metadata' src='{html_escape(source_video_url)}'></video></div>"
-            "<div class='library-copy'>"
+            + (
+                f"<div class='video-frame-wrap'><video class='video-frame' data-first-frame muted playsinline preload='metadata' src='{html_escape(source_video_url)}'></video></div>"
+                if source_video_exists
+                else "<div class='video-frame-wrap video-frame-empty'><div class='video-frame-empty-copy'>原视频已自动清理</div></div>"
+            )
+            + "<div class='library-copy'>"
             f"<h3>{html_escape(entry.get('title') or 'Untitled Script')}</h3>"
             f"<p>{html_escape(entry.get('whole_video_summary') or '')}</p>"
             "</div>"
@@ -6211,6 +6357,18 @@ def library_html() -> str:
     .video-frame-wrap {{
       border-radius:18px; overflow:hidden; border:1px solid rgba(255,130,0,.16);
       background:rgba(255,244,232,.78); padding:10px;
+    }}
+    .video-frame-empty {{
+      min-height: 180px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+    .video-frame-empty-copy {{
+      font-size: 13px;
+      font-weight: 700;
+      color: rgba(255,130,0,.72);
+      text-align: center;
     }}
     .video-frame {{
       width:100%; height:auto; object-fit:contain; display:block; background:#FFF4E8;
