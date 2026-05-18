@@ -24,6 +24,8 @@ from uuid import uuid4
 PORT = int(os.environ.get("PORT", 8310))
 PIPELINE_TIMEOUT_SEC = int(os.environ.get("VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC", "720"))
 MAX_CONCURRENT_ANALYSES = max(1, int(os.environ.get("VIDEO_ANALYSIS_MAX_CONCURRENT_JOBS", "1")))
+RUNNING_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_RUNNING_STALE_SEC", "1800"))
+REVIEW_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_REVIEW_STALE_SEC", "1800"))
 
 
 def stage_timeout(name: str, default: int) -> int:
@@ -69,6 +71,10 @@ job_queue: deque[str] = deque()
 queued_job_ids: set[str] = set()
 queue_condition = threading.Condition()
 analysis_slots = threading.BoundedSemaphore(MAX_CONCURRENT_ANALYSES)
+active_processes_lock = threading.Lock()
+active_processes: dict[str, subprocess.Popen[str]] = {}
+cancelled_item_ids_lock = threading.Lock()
+cancelled_item_ids: set[str] = set()
 
 if (SKILL_ROOT / "scripts").exists():
     sys.path.insert(0, str(SKILL_ROOT / "scripts"))
@@ -202,6 +208,153 @@ def enqueue_job(job_id: str) -> None:
         queued_job_ids.add(job_id)
         job_queue.append(job_id)
         queue_condition.notify()
+
+
+def register_active_process(item_id: str, proc: subprocess.Popen[str]) -> None:
+    with active_processes_lock:
+        active_processes[item_id] = proc
+
+
+def unregister_active_process(item_id: str) -> None:
+    with active_processes_lock:
+        active_processes.pop(item_id, None)
+
+
+def mark_item_cancelled(item_id: str) -> None:
+    with cancelled_item_ids_lock:
+        cancelled_item_ids.add(item_id)
+
+
+def clear_item_cancelled(item_id: str) -> None:
+    with cancelled_item_ids_lock:
+        cancelled_item_ids.discard(item_id)
+
+
+def is_item_cancelled(item_id: str) -> bool:
+    with cancelled_item_ids_lock:
+        return item_id in cancelled_item_ids
+
+
+def recompute_job_status(job_id: str) -> None:
+    job = jobs.get(job_id)
+    if not job:
+        return
+    items = job.get("items") or []
+    if not items:
+        return
+    statuses = [str(item.get("status") or "") for item in items]
+    if any(status == "running" for status in statuses):
+        job["status"] = "running"
+    elif any(status == "queued" for status in statuses):
+        job["status"] = "queued"
+    elif all(status == "completed" for status in statuses):
+        job["status"] = "completed"
+        job["completed_at"] = job.get("completed_at") or now_iso()
+    else:
+        job["status"] = "failed"
+        job["completed_at"] = now_iso()
+    job["updated_at"] = now_iso()
+
+
+def reconcile_stale_jobs() -> None:
+    now_dt = datetime.now(timezone.utc)
+    changed = False
+    killed_item_ids: list[str] = []
+    with job_lock:
+        for job_id, job in jobs.items():
+            items = job.get("items") or []
+            for item in items:
+                item_id = str(item.get("id") or "")
+                status = str(item.get("status") or "").strip()
+                updated_at = parse_iso_datetime(item.get("updated_at") or item.get("created_at"))
+                if status == "running" and updated_at:
+                    stale_for = (now_dt - updated_at).total_seconds()
+                    if stale_for > RUNNING_TASK_STALE_SEC:
+                        item["status"] = "failed"
+                        item["stage"] = "failed"
+                        item["stage_message"] = "Stopped after no progress."
+                        item["error"] = "任务长时间没有进展，已自动停止。"
+                        item["completed_at"] = now_iso()
+                        item["updated_at"] = now_iso()
+                        mark_item_cancelled(item_id)
+                        killed_item_ids.append(item_id)
+                        changed = True
+                review_status = str(item.get("review_status") or "").strip()
+                if review_status == "running" and updated_at:
+                    stale_for = (now_dt - updated_at).total_seconds()
+                    if stale_for > REVIEW_TASK_STALE_SEC:
+                        item["review_status"] = "failed"
+                        item["review_stage"] = "failed"
+                        item["review_message"] = "复盘长时间没有进展，已自动停止。"
+                        item["updated_at"] = now_iso()
+                        mark_item_cancelled(item_id)
+                        changed = True
+            if changed:
+                recompute_job_status(job_id)
+        if changed:
+            save_jobs()
+    if killed_item_ids:
+        with active_processes_lock:
+            for item_id in killed_item_ids:
+                proc = active_processes.get(item_id)
+                if proc and proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+
+def stop_all_tasks() -> dict[str, int]:
+    stopped_jobs = 0
+    stopped_items = 0
+    stopped_reviews = 0
+    killed_item_ids: list[str] = []
+    with queue_condition:
+        job_queue.clear()
+        queued_job_ids.clear()
+    with job_lock:
+        for job_id, job in jobs.items():
+            items = job.get("items") or []
+            job_touched = False
+            for item in items:
+                item_id = str(item.get("id") or "")
+                if str(item.get("status") or "") in {"queued", "running"}:
+                    item["status"] = "failed"
+                    item["stage"] = "failed"
+                    item["stage_message"] = "Stopped manually."
+                    item["error"] = "任务已手动停止。"
+                    item["completed_at"] = now_iso()
+                    item["updated_at"] = now_iso()
+                    mark_item_cancelled(item_id)
+                    killed_item_ids.append(item_id)
+                    stopped_items += 1
+                    job_touched = True
+                if str(item.get("review_status") or "") == "running":
+                    item["review_status"] = "failed"
+                    item["review_stage"] = "failed"
+                    item["review_message"] = "复盘已手动停止。"
+                    item["updated_at"] = now_iso()
+                    mark_item_cancelled(item_id)
+                    stopped_reviews += 1
+                    job_touched = True
+            if job_touched:
+                recompute_job_status(job_id)
+                job["error"] = "任务已手动停止。"
+                stopped_jobs += 1
+        save_jobs()
+    with active_processes_lock:
+        for item_id in killed_item_ids:
+            proc = active_processes.get(item_id)
+            if proc and proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+    return {
+        "stopped_jobs": stopped_jobs,
+        "stopped_items": stopped_items,
+        "stopped_reviews": stopped_reviews,
+    }
 
 
 def restore_pending_jobs_to_queue() -> None:
@@ -2982,6 +3135,7 @@ def set_item_display_language(item_id: str, language: str) -> dict[str, Any]:
 
 
 def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, feedback: str) -> None:
+    clear_item_cancelled(item_id)
     if not GOOGLE_API_KEY:
         update_job_item(parent_job_id, item_index, review_status="failed", review_message="Missing GOOGLE_API_KEY for review.")
         return
@@ -3035,6 +3189,8 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
             "source_metadata": read_json(output_dir / "source_metadata.json"),
         }
         review_request_path.write_text(json.dumps(review_request, ensure_ascii=False, indent=2), encoding="utf-8")
+        if is_item_cancelled(item_id):
+            raise RuntimeError("任务已手动停止。")
 
         update_job_item(parent_job_id, item_index, review_stage="plan", review_message="Comparing your feedback against the prior analysis.")
         review_plan, review_plan_raw, _ = run_text_json_prompt_with_fallback(
@@ -3046,6 +3202,8 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
         )
         review_plan_path.write_text(json.dumps(review_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         review_plan_raw_path.write_text(json.dumps(review_plan_raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        if is_item_cancelled(item_id):
+            raise RuntimeError("任务已手动停止。")
 
         review_video = {}
         should_recheck, recheck_reason = should_run_review_video_recheck(review_plan)
@@ -3067,6 +3225,8 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
                 "reason": recheck_reason if source_video.exists() else "Source video is unavailable for recheck.",
             }
             review_video_path.write_text(json.dumps(review_video, ensure_ascii=False, indent=2), encoding="utf-8")
+        if is_item_cancelled(item_id):
+            raise RuntimeError("任务已手动停止。")
 
         update_job_item(parent_job_id, item_index, review_stage="rebuild", review_message="Rebuilding the script from the reviewed evidence.")
         refine_payload = {
@@ -3088,6 +3248,8 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
             "review refine",
         )
         review_refine_raw_path.write_text(json.dumps(corrected_raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        if is_item_cancelled(item_id):
+            raise RuntimeError("任务已手动停止。")
 
         merged_script = json.loads(json.dumps(original_script, ensure_ascii=False))
         for key in ["title", "route", "audio_information_score", "source_url", "whole_video_summary", "core_viral_points", "replaceable_parts", "rows", "mechanism"]:
@@ -3153,6 +3315,8 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
     proc_env = os.environ.copy()
     last_error = "Unknown pipeline failure"
     tried: list[str] = []
+    manual_stop = False
+    clear_item_cancelled(item["id"])
     update_job_item(parent_job_id, item_index, status="running", started_at=now_iso(), command=[], stage="queued", stage_message="Queued for analysis.")
     for model_name in dict.fromkeys(MODEL_CANDIDATES):
         cmd = [
@@ -3182,12 +3346,21 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                 stderr=subprocess.PIPE,
                 env=proc_env,
             )
+            register_active_process(item["id"], proc)
             start_time = time.time()
             stdout_lines: list[str] = []
             progress_mtime = 0.0
             current_stage = "starting"
             stage_started_at = start_time
             while proc.poll() is None:
+                if is_item_cancelled(item["id"]):
+                    manual_stop = True
+                    proc.kill()
+                    stdout_text, stderr_text = proc.communicate()
+                    if stdout_text:
+                        stdout_lines.append(stdout_text)
+                    last_error = "任务已手动停止。"
+                    break
                 if progress_path.exists():
                     stat = progress_path.stat()
                     if stat.st_mtime > progress_mtime:
@@ -3228,6 +3401,10 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                 proc_stdout = "".join(stdout_lines)
                 result_json = extract_json_line(proc_stdout or "")
                 if proc.returncode == 0:
+                    if is_item_cancelled(item["id"]):
+                        manual_stop = True
+                        last_error = "任务已手动停止。"
+                        break
                     html_path = output_dir / "script_table.html"
                     if not html_path.exists():
                         last_error = "Pipeline finished but script_table.html was not created."
@@ -3277,12 +3454,16 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                 if not should_try_next_model(last_error):
                     break
                 continue
+            if manual_stop:
+                break
             break
         except Exception as exc:
             last_error = str(exc)
             if not should_try_next_model(last_error):
                 break
             continue
+        finally:
+            unregister_active_process(item["id"])
     update_job_item(
         parent_job_id,
         item_index,
@@ -3768,7 +3949,13 @@ def page_html() -> str:
       box-shadow: 0 0 0 4px rgba(255,130,0,.10);
       transform: translateY(-1px);
     }}
-    .actions {{ margin-top: 16px; }}
+    .actions {{
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: stretch;
+    }}
     button {{
       width: 100%;
       border: 0;
@@ -3786,6 +3973,42 @@ def page_html() -> str:
       transform: translateY(-1px);
       box-shadow: 0 18px 30px rgba(249,115,0,.26);
       filter: saturate(1.02);
+    }}
+    .actions .action-link {{
+      width: auto;
+      min-width: 160px;
+      border-radius: 18px;
+      padding: 16px 20px;
+      font-size: 15px;
+      border-color: rgba(255,130,0,.18);
+      box-shadow: 0 16px 28px rgba(249,115,0,.10);
+      background: rgba(255,255,255,.9);
+    }}
+    .actions .action-link:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 18px 30px rgba(249,115,0,.14);
+    }}
+    .actions .action-link:disabled {{
+      cursor: not-allowed;
+      opacity: .55;
+      transform: none;
+      box-shadow: none;
+    }}
+    .actions button:disabled {{
+      cursor: not-allowed;
+      opacity: .6;
+      transform: none;
+      filter: none;
+      box-shadow: none;
+    }}
+    @media (max-width: 720px) {{
+      .actions {{
+        grid-template-columns: 1fr;
+      }}
+      .actions .action-link {{
+        width: 100%;
+        min-width: 0;
+      }}
     }}
     .server-note {{
       margin-top: 12px;
@@ -4785,6 +5008,7 @@ def page_html() -> str:
             <textarea id="video-url" placeholder="每行粘贴一个链接&#10;https://www.kwai.com/@.../video/...&#10;https://www.kwai.com/@.../video/..."></textarea>
             <div class="actions">
               <button id="submit-btn">开始拆解脚本</button>
+              <button class="action-link" id="stop-all-btn" type="button" disabled>停止所有任务</button>
             </div>
           </div>
           <div id="status-box" class="status-box">
@@ -4816,6 +5040,7 @@ def page_html() -> str:
   <script>
     const videoInput = document.getElementById("video-url");
     const submitBtn = document.getElementById("submit-btn");
+    const stopAllBtn = document.getElementById("stop-all-btn");
     const statusBox = document.getElementById("status-box");
     const heroPanel = document.querySelector(".hero-panel");
     const appToast = document.getElementById("app-toast");
@@ -4834,6 +5059,12 @@ def page_html() -> str:
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
     const ACTIVE_JOB_STORAGE_KEY = "koko_active_job_id";
+    const IDLE_STATUS_HTML = `
+      <div class="status-empty">
+        <div class="status-empty-title">已就绪。</div>
+        <div class="status-empty-copy">输入一个或多个视频链接后，系统会在这里实时显示拆解进度。</div>
+      </div>
+    `;
     const STAGE_ORDER = ["queued", "download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output", "completed"];
     const STAGE_LABELS = {{
       queued: "等待拆解",
@@ -4919,6 +5150,23 @@ def page_html() -> str:
       ensureDetailIframes(statusBox);
     }}
 
+    function updateStopAllButtonState(active) {{
+      if (!stopAllBtn) return;
+      stopAllBtn.disabled = !active;
+    }}
+
+    function setIdleState() {{
+      if (jobPollTimer) {{
+        clearTimeout(jobPollTimer);
+        jobPollTimer = null;
+      }}
+      activeJobId = "";
+      activeReviewItemId = "";
+      persistActiveJobId("");
+      setStatus(IDLE_STATUS_HTML, true);
+      updateStopAllButtonState(false);
+    }}
+
     function schedulePoll(jobId, delay = 2500) {{
       if (jobPollTimer) clearTimeout(jobPollTimer);
       jobPollTimer = setTimeout(() => pollJob(jobId), delay);
@@ -4935,6 +5183,16 @@ def page_html() -> str:
 
     function readPersistedActiveJobId() {{
       return String(window.localStorage.getItem(ACTIVE_JOB_STORAGE_KEY) || "").trim();
+    }}
+
+    async function readJsonSafely(response) {{
+      const raw = await response.text();
+      try {{
+        return raw ? JSON.parse(raw) : {{}};
+      }} catch (error) {{
+        const preview = String(raw || "").slice(0, 180).trim();
+        throw new Error(preview ? `服务返回了非 JSON 内容：${{preview}}` : "服务返回了空响应。");
+      }}
     }}
 
     function showToast(title, copy) {{
@@ -5565,13 +5823,29 @@ def page_html() -> str:
     async function pollJob(jobId) {{
       activeJobId = jobId;
       persistActiveJobId(jobId);
-      const res = await fetch(`/api/jobs/${{jobId}}`);
+      updateStopAllButtonState(true);
+      let res;
+      try {{
+        res = await fetch(`/api/jobs/${{jobId}}`);
+      }} catch (error) {{
+        setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        schedulePoll(jobId, 4000);
+        return;
+      }}
       if (!res.ok) {{
         persistActiveJobId("");
         setStatus(`<span class="status status-failed">失败</span><br><br><code>无法恢复这条任务，可能已经不存在了。</code>`);
+        updateStopAllButtonState(false);
         return;
       }}
-      const data = await res.json();
+      let data;
+      try {{
+        data = await readJsonSafely(res);
+      }} catch (error) {{
+        setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        schedulePoll(jobId, 4000);
+        return;
+      }}
       const batchResults = renderBatchResults(data);
       const reviewRunning = hasRunningReview(data.items);
       checkReviewTransitions(data.items);
@@ -5580,14 +5854,19 @@ def page_html() -> str:
           ? "主分析已完成，复盘任务仍在继续。"
           : (data.message || "分析完成。");
         setStatus(batchResults || `<div class="status-empty"><div class="status-empty-title">分析完成</div><div class="status-empty-copy">${{escapeHtml(completedMessage)}}</div></div>`, true);
+        updateStopAllButtonState(reviewRunning);
         if (reviewRunning) {{
           schedulePoll(jobId, 2500);
+        }} else {{
+          persistActiveJobId("");
         }}
         return;
       }}
       if (data.status === "failed") {{
         const partial = Array.isArray(data.items) && data.items.length ? batchResults : "";
         setStatus(`<span class="status status-failed">失败</span><br><br>${{progressMarkup("failed", data.message || "分析失败。", data.id)}}<code>${{escapeHtml(data.error || "未知错误")}}</code>${{partial}}`);
+        updateStopAllButtonState(false);
+        persistActiveJobId("");
         return;
       }}
       const badge = data.status === "running" ? "status-running" : "status-queued";
@@ -5612,25 +5891,55 @@ def page_html() -> str:
           headers: {{ "Content-Type": "application/json" }},
           body: JSON.stringify({{ video_urls: videoUrls }})
         }});
-        const data = await res.json();
+        const data = await readJsonSafely(res);
         if (!res.ok) {{
           throw new Error(data.error || "任务创建失败");
         }}
         activeJobId = data.id;
         persistActiveJobId(data.id);
+        updateStopAllButtonState(true);
         setStatus(`<span class="status status-queued">排队中</span><br><br>${{progressMarkup("queued", "任务已创建，正在准备分析。", data.id)}}`);
         pollJob(data.id);
       }} catch (error) {{
         setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        updateStopAllButtonState(false);
       }} finally {{
         submitBtn.disabled = false;
       }}
     }});
 
+    if (stopAllBtn) {{
+      stopAllBtn.addEventListener("click", async () => {{
+        const original = stopAllBtn.textContent;
+        stopAllBtn.disabled = true;
+        stopAllBtn.textContent = "停止中...";
+        try {{
+          const res = await fetch("/api/stop-all", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+          }});
+          const data = await readJsonSafely(res);
+          if (!res.ok) {{
+            throw new Error(data.error || "停止任务失败");
+          }}
+          setIdleState();
+          showToast("已停止所有任务", `已停止 ${{data.stopped_items || 0}} 条分析，${{data.stopped_reviews || 0}} 条复盘。`);
+        }} catch (error) {{
+          showToast("停止失败", String(error.message || error));
+          updateStopAllButtonState(!!activeJobId);
+        }} finally {{
+          stopAllBtn.textContent = original;
+        }}
+      }});
+    }}
+
     const restoredJobId = readPersistedActiveJobId();
     if (restoredJobId) {{
+      updateStopAllButtonState(true);
       setStatus(`<span class="status status-queued">恢复任务中</span><br><br>${{progressMarkup("queued", "正在恢复刷新前的任务展示。", restoredJobId)}}`);
       pollJob(restoredJobId);
+    }} else {{
+      updateStopAllButtonState(false);
     }}
 
     videoInput.addEventListener("keydown", (event) => {{
@@ -6375,6 +6684,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"entries": load_library_entries()})
             return
         if parsed.path.startswith("/api/jobs/"):
+            reconcile_stale_jobs()
             job_id = parsed.path.split("/")[-1]
             with job_lock:
                 job = jobs.get(job_id)
@@ -6443,6 +6753,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/stop-all":
+            summary = stop_all_tasks()
+            self.send_json({"ok": True, **summary})
+            return
         if parsed.path == "/error-cases/login":
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8", errors="ignore") if length else ""
