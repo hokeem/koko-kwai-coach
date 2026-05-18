@@ -50,6 +50,7 @@ DATA_ROOT = Path(os.environ.get("VIDEO_ANALYSIS_WEB_DATA_DIR", str(BASE / "data"
 JOBS_FILE = DATA_ROOT / "jobs.json"
 RESULTS_ROOT = DATA_ROOT / "results"
 LIBRARY_FILE = DATA_ROOT / "script_library.json"
+ERROR_CASE_LIBRARY_FILE = DATA_ROOT / "error_case_library.json"
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 ASSETS_ROOT = BASE / "assets"
 HERO_WORDMARK = ASSETS_ROOT / "kwai-wordmark.svg"
@@ -291,6 +292,17 @@ def load_library_entries() -> list[dict[str, Any]]:
 
 def save_library_entries(entries: list[dict[str, Any]]) -> None:
     write_json_atomic(LIBRARY_FILE, entries)
+
+
+def load_error_case_entries() -> list[dict[str, Any]]:
+    data = read_json_file(ERROR_CASE_LIBRARY_FILE, default=[])
+    if not isinstance(data, list):
+        return []
+    return [entry for entry in data if isinstance(entry, dict)]
+
+
+def save_error_case_entries(entries: list[dict[str, Any]]) -> None:
+    write_json_atomic(ERROR_CASE_LIBRARY_FILE, entries)
 
 
 def split_video_urls(raw: str) -> list[str]:
@@ -714,6 +726,60 @@ REVIEW_REFINE_PROMPT = """你是一个“复盘重做”脚本整理器。
       {"label": "背后原因", "text": "..."}
     ]
   }
+}
+"""
+
+
+ERROR_CASE_REVIEW_PROMPT = """你是一个短视频分析系统的“错误案例复盘器”。
+
+你会收到一次已经完成的“复盘重做”案例，里面包括：
+1. 原始脚本
+2. 用户指出的核心问题（review_feedback）
+3. 复盘诊断（review_plan）
+4. 可选的视频回看结果（review_video_recheck）
+5. 主链当时实际走过的流程快照（process_trace）
+6. 修正后的最新脚本
+
+你的任务不是再写脚本，而是为“错误案例库”输出一份结构化复盘，重点回答：
+- 这次最核心到底错在哪
+- 更偏向是哪一层出了问题：
+  - gemini_analysis
+  - v2_analysis
+  - consistency_audit
+  - targeted_recheck
+  - arbitration
+  - final_output
+  - unknown
+- 为什么主流程当时没有拦住这个问题
+- 从这次实际执行链路看，哪一步“没找到”、哪一步“没触发”、哪一步“误判放行”
+
+要求：
+1. 重点讲“流程上错在哪”，不是只复述剧情。
+2. 必须结合 process_trace 和 review_plan 来分析。
+3. 如果某层其实执行了，但结果没有起到纠偏作用，也要明确指出。
+4. 不要生成代码建议，不要改 prompt，只做错误归因和案例沉淀。
+5. 输出严格 JSON。
+
+输出格式：
+{
+  "core_issue": "一句话说明这次原始脚本的核心错误",
+  "primary_failure_layer": "gemini_analysis/v2_analysis/consistency_audit/targeted_recheck/arbitration/final_output/unknown",
+  "flow_failure_summary": "从执行流程角度看，这次为什么会错",
+  "difference_summary": "原始脚本和修正后脚本的关键差异",
+  "missed_or_weak_links": [
+    {
+      "layer": "具体层名",
+      "status": "not_run/ran_but_missed/incorrect_pass/insufficient_signal",
+      "reason": "为什么这层没有拦住问题"
+    }
+  ],
+  "evidence_notes": [
+    "和 review_plan/process_trace 对应的关键观察"
+  ],
+  "preventive_notes": [
+    "以后遇到相似 case 时应重点关注的流程风险点"
+  ],
+  "confidence": "low/medium/high"
 }
 """
 
@@ -1957,6 +2023,235 @@ def stats_html() -> str:
 </html>"""
 
 
+def build_error_case_process_trace(output_dir: Path) -> dict[str, Any]:
+    media_probe = read_json(output_dir / "media_probe.json")
+    primary = read_json(output_dir / "primary_v2_draft.json")
+    v2_local = read_json(output_dir / "v2_local_result.json")
+    comparison = read_json(output_dir / "comparison_report.json")
+    logic = read_json(output_dir / "logic_audit.json")
+    supplement = read_json(output_dir / "supplement_evidence.json")
+    conflict = read_json(output_dir / "conflict_recheck.json")
+    arbitration = read_json(output_dir / "arbitration_result.json")
+    type_router = read_json(output_dir / "type_router.json")
+    audio_multiview = read_json(output_dir / "audio_multiview.json")
+    review_plan = read_json(output_dir / "review_plan.json")
+    review_video = read_json(output_dir / "review_video_recheck.json")
+    trace_steps = [
+        {
+            "step": "download",
+            "status": "present" if (output_dir / "source.mp4").exists() else "missing",
+            "note": "source.mp4 exists" if (output_dir / "source.mp4").exists() else "source.mp4 missing",
+        },
+        {
+            "step": "media_prep",
+            "status": "present" if media_probe else "missing",
+            "note": f"duration={media_probe.get('duration_sec') or media_probe.get('duration') or 0}" if media_probe else "media_probe missing",
+        },
+        {
+            "step": "gemini_analysis",
+            "status": "present" if primary else "missing",
+            "note": f"route={primary.get('route') or ''}, audio_score={primary.get('audio_information_score') or ''}" if primary else "primary draft missing",
+        },
+        {
+            "step": "v2_analysis",
+            "status": "present" if v2_local else "missing",
+            "note": f"route={v2_local.get('route') or ''}, audio_score={v2_local.get('audio_information_score') or ''}" if v2_local else "v2 local result missing",
+        },
+        {
+            "step": "consistency_audit",
+            "status": "present" if (comparison or logic) else "missing",
+            "note": (
+                f"comparison={comparison.get('recommended_action') or ''}, "
+                f"story_alignment={(comparison.get('story_spine_alignment') or {}).get('status') or ''}, "
+                f"logic={logic.get('recommended_action') or ''}"
+            ) if (comparison or logic) else "comparison and logic audit missing",
+        },
+        {
+            "step": "targeted_recheck",
+            "status": "present" if (supplement or conflict or audio_multiview) else "missing",
+            "note": (
+                f"supplement_windows={len((supplement.get('windows') or [])) if supplement else 0}, "
+                f"conflict_recheck_skipped={conflict.get('skipped') if conflict else ''}, "
+                f"audio_multiview_skipped={audio_multiview.get('skipped') if audio_multiview else ''}"
+            ) if (supplement or conflict or audio_multiview) else "no targeted recheck artifacts",
+        },
+        {
+            "step": "arbitration",
+            "status": "present" if arbitration else "missing",
+            "note": f"accepted_pipeline={arbitration.get('accepted_pipeline') or ''}" if arbitration else "arbitration result missing",
+        },
+        {
+            "step": "review_plan",
+            "status": "present" if review_plan else "missing",
+            "note": f"failure_layer={review_plan.get('likely_failure_layer') or ''}, needs_video_recheck={review_plan.get('needs_video_recheck')}" if review_plan else "review plan missing",
+        },
+        {
+            "step": "review_video_recheck",
+            "status": "present" if review_video else "missing",
+            "note": f"skipped={review_video.get('skipped') if review_video else ''}, verification={review_video.get('verification_result') if review_video else ''}" if review_video else "review video recheck missing",
+        },
+        {
+            "step": "final_output",
+            "status": "present" if (output_dir / 'script_table.json').exists() else "missing",
+            "note": "final script exists" if (output_dir / 'script_table.json').exists() else "final script missing",
+        },
+    ]
+    return {
+        "steps": trace_steps,
+        "routing": {
+            "primary_type": type_router.get("primary_type") or "",
+            "subtype_guess": type_router.get("subtype_guess") or "",
+            "routing_mode": type_router.get("routing_mode") or "",
+            "reasoning_summary": type_router.get("reasoning_summary") or "",
+        },
+        "comparison_report": comparison,
+        "logic_audit": logic,
+        "supplement": supplement,
+        "conflict_recheck": conflict,
+        "arbitration_result": arbitration,
+        "audio_multiview": audio_multiview,
+    }
+
+
+def fallback_error_case_review(
+    review_plan: dict[str, Any],
+    process_trace: dict[str, Any],
+    original_script: dict[str, Any],
+    corrected_script: dict[str, Any],
+    feedback: str,
+) -> dict[str, Any]:
+    layer = str(review_plan.get("likely_failure_layer") or "").strip() or "unknown"
+    original_summary = str(original_script.get("whole_video_summary") or original_script.get("title") or "").strip()
+    corrected_summary = str(corrected_script.get("whole_video_summary") or corrected_script.get("title") or "").strip()
+    notes = []
+    comparison = process_trace.get("comparison_report") or {}
+    if comparison:
+        story_status = ((comparison.get("story_spine_alignment") or {}).get("status") or "").strip()
+        if story_status:
+            notes.append(f"一致性审查里的故事主轴状态为 {story_status}。")
+    logic = process_trace.get("logic_audit") or {}
+    if logic:
+        rec = str(logic.get("recommended_action") or "").strip()
+        if rec:
+            notes.append(f"逻辑审查建议动作为 {rec}。")
+    confidence = str(review_plan.get("confidence") or "medium").strip().lower()
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "medium"
+    return {
+        "core_issue": str(review_plan.get("problem_summary") or feedback or "原始脚本主干理解错误").strip(),
+        "primary_failure_layer": layer,
+        "flow_failure_summary": str(review_plan.get("reasoning") or "主流程中的关键层未能正确识别或拦截错误主轴。").strip(),
+        "difference_summary": f"原始脚本偏向：{original_summary or '无'}；修正后脚本偏向：{corrected_summary or '无'}",
+        "missed_or_weak_links": [
+            {
+                "layer": layer,
+                "status": "ran_but_missed" if layer != "unknown" else "insufficient_signal",
+                "reason": "复盘计划判断该层是最可能的失效点，说明它执行过但没有正确纠偏。"
+            }
+        ],
+        "evidence_notes": notes or ["需要结合 review_plan 与流程快照人工查看。"],
+        "preventive_notes": [str(review_plan.get("correction_goal") or "下次遇到相似案例时，应优先复核主轴、实体和因果链。").strip()],
+        "confidence": confidence,
+    }
+
+
+def summarize_error_case_with_llm(
+    *,
+    output_dir: Path,
+    parent_job_id: str,
+    item_index: int,
+    item_id: str,
+    feedback: str,
+    original_script: dict[str, Any],
+    corrected_script: dict[str, Any],
+    review_plan: dict[str, Any],
+    review_video: dict[str, Any],
+) -> dict[str, Any]:
+    process_trace = build_error_case_process_trace(output_dir)
+    video_url = ""
+    with job_lock:
+        job = jobs.get(parent_job_id) or {}
+        items = job.get("items") or []
+        if 0 <= item_index < len(items):
+            video_url = str(items[item_index].get("video_url") or "")
+    summary = None
+    if GOOGLE_API_KEY and run_text_json_prompt_with_fallback is not None:
+        payload = {
+            "job_id": parent_job_id,
+            "item_index": item_index,
+            "item_id": item_id,
+            "video_url": video_url,
+            "review_feedback": feedback,
+            "original_script": original_script,
+            "corrected_script": corrected_script,
+            "review_plan": review_plan,
+            "review_video_recheck": review_video,
+            "process_trace": process_trace,
+        }
+        try:
+            result, _, _ = run_text_json_prompt_with_fallback(
+                payload,
+                GOOGLE_API_KEY,
+                unique_models(*MODEL_CANDIDATES),
+                ERROR_CASE_REVIEW_PROMPT,
+                "error case review",
+            )
+            if isinstance(result, dict):
+                summary = result
+        except Exception:
+            summary = None
+    if not isinstance(summary, dict):
+        summary = fallback_error_case_review(review_plan, process_trace, original_script, corrected_script, feedback)
+    if str(summary.get("primary_failure_layer") or "").strip() not in {
+        "gemini_analysis",
+        "v2_analysis",
+        "consistency_audit",
+        "targeted_recheck",
+        "arbitration",
+        "final_output",
+        "unknown",
+    }:
+        summary["primary_failure_layer"] = "unknown"
+    confidence = str(summary.get("confidence") or "").strip().lower()
+    if confidence not in {"low", "medium", "high"}:
+        summary["confidence"] = "medium"
+    return {
+        "entry_id": item_id,
+        "job_id": parent_job_id,
+        "item_index": item_index,
+        "video_url": video_url,
+        "title": corrected_script.get("title") or original_script.get("title") or "",
+        "updated_at": now_iso(),
+        "original_script": original_script,
+        "review_feedback": feedback,
+        "corrected_script": corrected_script,
+        "review_plan": review_plan,
+        "review_video_recheck": review_video,
+        "process_trace": process_trace,
+        "learning_review": summary,
+    }
+
+
+def record_error_case_library_entry(entry: dict[str, Any]) -> None:
+    if not entry:
+        return
+    entries = load_error_case_entries()
+    existing = next((item for item in entries if str(item.get("entry_id") or "") == str(entry.get("entry_id") or "")), None)
+    if existing:
+        preserved_created_at = existing.get("created_at") or existing.get("first_recorded_at") or now_iso()
+        entry["created_at"] = preserved_created_at
+        entry["first_recorded_at"] = existing.get("first_recorded_at") or preserved_created_at
+        entry["review_count"] = int(existing.get("review_count") or 1) + 1
+        entries = [item for item in entries if str(item.get("entry_id") or "") != str(entry.get("entry_id") or "")]
+    else:
+        created_at = now_iso()
+        entry["created_at"] = created_at
+        entry["first_recorded_at"] = created_at
+        entry["review_count"] = 1
+    entries.insert(0, entry)
+    save_error_case_entries(entries[:500])
+
+
 def write_product_outputs(job_id: str, output_dir: Path, result_json: dict[str, Any]) -> dict[str, str]:
     bundle = build_evidence_bundle(job_id, output_dir, result_json)
     bundle_path = output_dir / "evidence_bundle.json"
@@ -2518,6 +2813,28 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
             reviewed=True,
             review_feedback=feedback,
         )
+        def _record_error_case() -> None:
+            try:
+                entry = summarize_error_case_with_llm(
+                    output_dir=output_dir,
+                    parent_job_id=parent_job_id,
+                    item_index=item_index,
+                    item_id=item_id,
+                    feedback=feedback,
+                    original_script=original_script,
+                    corrected_script=merged_script,
+                    review_plan=review_plan,
+                    review_video=review_video,
+                )
+                record_error_case_library_entry(entry)
+            except Exception:
+                return
+
+        threading.Thread(
+            target=_record_error_case,
+            name=f"koko-error-case-{item_id[:8]}",
+            daemon=True,
+        ).start()
         return updated_item
     except Exception as exc:
         update_job_item(parent_job_id, item_index, review_status="failed", review_stage="failed", review_message=friendly_error(str(exc)), review_feedback=feedback)
