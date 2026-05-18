@@ -2,6 +2,7 @@
 """Public-facing web UI for video-analysis-v3."""
 from __future__ import annotations
 
+import errno
 import html
 import json
 import os
@@ -186,6 +187,20 @@ def write_json_atomic(path: Path, payload: Any) -> None:
     write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def is_no_space_error(exc: Exception) -> bool:
+    return isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC
+
+
+def log_runtime_warning(event: str, message: str, **extra: Any) -> None:
+    payload = {"level": "warning", "event": event, "message": message}
+    if extra:
+        payload.update(extra)
+    try:
+        print(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        print(f"[warning] {event}: {message}")
+
+
 def load_jobs() -> None:
     global jobs
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -194,7 +209,17 @@ def load_jobs() -> None:
     if not isinstance(jobs, dict):
         jobs = {}
     backfill_completed_jobs()
-    sync_library_from_jobs()
+    try:
+        sync_library_from_jobs()
+    except Exception as exc:
+        if is_no_space_error(exc):
+            log_runtime_warning(
+                "library_sync_skipped",
+                "Skipped script library sync during startup because the persistent disk is full.",
+                path=str(LIBRARY_FILE),
+            )
+        else:
+            raise
 
 
 def save_jobs() -> None:
@@ -445,8 +470,20 @@ def load_library_entries() -> list[dict[str, Any]]:
     return data
 
 
-def save_library_entries(entries: list[dict[str, Any]]) -> None:
-    write_json_atomic(LIBRARY_FILE, entries)
+def save_library_entries(entries: list[dict[str, Any]]) -> bool:
+    try:
+        write_json_atomic(LIBRARY_FILE, entries)
+        return True
+    except Exception as exc:
+        if is_no_space_error(exc):
+            log_runtime_warning(
+                "library_write_skipped",
+                "Could not save script library because the persistent disk is full.",
+                path=str(LIBRARY_FILE),
+                entries=len(entries),
+            )
+            return False
+        raise
 
 
 def load_error_case_entries() -> list[dict[str, Any]]:
@@ -456,8 +493,20 @@ def load_error_case_entries() -> list[dict[str, Any]]:
     return [entry for entry in data if isinstance(entry, dict)]
 
 
-def save_error_case_entries(entries: list[dict[str, Any]]) -> None:
-    write_json_atomic(ERROR_CASE_LIBRARY_FILE, entries)
+def save_error_case_entries(entries: list[dict[str, Any]]) -> bool:
+    try:
+        write_json_atomic(ERROR_CASE_LIBRARY_FILE, entries)
+        return True
+    except Exception as exc:
+        if is_no_space_error(exc):
+            log_runtime_warning(
+                "error_case_write_skipped",
+                "Could not save error case library because the persistent disk is full.",
+                path=str(ERROR_CASE_LIBRARY_FILE),
+                entries=len(entries),
+            )
+            return False
+        raise
 
 
 def split_video_urls(raw: str) -> list[str]:
@@ -1032,12 +1081,12 @@ def write_script_docx(output_dir: Path, script: dict[str, Any], video_url: str, 
         return None
 
 
-def append_library_entry(entry: dict[str, Any]) -> None:
+def append_library_entry(entry: dict[str, Any]) -> bool:
     with job_lock:
         entries = load_library_entries()
         entries = [existing for existing in entries if existing.get("entry_id") != entry.get("entry_id")]
         entries.insert(0, entry)
-        save_library_entries(entries[:500])
+        return save_library_entries(entries[:500])
 
 
 def delete_library_entry(entry_id: str) -> bool:
