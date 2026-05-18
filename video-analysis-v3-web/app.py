@@ -401,6 +401,16 @@ def is_item_cancelled(item_id: str) -> bool:
         return item_id in cancelled_item_ids
 
 
+def item_output_ready(item: dict[str, Any]) -> bool:
+    item_id = str(item.get("id") or "").strip()
+    if not item_id:
+        return False
+    if item.get("result_json") and str(item.get("html_url") or "").strip():
+        return True
+    output_dir = RESULTS_ROOT / item_id
+    return (output_dir / "script_table.json").exists() and (output_dir / "script_table.html").exists()
+
+
 def recompute_job_status(job_id: str) -> None:
     job = jobs.get(job_id)
     if not job:
@@ -408,6 +418,14 @@ def recompute_job_status(job_id: str) -> None:
     items = job.get("items") or []
     if not items:
         return
+    for item in items:
+        status = str(item.get("status") or "").strip()
+        if status in {"queued", "running"} and item_output_ready(item):
+            item["status"] = "completed"
+            item["stage"] = "completed"
+            item["stage_message"] = "Completed."
+            item["completed_at"] = item.get("completed_at") or now_iso()
+            item["updated_at"] = now_iso()
     statuses = [str(item.get("status") or "").strip() for item in items]
     review_statuses = [str(item.get("review_status") or "").strip() for item in items]
     completed_count = sum(1 for status in statuses if status == "completed")
@@ -6005,6 +6023,7 @@ def page_html() -> str:
       const failed = data.failed_items || 0;
       const running = items.filter((item) => itemState(item) === "running").length;
       const waiting = Math.max(0, total - completed - failed - running);
+      const finishedCount = completed + failed;
       const systemQueue = data.system_queue || {{}};
       const activeWorkloads = Array.isArray(systemQueue.active_workloads) ? systemQueue.active_workloads : [];
       const globalRunning = Number(systemQueue.running_count || 0);
@@ -6013,7 +6032,8 @@ def page_html() -> str:
       const currentAhead = Number(systemQueue.current_job_ahead || 0);
       const globalFocus = activeWorkloads[0] || null;
       const currentItem = findCurrentItem(items);
-      if (!currentItem && data.status === "completed") return "";
+      const allItemsSettled = total > 0 && finishedCount >= total && !hasRunningReview(items);
+      if (!currentItem && (data.status === "completed" || allItemsSettled)) return "";
       const currentIndex = currentItem ? ((items.indexOf(currentItem) >= 0 ? items.indexOf(currentItem) : 0) + 1) : 0;
       const leadItem = currentItem || items[0] || null;
       const stageLabel = STAGE_LABELS[data.stage] || STAGE_LABELS[currentItem?.stage] || "等待拆解";
@@ -6226,8 +6246,11 @@ def page_html() -> str:
       restoringActiveJob = false;
       const batchResults = renderBatchResults(data);
       const reviewRunning = hasRunningReview(data.items);
+      const totalItems = Number(data.total_items || (Array.isArray(data.items) ? data.items.length : 0) || 0);
+      const finishedItems = Number(data.completed_items || 0) + Number(data.failed_items || 0);
+      const allItemsSettled = totalItems > 0 && finishedItems >= totalItems;
       checkReviewTransitions(data.items);
-      if (data.status === "completed") {{
+      if (data.status === "completed" || (allItemsSettled && !reviewRunning)) {{
         const completedMessage = reviewRunning
           ? "主分析已完成，复盘任务仍在继续。"
           : (data.message || "分析完成。");
