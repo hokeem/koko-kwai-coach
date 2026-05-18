@@ -52,6 +52,8 @@ RESULTS_ROOT = DATA_ROOT / "results"
 LIBRARY_FILE = DATA_ROOT / "script_library.json"
 ERROR_CASE_LIBRARY_FILE = DATA_ROOT / "error_case_library.json"
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+ERROR_CASE_PASSWORD = "kwai666"
+ERROR_CASE_AUTH_COOKIE = "koko_error_case_auth"
 ASSETS_ROOT = BASE / "assets"
 HERO_WORDMARK = ASSETS_ROOT / "kwai-wordmark.svg"
 MODEL_CANDIDATES = [
@@ -2250,6 +2252,306 @@ def record_error_case_library_entry(entry: dict[str, Any]) -> None:
         entry["review_count"] = 1
     entries.insert(0, entry)
     save_error_case_entries(entries[:500])
+
+
+def parse_cookie_header(header_value: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for part in (header_value or "").split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        cookies[name.strip()] = value.strip()
+    return cookies
+
+
+def has_error_case_access(handler: BaseHTTPRequestHandler) -> bool:
+    cookies = parse_cookie_header(handler.headers.get("Cookie", ""))
+    return cookies.get(ERROR_CASE_AUTH_COOKIE) == "1"
+
+
+def error_cases_login_html(error_message: str = "") -> str:
+    message_html = f"<div class='login-error'>{html_escape(error_message)}</div>" if error_message else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Koko Error Cases Login</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
+    * {{ box-sizing: border-box; font-family: 'Readex Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      color: #FF8200;
+      background:
+        radial-gradient(circle at 8% 10%, rgba(255,130,0,.46), transparent 30%),
+        radial-gradient(circle at 86% 12%, rgba(249,115,0,.38), transparent 28%),
+        radial-gradient(circle at 50% 42%, rgba(255,178,84,.20), transparent 36%),
+        linear-gradient(180deg, #FFB15A 0%, #FFD9AF 34%, #FFF1E2 70%, #FFFFFF 100%);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:24px;
+    }}
+    .login-wrap {{
+      width:min(560px, 100%);
+      border-radius:34px;
+      border:1px solid rgba(255,255,255,.72);
+      box-shadow: 0 28px 80px rgba(249,115,0,.16);
+      background:
+        radial-gradient(circle at 12% 16%, rgba(255,130,0,.32), rgba(255,130,0,0) 22%),
+        radial-gradient(circle at 86% 18%, rgba(249,115,0,.26), rgba(249,115,0,0) 22%),
+        linear-gradient(180deg, rgba(255,207,146,.64) 0%, rgba(255,240,222,.52) 44%, rgba(255,255,255,.62) 100%);
+      backdrop-filter: blur(26px);
+      -webkit-backdrop-filter: blur(26px);
+      padding:28px;
+    }}
+    .action-link {{
+      display:inline-flex; align-items:center; justify-content:center; text-decoration:none;
+      border-radius:999px; padding:10px 14px; color:#FF8200; border:1px solid rgba(255,130,0,.18); background:rgba(255,255,255,.72);
+      font-weight:700; font-size:13px; cursor:pointer; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }}
+    h1 {{ margin:18px 0 8px; font-size:clamp(2.6rem, 8vw, 4.4rem); letter-spacing:-.08em; line-height:.92; color:#1F1F1F; }}
+    p {{ margin:0; font-size:14px; line-height:1.8; color:#FF8200; opacity:.92; }}
+    form {{ display:flex; flex-direction:column; gap:14px; margin-top:24px; }}
+    input {{
+      width:100%; border-radius:22px; border:1px solid rgba(255,130,0,.16); background:rgba(255,255,255,.78);
+      padding:18px 20px; font-size:16px; color:#1F1F1F; outline:none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.75), 0 16px 36px rgba(249,115,0,.06);
+    }}
+    button.action-link {{ width:100%; padding:16px 20px; font-size:15px; }}
+    .login-error {{
+      margin-top:18px; border:1px solid rgba(220,53,69,.18); background:rgba(220,53,69,.08);
+      color:#B42318; border-radius:18px; padding:14px 16px; font-size:14px; line-height:1.7;
+    }}
+  </style>
+</head>
+<body>
+  <section class="login-wrap">
+    <button class="action-link" id="back-home" type="button">← 返回 Koko</button>
+    <h1>错误案例库</h1>
+    <p>这是一个内部页面，用来查看复盘重做后自动沉淀的错误案例。请输入访问密码继续。</p>
+    {message_html}
+    <form method="post" action="/error-cases/login">
+      <input type="password" name="password" placeholder="请输入访问密码" autocomplete="current-password" />
+      <button class="action-link" type="submit">进入错误案例库</button>
+    </form>
+  </section>
+  <script>
+    const backHomeButton = document.getElementById("back-home");
+    if (backHomeButton) {{
+      backHomeButton.addEventListener("click", () => {{
+        window.location.assign("/");
+      }});
+    }}
+  </script>
+</body>
+</html>"""
+
+
+def error_cases_html() -> str:
+    entries = load_error_case_entries()
+    cards: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        review = entry.get("learning_review") or {}
+        weak_links = review.get("missed_or_weak_links") or []
+        evidence_notes = review.get("evidence_notes") or []
+        preventive_notes = review.get("preventive_notes") or []
+        weak_links_html = "".join(
+            f"<li><strong>{html_escape(item.get('layer') or 'unknown')}</strong> · {html_escape(item.get('status') or '')}<br>{html_escape(item.get('reason') or '')}</li>"
+            for item in weak_links if isinstance(item, dict)
+        ) or "<li>暂无结构化弱点说明。</li>"
+        evidence_html = "".join(
+            f"<li>{html_escape(note)}</li>"
+            for note in evidence_notes if str(note or "").strip()
+        ) or "<li>暂无补充观察。</li>"
+        preventive_html = "".join(
+            f"<li>{html_escape(note)}</li>"
+            for note in preventive_notes if str(note or "").strip()
+        ) or "<li>暂无预防说明。</li>"
+        cards.append(
+            "<details class='error-case-card'>"
+            "<summary class='error-case-summary'>"
+            f"<div class='error-case-index'>#{index}</div>"
+            "<div class='error-case-head'>"
+            f"<div class='error-case-title'>{html_escape(entry.get('title') or '未命名脚本')}</div>"
+            f"<a class='error-case-link' href='{html_escape(entry.get('video_url') or '')}' target='_blank' rel='noreferrer'>{html_escape(entry.get('video_url') or '')}</a>"
+            "</div>"
+            "<div class='error-case-meta'>"
+            f"<span class='error-chip'>{html_escape(review.get('primary_failure_layer') or 'unknown')}</span>"
+            f"<span class='error-chip'>{html_escape(str(review.get('confidence') or 'medium').upper())}</span>"
+            f"<span class='error-chip'>复盘 {int(entry.get('review_count') or 1)} 次</span>"
+            "</div>"
+            "</summary>"
+            "<div class='error-case-body'>"
+            "<section class='error-block'>"
+            "<h3>核心问题</h3>"
+            f"<p>{html_escape(review.get('core_issue') or '')}</p>"
+            "</section>"
+            "<section class='error-block'>"
+            "<h3>流程上为什么会错</h3>"
+            f"<p>{html_escape(review.get('flow_failure_summary') or '')}</p>"
+            "</section>"
+            "<section class='error-block'>"
+            "<h3>原始脚本与用户反馈</h3>"
+            f"<p><strong>用户反馈：</strong>{html_escape(entry.get('review_feedback') or '')}</p>"
+            f"<p><strong>原始标题：</strong>{html_escape((entry.get('original_script') or {}).get('title') or '')}</p>"
+            f"<p><strong>原始梗概：</strong>{html_escape((entry.get('original_script') or {}).get('whole_video_summary') or '')}</p>"
+            "</section>"
+            "<section class='error-block'>"
+            "<h3>修正后差异</h3>"
+            f"<p>{html_escape(review.get('difference_summary') or '')}</p>"
+            f"<p><strong>修正后标题：</strong>{html_escape((entry.get('corrected_script') or {}).get('title') or '')}</p>"
+            f"<p><strong>修正后梗概：</strong>{html_escape((entry.get('corrected_script') or {}).get('whole_video_summary') or '')}</p>"
+            "</section>"
+            "<section class='error-columns'>"
+            f"<div class='error-column'><h3>薄弱环节</h3><ul>{weak_links_html}</ul></div>"
+            f"<div class='error-column'><h3>证据观察</h3><ul>{evidence_html}</ul></div>"
+            f"<div class='error-column'><h3>预防备注</h3><ul>{preventive_html}</ul></div>"
+            "</section>"
+            "<section class='error-block'>"
+            "<h3>流程快照</h3>"
+            "<div class='trace-grid'>"
+            + "".join(
+                f"<article class='trace-chip'><strong>{html_escape(step.get('step') or '')}</strong><span>{html_escape(step.get('status') or '')}</span><small>{html_escape(step.get('note') or '')}</small></article>"
+                for step in ((entry.get("process_trace") or {}).get("steps") or []) if isinstance(step, dict)
+            ) +
+            "</div>"
+            "</section>"
+            "<section class='error-block'>"
+            f"<small>首次记录：{html_escape(format_beijing_time(entry.get('first_recorded_at')))} · 最近更新：{html_escape(format_beijing_time(entry.get('updated_at')))}</small>"
+            "</section>"
+            "</div>"
+            "</details>"
+        )
+    cards_html = "".join(cards) or "<div class='error-empty'>还没有错误案例。只有复盘重做成功后的脚本才会被自动记录在这里。</div>"
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Koko Error Cases</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
+    * {{ box-sizing: border-box; font-family: 'Readex Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      color: #FF8200;
+      background:
+        radial-gradient(circle at 8% 10%, rgba(255,130,0,.46), transparent 30%),
+        radial-gradient(circle at 86% 12%, rgba(249,115,0,.38), transparent 28%),
+        radial-gradient(circle at 50% 42%, rgba(255,178,84,.20), transparent 36%),
+        linear-gradient(180deg, #FFB15A 0%, #FFD9AF 34%, #FFF1E2 70%, #FFFFFF 100%);
+    }}
+    .error-shell {{ padding: 24px; }}
+    .error-wrap {{
+      width: min(1360px, 100%);
+      margin: 0 auto;
+      border-radius: 34px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.72);
+      box-shadow: 0 28px 80px rgba(249,115,0,.16);
+      background:
+        radial-gradient(circle at 12% 16%, rgba(255,130,0,.32), rgba(255,130,0,0) 22%),
+        radial-gradient(circle at 86% 18%, rgba(249,115,0,.26), rgba(249,115,0,0) 22%),
+        radial-gradient(circle at 70% 62%, rgba(255,244,232,.70), rgba(255,244,232,0) 24%),
+        linear-gradient(180deg, rgba(255,207,146,.64) 0%, rgba(255,240,222,.52) 44%, rgba(255,255,255,.62) 100%);
+      backdrop-filter: blur(26px);
+      -webkit-backdrop-filter: blur(26px);
+      padding: 28px;
+    }}
+    .action-link {{
+      display:inline-flex; align-items:center; justify-content:center; text-decoration:none;
+      border-radius:999px; padding:10px 14px; color:#FF8200; border:1px solid rgba(255,130,0,.18); background:rgba(255,255,255,.72);
+      font-weight:700; font-size:13px; cursor:pointer; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }}
+    .topbar {{ display:flex; align-items:flex-start; justify-content:space-between; gap:20px; flex-wrap:wrap; }}
+    h1 {{ margin:18px 0 8px; font-size:clamp(2.8rem, 7vw, 5rem); letter-spacing:-.08em; line-height:.9; color:#1F1F1F; }}
+    .lede {{ margin:0; font-size:14px; line-height:1.8; color:#FF8200; opacity:.92; max-width:68ch; }}
+    .error-list {{ display:flex; flex-direction:column; gap:16px; margin-top:30px; }}
+    .error-case-card {{
+      border:1px solid rgba(255,130,0,.16);
+      border-radius:24px;
+      background:rgba(255,255,255,.62);
+      overflow:hidden;
+      box-shadow: 0 18px 42px rgba(249,115,0,.08);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+    }}
+    .error-case-summary {{
+      list-style:none; cursor:pointer; padding:18px 20px; display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:16px; align-items:start;
+    }}
+    .error-case-summary::-webkit-details-marker {{ display:none; }}
+    .error-case-index {{
+      min-width:44px; height:44px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center;
+      background:rgba(255,130,0,.12); color:#FF8200; font-size:13px; font-weight:800;
+    }}
+    .error-case-head {{ min-width:0; display:flex; flex-direction:column; gap:8px; }}
+    .error-case-title {{ font-size:24px; font-weight:800; line-height:1.25; letter-spacing:-.04em; color:#1F1F1F; }}
+    .error-case-link {{ color:#2962FF; text-decoration:none; word-break:break-all; font-size:14px; line-height:1.7; }}
+    .error-case-meta {{ display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }}
+    .error-chip {{
+      display:inline-flex; align-items:center; border-radius:999px; padding:8px 12px;
+      font-size:12px; font-weight:700; color:#FF8200; background:rgba(255,255,255,.74); border:1px solid rgba(255,130,0,.16);
+    }}
+    .error-case-body {{ padding:0 20px 20px; display:flex; flex-direction:column; gap:14px; }}
+    .error-block {{
+      border:1px solid rgba(255,130,0,.12); border-radius:18px; background:rgba(255,255,255,.72);
+      padding:16px;
+    }}
+    .error-block h3, .error-column h3 {{ margin:0 0 10px; font-size:16px; color:#1F1F1F; letter-spacing:-.02em; }}
+    .error-block p, .error-block small, .error-column li {{
+      margin:0; font-size:14px; line-height:1.8; color:#FF8200;
+    }}
+    .error-columns {{ display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:14px; }}
+    .error-column {{
+      border:1px solid rgba(255,130,0,.12); border-radius:18px; background:rgba(255,255,255,.72); padding:16px;
+    }}
+    .error-column ul {{ margin:0; padding-left:18px; display:flex; flex-direction:column; gap:10px; }}
+    .trace-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:10px; }}
+    .trace-chip {{
+      border:1px solid rgba(255,130,0,.12); border-radius:16px; background:rgba(255,255,255,.78);
+      padding:12px; display:flex; flex-direction:column; gap:6px;
+    }}
+    .trace-chip strong {{ font-size:13px; color:#1F1F1F; }}
+    .trace-chip span {{ font-size:12px; font-weight:700; color:#FF8200; }}
+    .trace-chip small {{ font-size:12px; line-height:1.6; color:#935F14; }}
+    .error-empty {{
+      border:1px dashed rgba(255,130,0,.18); border-radius:18px; background:rgba(255,255,255,.56);
+      padding:18px; font-size:14px; line-height:1.7; color:#FF8200; margin-top:24px;
+    }}
+    @media (max-width: 900px) {{
+      .error-case-summary {{ grid-template-columns:1fr; }}
+      .error-case-meta {{ justify-content:flex-start; }}
+      .error-columns {{ grid-template-columns:1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="error-shell">
+    <section class="error-wrap">
+      <div class="topbar">
+        <div>
+          <button class="action-link" id="back-home" type="button">← 返回 Koko</button>
+          <h1>错误案例库</h1>
+          <p class="lede">这里只展示点击“复盘重做”后自动沉淀下来的重大错误案例。每条案例都会记录原始脚本、用户反馈、修正结果，以及当时实际走过的流程为什么没拦住问题。</p>
+        </div>
+      </div>
+      <section class="error-list">{cards_html}</section>
+    </section>
+  </main>
+  <script>
+    const backHomeButton = document.getElementById("back-home");
+    if (backHomeButton) {{
+      backHomeButton.addEventListener("click", () => {{
+        window.location.assign("/");
+      }});
+    }}
+  </script>
+</body>
+</html>"""
 
 
 def write_product_outputs(job_id: str, output_dir: Path, result_json: dict[str, Any]) -> dict[str, str]:
@@ -5950,19 +6252,23 @@ def library_html() -> str:
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "VideoAnalysisV3Web/0.2"
 
-    def send_json(self, payload: Any, status: int = 200) -> None:
+    def send_json(self, payload: Any, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        for key, value in headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(raw)
 
-    def send_html(self, body: str, status: int = 200) -> None:
+    def send_html(self, body: str, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         raw = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        for key, value in headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -6047,6 +6353,12 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self.send_html(page_html())
             return
+        if parsed.path == "/error-cases":
+            if has_error_case_access(self):
+                self.send_html(error_cases_html())
+            else:
+                self.send_html(error_cases_login_html())
+            return
         if parsed.path == "/stats":
             self.send_html(stats_html())
             return
@@ -6082,6 +6394,13 @@ class AppHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             body = page_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return
+        if parsed.path == "/error-cases":
+            body = (error_cases_html() if has_error_case_access(self) else error_cases_login_html()).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -6124,6 +6443,19 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/error-cases/login":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8", errors="ignore") if length else ""
+            form = urllib.parse.parse_qs(raw, keep_blank_values=True)
+            password = str((form.get("password") or [""])[0]).strip()
+            if password != ERROR_CASE_PASSWORD:
+                self.send_html(error_cases_login_html("密码不正确，请重试。"), status=401)
+                return
+            self.send_html(
+                error_cases_html(),
+                headers=[("Set-Cookie", f"{ERROR_CASE_AUTH_COOKIE}=1; Path=/; Max-Age=604800; SameSite=Lax")],
+            )
+            return
         item_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/(save|save-to-library|display-language)", parsed.path)
         if item_match:
             item_id, action = item_match.groups()
