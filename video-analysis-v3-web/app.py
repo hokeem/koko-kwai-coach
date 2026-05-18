@@ -668,6 +668,135 @@ def split_video_urls(raw: str) -> list[str]:
     return ordered
 
 
+def parse_video_display_name(url: object, index: int = 0) -> str:
+    fallback = f"视频 {index + 1}"
+    text = str(url or "").strip()
+    if not text:
+        return fallback
+    try:
+        parsed = urllib.parse.urlparse(text)
+        parts = [part for part in parsed.path.split("/") if part]
+        handle = next((part for part in parts if part.startswith("@")), "")
+        video_id = ""
+        if "video" in parts:
+            video_index = parts.index("video")
+            if video_index + 1 < len(parts):
+                video_id = parts[video_index + 1]
+        if handle and video_id:
+            return f"{handle} / {video_id}"
+        if handle:
+            return handle
+        if video_id:
+            return f"video / {video_id}"
+        hostname = (parsed.hostname or "").replace("www.", "")
+        return hostname or fallback
+    except Exception:
+        return fallback
+
+
+def summarize_job_focus(job: dict[str, Any]) -> dict[str, Any]:
+    items = job.get("items") or []
+    active_item = next((item for item in items if str(item.get("status") or "").strip() == "running"), None)
+    if active_item:
+        index = int(active_item.get("index") or 0)
+        return {
+            "job_id": str(job.get("id") or "").strip(),
+            "item_id": str(active_item.get("id") or "").strip(),
+            "kind": "analysis",
+            "title": active_item.get("title") or parse_video_display_name(active_item.get("video_url"), index),
+            "video_url": active_item.get("video_url") or "",
+            "stage": active_item.get("stage") or "",
+            "stage_message": active_item.get("stage_message") or "",
+            "item_index": index,
+        }
+    review_item = next((item for item in items if str(item.get("review_status") or "").strip() == "running"), None)
+    if review_item:
+        index = int(review_item.get("index") or 0)
+        return {
+            "job_id": str(job.get("id") or "").strip(),
+            "item_id": str(review_item.get("id") or "").strip(),
+            "kind": "review",
+            "title": review_item.get("title") or parse_video_display_name(review_item.get("video_url"), index),
+            "video_url": review_item.get("video_url") or "",
+            "stage": review_item.get("review_stage") or "review",
+            "stage_message": review_item.get("review_message") or "",
+            "item_index": index,
+        }
+    pending_item = next((item for item in items if str(item.get("status") or "").strip() == "queued"), None)
+    if pending_item:
+        index = int(pending_item.get("index") or 0)
+        return {
+            "job_id": str(job.get("id") or "").strip(),
+            "item_id": str(pending_item.get("id") or "").strip(),
+            "kind": "analysis",
+            "title": pending_item.get("title") or parse_video_display_name(pending_item.get("video_url"), index),
+            "video_url": pending_item.get("video_url") or "",
+            "stage": pending_item.get("stage") or "",
+            "stage_message": pending_item.get("stage_message") or "",
+            "item_index": index,
+        }
+    return {
+        "job_id": str(job.get("id") or "").strip(),
+        "item_id": "",
+        "kind": "analysis",
+        "title": parse_video_display_name(job.get("video_url") or "", 0),
+        "video_url": job.get("video_url") or "",
+        "stage": job.get("stage") or "",
+        "stage_message": job.get("stage_message") or "",
+        "item_index": 0,
+    }
+
+
+def build_system_queue_snapshot(current_job_id: str | None = None) -> dict[str, Any]:
+    active_workloads: list[dict[str, Any]] = []
+    queued_jobs: list[dict[str, Any]] = []
+    current_job_position: int | None = None
+    current_job_ahead = 0
+    with job_lock:
+        queued_order = list(job_queue)
+        for job in jobs.values():
+            items = job.get("items") or []
+            is_active = any(
+                str(item.get("status") or "").strip() == "running" or str(item.get("review_status") or "").strip() == "running"
+                for item in items
+            )
+            if is_active:
+                active_workloads.append(summarize_job_focus(job))
+        for idx, job_id in enumerate(queued_order):
+            job = jobs.get(job_id)
+            if not job:
+                continue
+            focus = summarize_job_focus(job)
+            queue_position = len(active_workloads) + idx + 1
+            queued_jobs.append(
+                {
+                    "job_id": job_id,
+                    "title": focus["title"],
+                    "video_url": focus["video_url"],
+                    "stage": focus["stage"],
+                    "stage_message": focus["stage_message"],
+                    "queue_position": queue_position,
+                }
+            )
+            if current_job_id and job_id == current_job_id:
+                current_job_position = queue_position
+                current_job_ahead = max(0, queue_position - 1)
+        if current_job_id and current_job_position is None:
+            for idx, focus in enumerate(active_workloads):
+                if focus.get("job_id") == current_job_id:
+                    current_job_position = idx + 1
+                    current_job_ahead = idx
+                    break
+    return {
+        "running_count": len(active_workloads),
+        "queued_count": len(queued_jobs),
+        "active_workloads": active_workloads,
+        "queued_jobs": queued_jobs,
+        "current_job_position": current_job_position,
+        "current_job_ahead": current_job_ahead,
+    }
+
+
 CONTENT_TYPE_RULES: list[tuple[str, list[str]]] = [
     ("夫妻吵架", ["院子", "打扫", "装修", "凉棚", "干活", "兄弟", "朋友", "亲戚", "打电话", "花钱找人"]),
     ("夫妻出轨", ["抓奸", "奸夫", "脚印", "倒着走", "假脚印", "电工", "修水管", "换灯泡", "第三者"]),
@@ -2950,6 +3079,7 @@ def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
     total_items = len(items)
     completed_items = sum(1 for item in items if item.get("status") == "completed")
     failed_items = sum(1 for item in items if item.get("status") == "failed")
+    system_queue = build_system_queue_snapshot(str(job.get("id") or "").strip())
     payload = {
         "id": job["id"],
         "mode": job.get("mode") or ("batch" if total_items > 1 else "single"),
@@ -2971,6 +3101,7 @@ def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
         "total_items": total_items,
         "completed_items": completed_items,
         "failed_items": failed_items,
+        "system_queue": system_queue,
     }
     if job.get("status") == "running":
         payload["message"] = job.get("stage_message") or "正在提取视频证据并生成脚本，请稍候。"
@@ -5503,6 +5634,10 @@ def page_html() -> str:
       return "等待拆解";
     }}
 
+    function workloadKindLabel(kind) {{
+      return String(kind || "").trim() === "review" ? "复盘重做" : "脚本拆解";
+    }}
+
     function findCurrentItem(items) {{
       return (items || []).find((item) => itemState(item) === "running") || null;
     }}
@@ -5857,31 +5992,48 @@ def page_html() -> str:
       const failed = data.failed_items || 0;
       const running = items.filter((item) => itemState(item) === "running").length;
       const waiting = Math.max(0, total - completed - failed - running);
+      const systemQueue = data.system_queue || {{}};
+      const activeWorkloads = Array.isArray(systemQueue.active_workloads) ? systemQueue.active_workloads : [];
+      const globalRunning = Number(systemQueue.running_count || 0);
+      const globalQueued = Number(systemQueue.queued_count || 0);
+      const currentPosition = Number(systemQueue.current_job_position || 0);
+      const currentAhead = Number(systemQueue.current_job_ahead || 0);
+      const globalFocus = activeWorkloads[0] || null;
       const currentItem = findCurrentItem(items);
       if (!currentItem && data.status === "completed") return "";
       const currentIndex = currentItem ? ((items.indexOf(currentItem) >= 0 ? items.indexOf(currentItem) : 0) + 1) : 0;
+      const leadItem = currentItem || items[0] || null;
       const stageLabel = STAGE_LABELS[data.stage] || STAGE_LABELS[currentItem?.stage] || "等待拆解";
       const stageMessage = data.stage_message || currentItem?.stage_message || data.message || "任务已经创建，系统会按顺序逐条拆解。";
-      const subtitle = currentItem
+      let subtitle = currentItem
         ? `当前正在拆解 ${{displayVideoName(currentItem, currentItem.index || 0)}}，其余任务会按照提交顺序继续排队。`
         : (data.status === "completed"
             ? "这批任务已经跑完了，你可以直接查看已完成脚本。"
             : "任务已经创建，系统会按顺序逐条拆解。");
+      if (!currentItem && globalFocus) {{
+        subtitle = `系统当前正在处理：${{globalFocus.title || "其他任务"}}（${{workloadKindLabel(globalFocus.kind)}}）`;
+      }}
       const subtitleNode = currentItem
         ? `<a class="batch-overview-subtitle" href="${{escapeHtml(currentItem.video_url || "")}}" target="_blank" rel="noreferrer">${{escapeHtml(currentItem.video_url || "")}}</a>`
         : `<div class="focus-note">${{escapeHtml(subtitle)}}</div>`;
+      const queueHint = data.status === "queued" && currentPosition
+        ? `<div class="focus-note">你的任务当前排队第 ${{currentPosition}} 位，前方还有 ${{currentAhead}} 条任务。</div>`
+        : "";
+      const systemHint = globalFocus
+        ? `<div class="focus-note">系统当前占用：${{escapeHtml(globalFocus.title || "其他任务")}} · ${{escapeHtml(workloadKindLabel(globalFocus.kind))}}${{globalFocus.stage ? ` · ${{escapeHtml(STAGE_LABELS[globalFocus.stage] || globalFocus.stage)}}` : ""}}</div>`
+        : "";
       return `
         <section class="batch-overview">
           <div class="batch-overview-top">
             <div class="batch-overview-copy">
-              <div class="batch-overview-title">${{currentItem ? escapeHtml(displayVideoName(currentItem, currentIndex - 1)) : "批量任务进度"}}</div>
+              <div class="batch-overview-title">${{leadItem ? escapeHtml(displayVideoName(leadItem, leadItem?.index || 0)) : "批量任务进度"}}</div>
               ${{subtitleNode}}
               <div class="batch-job-meta">
                 <span>任务 ID：${{escapeHtml(data.id || "")}}</span>
                 <button class="job-copy-btn" type="button" data-copy-text="${{escapeHtml(data.id || "")}}" aria-label="复制任务 ID">⧉</button>
               </div>
             </div>
-            <span class="status ${{data.status === "completed" ? "status-completed" : data.status === "failed" ? "status-failed" : data.status === "running" ? "status-running" : "status-queued"}}">${{escapeHtml(data.status || "queued")}}</span>
+            <span class="status ${{data.status === "completed" ? "status-completed" : data.status === "failed" ? "status-failed" : data.status === "running" ? "status-running" : "status-queued"}}">${{escapeHtml(jobStatusLabel(data.status || "queued"))}}</span>
           </div>
           <div class="batch-meta">
             <span class="batch-chip">总数 ${{total}}</span>
@@ -5889,19 +6041,28 @@ def page_html() -> str:
             <span class="batch-chip">等待拆解 ${{waiting}}</span>
             <span class="batch-chip">已完成 ${{completed}}</span>
             <span class="batch-chip">失败 ${{failed}}</span>
+            <span class="batch-chip">系统运行中 ${{globalRunning}}</span>
+            <span class="batch-chip">系统排队 ${{globalQueued}}</span>
           </div>
-          <div class="focus-note">Video ${{currentIndex || 1}}/${{total || 1}} · ${{escapeHtml(stageLabel)}}</div>
+          ${{queueHint}}
+          ${{systemHint}}
+          <div class="focus-note">任务 ${{currentIndex || 1}}/${{total || 1}} · ${{escapeHtml(stageLabel)}}</div>
           ${{progressMarkup(data.stage || "queued", stageMessage, data.id)}}
         </section>
       `;
     }}
 
-    function renderQueueList(items) {{
+    function renderQueueList(items, data) {{
+      const systemQueue = data?.system_queue || {{}};
+      const globalFocus = (Array.isArray(systemQueue.active_workloads) ? systemQueue.active_workloads[0] : [])[0] || null;
+      const currentPosition = Number(systemQueue.current_job_position || 0);
       const cards = (items || []).map((item, idx) => {{
         const state = itemState(item);
         const title = displayVideoName(item, idx);
         const stageLabel = state === "waiting"
-          ? `等待拆解 · 排队第 ${{idx + 1}} 位`
+          ? (idx === 0 && currentPosition
+              ? `等待拆解 · 全局排队第 ${{currentPosition}} 位`
+              : `等待拆解 · 将在前一条完成后继续`)
           : (item.stage_message || STAGE_LABELS[item.stage] || itemStateLabel(item));
         const error = item.error ? `<div class="queue-error">${{escapeHtml(item.error)}}</div>` : "";
         return `
@@ -5921,7 +6082,7 @@ def page_html() -> str:
         <section class="queue-shell">
           <div class="queue-header">
             <h3>任务队列</h3>
-            <p>按提交顺序显示任务执行状态与排队信息</p>
+            <p>${{globalFocus ? `系统当前正在处理：${{escapeHtml(globalFocus.title || "其他任务")}}` : "按提交顺序显示任务执行状态与排队信息"}}</p>
           </div>
           <div class="queue-list">${{cards}}</div>
         </section>
@@ -5957,7 +6118,7 @@ def page_html() -> str:
       return `
         <div class="batch-dashboard">
           ${{renderBatchOverview(data, items)}}
-          ${{renderQueueList(items)}}
+          ${{renderQueueList(items, data)}}
           ${{renderDetailResults(items)}}
         </div>
       `;
