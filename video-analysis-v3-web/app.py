@@ -448,41 +448,175 @@ def hydrate_item_from_outputs(item: dict[str, Any]) -> bool:
     script_json = read_json(script_json_path) or read_json(output_dir / "analysis_result.json")
     if not script_json:
         return False
-    item["result_json"] = item.get("result_json") or script_json
-    item["zh_result_json"] = item.get("zh_result_json") or script_json
-    item["original_result_json"] = item.get("original_result_json") or script_json
+    changed = False
+
+    def assign_if_needed(key: str, value: Any) -> None:
+        nonlocal changed
+        if item.get(key) != value:
+            item[key] = value
+            changed = True
+
+    assign_if_needed("result_json", item.get("result_json") or script_json)
+    assign_if_needed("zh_result_json", item.get("zh_result_json") or script_json)
+    assign_if_needed("original_result_json", item.get("original_result_json") or script_json)
     if script_html_path.exists():
-        item["html_url"] = item.get("html_url") or f"/results/{item_id}/script_table.html"
-        item["zh_html_url"] = item.get("zh_html_url") or item["html_url"]
+        html_url = item.get("html_url") or f"/results/{item_id}/script_table.html"
+        assign_if_needed("html_url", html_url)
+        assign_if_needed("zh_html_url", item.get("zh_html_url") or html_url)
     if docx_path.exists():
-        item["docx_url"] = item.get("docx_url") or f"/results/{item_id}/{docx_path.name}"
-        item["zh_docx_url"] = item.get("zh_docx_url") or item["docx_url"]
+        docx_url = item.get("docx_url") or f"/results/{item_id}/{docx_path.name}"
+        assign_if_needed("docx_url", docx_url)
+        assign_if_needed("zh_docx_url", item.get("zh_docx_url") or docx_url)
     if report_path.exists():
-        item["report_url"] = item.get("report_url") or f"/results/{item_id}/product_report.html"
+        assign_if_needed("report_url", item.get("report_url") or f"/results/{item_id}/product_report.html")
     if evidence_path.exists():
-        item["evidence_url"] = item.get("evidence_url") or f"/results/{item_id}/evidence_bundle.json"
-    item["artifacts"] = item.get("artifacts") or summarize_artifacts(item_id, output_dir)
-    item["display_language"] = item.get("display_language") or "zh"
-    item["title"] = item.get("title") or script_json.get("title") or "Video Script"
-    item["status"] = "completed"
-    item["stage"] = "completed"
-    item["stage_message"] = "Completed."
-    item["completed_at"] = item.get("completed_at") or now_iso()
+        assign_if_needed("evidence_url", item.get("evidence_url") or f"/results/{item_id}/evidence_bundle.json")
+    assign_if_needed("artifacts", item.get("artifacts") or summarize_artifacts(item_id, output_dir))
+    assign_if_needed("display_language", item.get("display_language") or "zh")
+    assign_if_needed("title", item.get("title") or script_json.get("title") or "Video Script")
+    assign_if_needed("status", "completed")
+    assign_if_needed("stage", "completed")
+    assign_if_needed("stage_message", "Completed.")
+    if not item.get("completed_at"):
+        item["completed_at"] = now_iso()
+        changed = True
     item["updated_at"] = now_iso()
-    return True
+    return changed
 
 
-def recompute_job_status(job_id: str) -> None:
+def hydrate_job_from_outputs(job_id: str, job: dict[str, Any]) -> bool:
+    output_dir = RESULTS_ROOT / job_id
+    script_json_path = output_dir / "script_table.json"
+    script_html_path = output_dir / "script_table.html"
+    docx_path = output_dir / "script_export.docx"
+    report_path = output_dir / "product_report.html"
+    evidence_path = output_dir / "evidence_bundle.json"
+    if not script_json_path.exists():
+        return False
+    if not (script_html_path.exists() or docx_path.exists() or report_path.exists()):
+        return False
+    script_json = read_json(script_json_path) or read_json(output_dir / "analysis_result.json")
+    if not script_json:
+        return False
+    changed = False
+
+    def assign_if_needed(key: str, value: Any) -> None:
+        nonlocal changed
+        if job.get(key) != value:
+            job[key] = value
+            changed = True
+
+    assign_if_needed("result_json", job.get("result_json") or script_json)
+    assign_if_needed("zh_result_json", job.get("zh_result_json") or script_json)
+    assign_if_needed("display_language", job.get("display_language") or "zh")
+    assign_if_needed("title", job.get("title") or script_json.get("title") or "Video Script")
+    if script_html_path.exists():
+        html_url = job.get("html_url") or f"/results/{job_id}/script_table.html"
+        assign_if_needed("html_url", html_url)
+        assign_if_needed("zh_html_url", job.get("zh_html_url") or html_url)
+    if docx_path.exists():
+        docx_url = job.get("docx_url") or f"/results/{job_id}/{docx_path.name}"
+        assign_if_needed("docx_url", docx_url)
+        assign_if_needed("zh_docx_url", job.get("zh_docx_url") or docx_url)
+    if report_path.exists():
+        assign_if_needed("report_url", job.get("report_url") or f"/results/{job_id}/product_report.html")
+    if evidence_path.exists():
+        assign_if_needed("evidence_url", job.get("evidence_url") or f"/results/{job_id}/evidence_bundle.json")
+    assign_if_needed("artifacts", job.get("artifacts") or summarize_artifacts(job_id, output_dir))
+    assign_if_needed("status", "completed")
+    assign_if_needed("stage", "completed")
+    assign_if_needed("stage_message", "Completed 1/1 items. Failed 0.")
+    if not job.get("completed_at"):
+        job["completed_at"] = now_iso()
+        changed = True
+    job["updated_at"] = now_iso()
+    return changed
+
+
+def build_job_items(job_id: str, job: dict[str, Any]) -> list[dict[str, Any]]:
+    items = job.get("items") or []
+    if items:
+        return items
+    return [{
+        "id": job_id,
+        "index": 0,
+        "video_url": job.get("video_url") or "",
+        "status": job.get("status") or "queued",
+        "stage": job.get("stage") or "queued",
+        "stage_message": job.get("stage_message") or "Queued.",
+        "created_at": job.get("created_at") or now_iso(),
+        "updated_at": job.get("updated_at") or now_iso(),
+        "html_url": job.get("html_url") or "",
+        "zh_html_url": job.get("zh_html_url") or job.get("html_url") or "",
+        "pt_html_url": job.get("pt_html_url") or "",
+        "report_url": job.get("report_url") or "",
+        "evidence_url": job.get("evidence_url") or "",
+        "docx_url": job.get("docx_url") or "",
+        "zh_docx_url": job.get("zh_docx_url") or job.get("docx_url") or "",
+        "pt_docx_url": job.get("pt_docx_url") or "",
+        "artifacts": job.get("artifacts") or {},
+        "error": job.get("error") or "",
+        "result_json": job.get("result_json"),
+        "zh_result_json": job.get("zh_result_json") or job.get("result_json"),
+        "pt_result_json": job.get("pt_result_json"),
+        "original_result_json": job.get("original_result_json") or job.get("result_json"),
+        "display_language": job.get("display_language") or "zh",
+        "content_type": job.get("content_type") or "",
+        "content_type_source": job.get("content_type_source") or "auto",
+        "content_type_reasoning": job.get("content_type_reasoning") or "",
+        "content_type_confidence": job.get("content_type_confidence") or "",
+        "title": job.get("title") or "",
+        "review_status": job.get("review_status") or "",
+        "review_stage": job.get("review_stage") or "",
+        "review_message": job.get("review_message") or "",
+        "review_feedback": job.get("review_feedback") or "",
+        "reviewed": bool(job.get("reviewed")),
+        "edited": bool(job.get("edited")),
+    }]
+
+
+def recompute_job_status(job_id: str, persist: bool = False) -> bool:
     job = jobs.get(job_id)
     if not job:
-        return
+        return False
+    changed = False
     items = job.get("items") or []
     if not items:
-        return
+        changed = hydrate_job_from_outputs(job_id, job) or changed
+        status = str(job.get("status") or "").strip()
+        updated_at = parse_iso_datetime(job.get("updated_at") or job.get("created_at"))
+        if not changed and updated_at and status == "running":
+            stale_for = (datetime.now(timezone.utc) - updated_at).total_seconds()
+            if not has_active_process(job_id) and stale_for > PROCESSLESS_TASK_STALE_SEC:
+                job["status"] = "failed"
+                job["stage"] = "failed"
+                job["stage_message"] = "Worker stopped unexpectedly."
+                job["error"] = "后台执行中断，任务已自动停止。"
+                job["completed_at"] = job.get("completed_at") or now_iso()
+                job["updated_at"] = now_iso()
+                changed = True
+            elif stale_for > RUNNING_TASK_STALE_SEC:
+                job["status"] = "failed"
+                job["stage"] = "failed"
+                job["stage_message"] = "Stopped after no progress."
+                job["error"] = "任务长时间没有进展，已自动停止。"
+                job["completed_at"] = job.get("completed_at") or now_iso()
+                job["updated_at"] = now_iso()
+                mark_item_cancelled(job_id)
+                changed = True
+        if persist and changed:
+            save_jobs()
+        return changed
+    previous = {
+        "status": job.get("status"),
+        "stage": job.get("stage"),
+        "stage_message": job.get("stage_message"),
+        "completed_at": job.get("completed_at"),
+    }
     for item in items:
         status = str(item.get("status") or "").strip()
         if status in {"queued", "running"} and item_output_ready(item):
-            hydrate_item_from_outputs(item)
+            changed = hydrate_item_from_outputs(item) or changed
     statuses = [str(item.get("status") or "").strip() for item in items]
     review_statuses = [str(item.get("review_status") or "").strip() for item in items]
     completed_count = sum(1 for status in statuses if status == "completed")
@@ -507,6 +641,16 @@ def recompute_job_status(job_id: str) -> None:
         job["stage"] = "failed"
         job["stage_message"] = job.get("stage_message") or "All batch items failed."
     job["updated_at"] = now_iso()
+    current = {
+        "status": job.get("status"),
+        "stage": job.get("stage"),
+        "stage_message": job.get("stage_message"),
+        "completed_at": job.get("completed_at"),
+    }
+    changed = changed or previous != current
+    if persist and changed:
+        save_jobs()
+    return changed
 
 
 def reconcile_stale_jobs() -> None:
@@ -520,6 +664,10 @@ def reconcile_stale_jobs() -> None:
     with job_lock:
         for job_id, job in jobs.items():
             items = job.get("items") or []
+            if not items:
+                if recompute_job_status(job_id):
+                    changed = True
+                continue
             job_changed = False
             for item in items:
                 item_id = str(item.get("id") or "")
@@ -3213,8 +3361,10 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
+    job_id = str(job.get("id") or "").strip()
+    recompute_job_status(job_id, persist=True)
     hydrated_items: list[dict[str, Any]] = []
-    for item in job.get("items") or []:
+    for item in build_job_items(job_id, job):
         if item_output_ready(item) and (
             not item.get("result_json")
             or not item.get("html_url")
@@ -6972,6 +7122,16 @@ def studio_html() -> str:
         res = await fetch(`/api/jobs/${{jobId}}`);
       }} catch (error) {{
         if (restoringActiveJob) {{
+          const snapshot = readPersistedActiveJobSnapshot(jobId);
+          if (snapshot) {{
+            restoreAttempts += 1;
+            const restoredResults = renderBatchResults(snapshot);
+            if (restoredResults) {{
+              setStatus(restoredResults, deriveEffectiveJobStatus(snapshot) === "completed");
+            }}
+            schedulePoll(jobId, restoreAttempts < RESTORE_RETRY_LIMIT ? RESTORE_RETRY_DELAY_MS : 5000);
+            return;
+          }}
           restoreAttempts += 1;
           if (restoreAttempts < RESTORE_RETRY_LIMIT) {{
             schedulePoll(jobId, RESTORE_RETRY_DELAY_MS);
@@ -6988,12 +7148,15 @@ def studio_html() -> str:
         return;
       }}
       if (!res.ok) {{
-        if (restoringActiveJob && res.status >= 500) {{
+        const snapshot = readPersistedActiveJobSnapshot(jobId);
+        if (snapshot) {{
           restoreAttempts += 1;
-          if (restoreAttempts < RESTORE_RETRY_LIMIT) {{
-            schedulePoll(jobId, RESTORE_RETRY_DELAY_MS);
-            return;
+          const restoredResults = renderBatchResults(snapshot);
+          if (restoredResults) {{
+            setStatus(restoredResults, deriveEffectiveJobStatus(snapshot) === "completed");
           }}
+          schedulePoll(jobId, restoreAttempts < RESTORE_RETRY_LIMIT ? RESTORE_RETRY_DELAY_MS : 5000);
+          return;
         }}
         restoringActiveJob = false;
         restoreAttempts = 0;
@@ -7007,6 +7170,16 @@ def studio_html() -> str:
         data = await readJsonSafely(res);
       }} catch (error) {{
         if (restoringActiveJob) {{
+          const snapshot = readPersistedActiveJobSnapshot(jobId);
+          if (snapshot) {{
+            restoreAttempts += 1;
+            const restoredResults = renderBatchResults(snapshot);
+            if (restoredResults) {{
+              setStatus(restoredResults, deriveEffectiveJobStatus(snapshot) === "completed");
+            }}
+            schedulePoll(jobId, restoreAttempts < RESTORE_RETRY_LIMIT ? RESTORE_RETRY_DELAY_MS : 5000);
+            return;
+          }}
           restoreAttempts += 1;
           if (restoreAttempts < RESTORE_RETRY_LIMIT) {{
             schedulePoll(jobId, RESTORE_RETRY_DELAY_MS);
