@@ -6890,7 +6890,8 @@ def studio_html() -> str:
 
     function renderQueueList(items, data) {{
       const systemQueue = data?.system_queue || {{}};
-      const globalFocus = (Array.isArray(systemQueue.active_workloads) ? systemQueue.active_workloads[0] : [])[0] || null;
+      const activeWorkloads = Array.isArray(systemQueue.active_workloads) ? systemQueue.active_workloads : [];
+      const globalFocus = activeWorkloads[0] || null;
       const currentPosition = Number(systemQueue.current_job_position || 0);
       const cards = (items || []).map((item, idx) => {{
         const state = itemState(item);
