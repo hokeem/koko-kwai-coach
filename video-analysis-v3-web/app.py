@@ -3937,368 +3937,301 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
 
 def page_html() -> str:
     return """<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Koko</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
-    :root {
-      --brand: #FF8200;
-      --brand-deep: #F97300;
-      --ink: #171717;
-      --muted: #5f5f5f;
-      --line: rgba(255,130,0,.18);
-      --card: rgba(255,255,255,.78);
-      --soft: rgba(255,130,0,.08);
+    * {
+      box-sizing: border-box;
+      font-family: 'Readex Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
-    * { box-sizing: border-box; font-family: 'Readex Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-    html { scroll-behavior: smooth; }
     body {
       margin: 0;
-      color: var(--ink);
+      min-height: 100vh;
+      color: #1F1F1F;
       background:
-        radial-gradient(circle at 8% 10%, rgba(255,130,0,.42), transparent 28%),
-        radial-gradient(circle at 92% 8%, rgba(249,115,0,.28), transparent 24%),
-        linear-gradient(180deg, #FFB15A 0%, #FFD9AF 30%, #FFF4E8 66%, #FFFFFF 100%);
+        radial-gradient(circle at 10% 8%, rgba(255,130,0,.24), transparent 28%),
+        radial-gradient(circle at 82% 14%, rgba(249,115,0,.22), transparent 26%),
+        radial-gradient(circle at 50% 48%, rgba(255,244,232,.96), transparent 30%),
+        linear-gradient(180deg, #FFD6AE 0%, #FFF0DE 38%, #FFFFFF 100%);
     }
-    .landing-shell {
-      width: min(1440px, calc(100% - 32px));
-      margin: 16px auto;
+    .hero-shell {
+      position: relative;
+      min-height: 100vh;
+      padding: 18px;
+    }
+    .hero-panel {
+      --mouse-x: 50%;
+      --mouse-y: 50%;
+      width: min(1320px, 100%);
+      margin: 0 auto;
+      position: relative;
       border-radius: 34px;
       overflow: hidden;
-      border: 1px solid rgba(255,255,255,.72);
-      background:
-        radial-gradient(circle at 12% 14%, rgba(255,130,0,.30), rgba(255,130,0,0) 24%),
-        radial-gradient(circle at 88% 12%, rgba(249,115,0,.22), rgba(249,115,0,0) 22%),
-        linear-gradient(180deg, rgba(255,238,219,.86) 0%, rgba(255,255,255,.74) 100%);
-      backdrop-filter: blur(28px);
-      -webkit-backdrop-filter: blur(28px);
+      border: 1px solid rgba(255,255,255,.85);
       box-shadow: 0 28px 80px rgba(249,115,0,.12);
-    }
-    .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 18px;
-      padding: 18px 24px 0;
-    }
-    .brandbar {
-      display: inline-flex;
-      align-items: center;
-      gap: 14px;
-      color: var(--ink);
-      font-weight: 700;
-      text-decoration: none;
-    }
-    .brandbar img { height: 38px; width: auto; }
-    .nav {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .nav a {
-      text-decoration: none;
-      color: var(--brand);
-      border-radius: 999px;
-      padding: 10px 14px;
-      background: rgba(255,255,255,.54);
-      border: 1px solid var(--line);
-      font-size: 13px;
-      font-weight: 700;
-    }
-    .hero {
-      display: grid;
-      grid-template-columns: 1.2fr .8fr;
-      gap: 28px;
-      padding: 28px 24px 36px;
-      min-height: 76vh;
-      align-items: end;
-    }
-    .hero-copy {
+      background:
+        radial-gradient(circle at 16% 18%, rgba(255,130,0,.28), rgba(255,130,0,0) 24%),
+        radial-gradient(circle at 82% 18%, rgba(249,115,0,.24), rgba(249,115,0,0) 22%),
+        radial-gradient(circle at 72% 56%, rgba(255,244,232,.86), rgba(255,244,232,0) 28%),
+        linear-gradient(180deg, #FFC792 0%, #FFF0DE 46%, #FFFFFF 100%);
+      min-height: calc(100vh - 36px);
       display: flex;
       flex-direction: column;
-      justify-content: flex-end;
-      gap: 18px;
-      padding: 24px 0;
     }
-    .eyebrow {
-      display: inline-flex;
-      width: fit-content;
-      align-items: center;
-      border-radius: 999px;
-      padding: 8px 12px;
-      background: var(--soft);
-      color: var(--brand);
-      border: 1px solid var(--line);
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: .08em;
-      text-transform: uppercase;
+    .hero-panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 18% 18%, rgba(255,255,255,.74), rgba(255,255,255,0) 16%),
+        radial-gradient(circle at 82% 30%, rgba(255,248,235,.86), rgba(255,248,235,0) 14%),
+        radial-gradient(circle at 72% 62%, rgba(255,244,232,.72), rgba(255,244,232,0) 18%);
+      opacity: .92;
+      pointer-events: none;
     }
-    .hero h1 {
-      margin: 0;
-      font-size: clamp(4.2rem, 10vw, 8.6rem);
-      line-height: .92;
-      letter-spacing: -.08em;
-    }
-    .hero h1 span { color: var(--brand); }
-    .hero p {
-      margin: 0;
-      font-size: 18px;
-      line-height: 1.8;
-      color: var(--muted);
-      max-width: 34em;
-    }
-    .hero-actions {
+    .brandbar {
       display: flex;
       align-items: center;
-      gap: 14px;
-      flex-wrap: wrap;
-      margin-top: 8px;
+      justify-content: center;
+      gap: 16px;
+      padding: 16px 20px 0;
+      position: relative;
+      z-index: 3;
     }
-    .primary-btn, .ghost-btn {
+    .navpill {
       display: inline-flex;
       align-items: center;
-      justify-content: center;
-      gap: 10px;
-      text-decoration: none;
+      gap: 12px;
+      border: 1px solid rgba(0,0,0,.08);
+      color: rgba(255,255,255,.86);
+      background: rgba(0,0,0,.78);
+      backdrop-filter: blur(16px);
+      padding: 8px 10px;
       border-radius: 999px;
-      padding: 16px 22px;
-      font-size: 15px;
-      font-weight: 700;
-      border: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 600;
+      box-shadow: 0 16px 32px rgba(0,0,0,.16);
     }
-    .primary-btn {
-      background: linear-gradient(135deg, #FF8200 0%, #F97300 100%);
-      color: #fff;
-      box-shadow: 0 14px 28px rgba(249,115,0,.2);
+    .navpill a {
+      color: rgba(255,255,255,.78);
+      text-decoration: none;
+      padding: 8px 16px;
+      border-radius: 999px;
+      font-size: 12px;
+      transition: color .18s ease, background .18s ease;
     }
-    .ghost-btn {
-      background: rgba(255,255,255,.68);
-      color: var(--brand);
+    .navpill a:hover {
+      color: #FFFFFF;
+      background: rgba(255,255,255,.08);
+    }
+    .hero-stage {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      padding: 16px 18px 18px;
+    }
+    .hero-stage::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(255,255,255,.46), rgba(255,255,255,0) 10%),
+        radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(255,130,0,.34), rgba(255,130,0,0) 18%),
+        radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(249,115,0,.22), rgba(249,115,0,0) 28%);
+      opacity: .92;
+      mix-blend-mode: screen;
+      filter: blur(2px);
+    }
+    .hero-corner-logo {
+      position: absolute;
+      top: 26px;
+      right: 26px;
+      z-index: 4;
+      display: block;
+      pointer-events: none;
+    }
+    .hero-corner-logo img {
+      width: clamp(420px, 42vw, 720px);
+      height: auto;
+      object-fit: contain;
+      display: block;
+      filter: saturate(1.04);
+    }
+    .hero-copy {
+      position: relative;
+      min-height: calc(100vh - 152px);
+      display: flex;
+      align-items: stretch;
+      justify-content: space-between;
+      border-radius: 28px;
+      padding: 24px 22px 26px;
+    }
+    .hero-left {
+      align-self: end;
+    }
+    .hero-left h1 {
+      margin: 0;
+      font-size: clamp(7rem, 14vw, 13.4rem);
+      line-height: .80;
+      letter-spacing: -.06em;
+      font-weight: 600;
+      max-width: 7ch;
+      color: #FF8200;
+      text-shadow: 0 10px 30px rgba(255,130,0,.10);
+    }
+    .hero-left h1 span {
+      display: inline-block;
+    }
+    .hero-left h1 .koko-k {
+      font-size: 1.22em;
+      line-height: .72;
+      letter-spacing: -.08em;
+    }
+    .hero-left h1 .koko-rest {
+      margin-left: -.06em;
+    }
+    .lede {
+      margin: 0;
+      color: #FF8200;
+      line-height: 1.35;
+      font-size: 18px;
+      max-width: 18ch;
+      padding-left: 6px;
     }
     .hero-side {
       align-self: stretch;
-      display: grid;
-      gap: 16px;
-      align-content: end;
-    }
-    .feature-card {
-      border-radius: 26px;
-      padding: 22px;
-      background: var(--card);
-      border: 1px solid rgba(255,255,255,.82);
-      box-shadow: 0 16px 42px rgba(249,115,0,.08);
-    }
-    .feature-card h3 {
-      margin: 0 0 10px;
-      color: var(--brand);
-      font-size: 26px;
-      letter-spacing: -.04em;
-    }
-    .feature-card p {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.75;
-    }
-    .section {
-      padding: 0 24px 28px;
-    }
-    .section-wrap {
-      border-radius: 28px;
-      padding: 28px;
-      background: rgba(255,255,255,.68);
-      border: 1px solid rgba(255,255,255,.82);
-      box-shadow: 0 16px 42px rgba(249,115,0,.08);
-    }
-    .section-title {
-      margin: 0 0 10px;
-      font-size: 34px;
-      letter-spacing: -.05em;
-      color: var(--ink);
-    }
-    .section-lede {
-      margin: 0 0 22px;
-      font-size: 15px;
-      line-height: 1.85;
-      color: var(--muted);
-      max-width: 60em;
-    }
-    .grid-3 {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      justify-self: end;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      justify-content: flex-end;
       gap: 18px;
+      padding-bottom: 20px;
     }
-    .grid-card {
-      border-radius: 22px;
-      padding: 20px;
-      background: rgba(255,247,238,.76);
-      border: 1px solid var(--line);
-    }
-    .grid-card .num {
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--brand);
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      margin-bottom: 10px;
-      display: block;
-    }
-    .grid-card h4 {
-      margin: 0 0 10px;
-      font-size: 22px;
-      color: var(--brand);
-      letter-spacing: -.03em;
-    }
-    .grid-card p {
+    .hero-side p {
       margin: 0;
-      color: var(--muted);
-      line-height: 1.72;
+      color: #FF8200;
       font-size: 14px;
+      line-height: 1.6;
+      max-width: 24ch;
+      text-align: left;
     }
-    .workflow {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 16px;
-      margin-top: 20px;
-    }
-    .workflow-step {
-      border-radius: 22px;
-      padding: 20px;
-      background: rgba(255,255,255,.78);
-      border: 1px solid var(--line);
-      min-height: 176px;
-    }
-    .workflow-step strong {
+    .hero-cta {
       display: inline-flex;
-      width: 34px;
-      height: 34px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      width: fit-content;
+      padding: 8px 8px 8px 18px;
+      border-radius: 999px;
+      background: #FFF8EA;
+      color: #1F1F1F;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 700;
+      box-shadow: 0 14px 28px rgba(0,0,0,.16);
+      transition: transform .18s ease, box-shadow .18s ease;
+    }
+    .hero-cta:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 18px 32px rgba(0,0,0,.20);
+    }
+    .hero-cta span {
+      width: 36px;
+      height: 36px;
+      display: inline-flex;
       align-items: center;
       justify-content: center;
       border-radius: 999px;
-      background: var(--soft);
-      color: var(--brand);
-      margin-bottom: 16px;
-      font-size: 14px;
-    }
-    .workflow-step h5 {
-      margin: 0 0 10px;
-      font-size: 18px;
-      color: var(--ink);
-    }
-    .workflow-step p {
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.72;
-      font-size: 14px;
+      background: #1F1F1F;
+      color: #FFFFFF;
+      font-size: 16px;
     }
     @media (max-width: 1080px) {
-      .hero { grid-template-columns: 1fr; min-height: auto; }
-      .grid-3, .workflow { grid-template-columns: 1fr; }
+      .hero-corner-logo img {
+        width: min(70vw, 520px);
+      }
     }
     @media (max-width: 720px) {
-      .landing-shell { width: min(100%, calc(100% - 16px)); margin: 8px auto; border-radius: 24px; }
-      .topbar, .hero, .section { padding-left: 16px; padding-right: 16px; }
-      .hero { padding-top: 20px; padding-bottom: 24px; }
-      .hero h1 { font-size: 4rem; }
-      .section-wrap { padding: 20px; }
-      .nav { justify-content: flex-start; }
+      .hero-shell {
+        padding: 12px;
+      }
+      .hero-panel {
+        min-height: calc(100vh - 24px);
+      }
+      .brandbar {
+        padding: 14px 14px 0;
+      }
+      .navpill {
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      .hero-stage {
+        padding: 16px 12px 18px;
+      }
+      .hero-copy {
+        min-height: calc(100vh - 132px);
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 18px 14px 22px;
+      }
+      .hero-left h1 {
+        font-size: 5rem;
+      }
+      .hero-left h1 .koko-k {
+        font-size: 1.16em;
+      }
+      .hero-side {
+        align-items: flex-start;
+      }
+      .hero-side p {
+        max-width: 18ch;
+      }
+      .hero-corner-logo {
+        top: 22px;
+        right: 16px;
+      }
+      .hero-corner-logo img {
+        width: min(74vw, 360px);
+      }
     }
   </style>
 </head>
 <body>
-  <main class="landing-shell">
-    <div class="topbar">
-      <a class="brandbar" href="/">
-        <img src="/brand/kwai-wordmark.svg" alt="Kwai" />
-      </a>
-      <nav class="nav">
-        <a href="#overview">产品介绍</a>
-        <a href="#workflow">工作流</a>
-        <a href="/studio">内容中台</a>
-        <a href="/library">脚本库</a>
-      </nav>
+  <main class="hero-shell">
+    <div class="hero-panel">
+      <div class="brandbar">
+        <div class="navpill">
+          <a href="/">Start</a>
+          <a href="/studio">Studio</a>
+          <a href="/studio#split-panel">Preview</a>
+          <a href="/library">Library</a>
+          <a href="/stats">Stats</a>
+        </div>
+      </div>
+      <div class="hero-stage">
+        <div class="hero-corner-logo">
+          <img src="/brand/kwai-wordmark.svg" alt="Kwai" />
+        </div>
+        <div class="hero-copy">
+          <div class="hero-left">
+            <h1><span class="koko-k">K</span><span class="koko-rest">oKo</span></h1>
+            <p class="lede">Kwai Coach</p>
+          </div>
+          <div class="hero-side">
+            <p>
+              Creator-side analysis for story clarity, stronger hooks, cleaner payoff, and better-performing short-form ideas.
+            </p>
+            <a class="hero-cta" href="/studio">进入内容中台 <span>→</span></a>
+          </div>
+        </div>
+      </div>
     </div>
-    <section class="hero">
-      <div class="hero-copy">
-        <span class="eyebrow">Author Education Platform</span>
-        <h1><span>Ko</span>ko</h1>
-        <p>Koko 是一套面向运营团队的作者教育平台，把优质视频筛选、视频拆解和数据看板串成一个可复用的内容中台，帮助团队为不同作者提供更精准的脚本投喂、选题参考和内容风格指导。</p>
-        <div class="hero-actions">
-          <a class="primary-btn" href="/studio">进入内容中台 <span>→</span></a>
-          <a class="ghost-btn" href="#workflow">查看工作流</a>
-        </div>
-      </div>
-      <div class="hero-side">
-        <article class="feature-card">
-          <h3>视频筛选</h3>
-          <p>先筛出高表现、且适合孵化作者的优质内容，减少运营团队手动翻找素材的时间成本。</p>
-        </article>
-        <article class="feature-card">
-          <h3>视频拆解</h3>
-          <p>自动提炼主轴、对白、爆点与可替换元素，把爆款内容拆成可编辑、可投喂、可复盘的结构化脚本。</p>
-        </article>
-        <article class="feature-card">
-          <h3>数据看板</h3>
-          <p>追踪脚本生成、复盘和人工修改行为，让运营团队能用数据回看作者教育和内容投喂效果。</p>
-        </article>
-      </div>
-    </section>
-    <section id="overview" class="section">
-      <div class="section-wrap">
-        <h2 class="section-title">这不是单点工具，而是一套作者教育工作流</h2>
-        <p class="section-lede">Koko 面向运营团队，核心是把“优质视频筛选—脚本拆解—脚本库沉淀—按作者画像匹配投喂”这条链路标准化，让优质内容经验能被更稳定地复制给不同作者。</p>
-        <div class="grid-3">
-          <article class="grid-card">
-            <span class="num">01</span>
-            <h4>优质内容沉淀</h4>
-            <p>把内部高表现视频转成可追踪、可复用的内容资产，而不是只停留在零散案例层面。</p>
-          </article>
-          <article class="grid-card">
-            <span class="num">02</span>
-            <h4>作者定向投喂</h4>
-            <p>脚本和内容风格不再一刀切，而是围绕作者画像、内容阶段和孵化目标进行匹配。</p>
-          </article>
-          <article class="grid-card">
-            <span class="num">03</span>
-            <h4>可复盘可迭代</h4>
-            <p>每次拆解、复盘、人工修改和保存行为都会沉淀数据，帮助后续持续优化内容教育流程。</p>
-          </article>
-        </div>
-      </div>
-    </section>
-    <section id="workflow" class="section">
-      <div class="section-wrap">
-        <h2 class="section-title">核心工作流</h2>
-        <p class="section-lede">运营团队先给 Koko 投喂一批视频，系统再完成筛选、拆解、沉淀和投喂建议，最终服务于作者教育和留存提升。</p>
-        <div class="workflow">
-          <article class="workflow-step">
-            <strong>1</strong>
-            <h5>投喂素材</h5>
-            <p>输入一批公开视频链接，Koko 接收并排队处理，准备进入筛选与拆解流程。</p>
-          </article>
-          <article class="workflow-step">
-            <strong>2</strong>
-            <h5>筛选优质视频</h5>
-            <p>优先挑出高表现且适合孵化作者的素材，帮助运营团队聚焦更值得复用的内容。</p>
-          </article>
-          <article class="workflow-step">
-            <strong>3</strong>
-            <h5>自动拆解脚本</h5>
-            <p>提炼故事主轴、对白、爆点、可替换元素与语言版本，生成可编辑、可导出的脚本结果。</p>
-          </article>
-          <article class="workflow-step">
-            <strong>4</strong>
-            <h5>沉淀并投喂作者</h5>
-            <p>把结果沉淀成脚本库，按作者画像匹配内容，为运营提供脚本投喂、选题参考和风格指导。</p>
-          </article>
-        </div>
-      </div>
-    </section>
   </main>
 </body>
 </html>"""
