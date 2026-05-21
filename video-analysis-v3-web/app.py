@@ -1818,7 +1818,8 @@ def sync_library_from_jobs() -> None:
             item["content_type_reasoning"] = decision["content_type_reasoning"]
             item["content_type_confidence"] = decision["content_type_confidence"]
             item["title"] = item.get("title") or script_json.get("title") or "Video Script"
-            persist_library_entry(parent_job_id, item)
+            if persist_library_entry(parent_job_id, item):
+                item["saved_to_library_at"] = item.get("saved_to_library_at") or now_iso()
             existing_entries[item.get("id")] = item
     save_jobs()
 
@@ -3314,7 +3315,7 @@ def start_review_job(item_id: str, feedback: str) -> tuple[bool, str]:
     return True, parent_job_id
 
 
-def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True) -> None:
+def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True) -> bool:
     script = item.get("result_json") or {}
     output_dir = RESULTS_ROOT / item["id"]
     bundle = read_json(output_dir / "evidence_bundle.json")
@@ -3347,7 +3348,26 @@ def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: 
         "source": "edited" if item.get("edited") else "ai",
         "saved_at": item.get("saved_to_library_at") or now_iso(),
     }
-    append_library_entry(entry)
+    return append_library_entry(entry)
+
+
+def persist_completed_job_items_async(job_id: str, *, use_llm: bool = True) -> None:
+    def _worker() -> None:
+        try:
+            with job_lock:
+                job = json.loads(json.dumps(jobs.get(job_id) or {}, ensure_ascii=False))
+            items = job.get("items") or []
+            for index, item in enumerate(items):
+                if str(item.get("status") or "").strip() != "completed":
+                    continue
+                if item.get("saved_to_library_at"):
+                    continue
+                if persist_library_entry(job_id, item, use_llm=use_llm):
+                    update_job_item(job_id, index, saved_to_library_at=now_iso())
+        except Exception:
+            return
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def find_item_context(item_id: str) -> tuple[str, int, dict[str, Any]] | None:
@@ -3920,7 +3940,6 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                         content_type_confidence=decision["content_type_confidence"],
                         title=script_json.get("title") or "Video Script",
                     )
-                    persist_library_entry(parent_job_id, jobs[parent_job_id]["items"][item_index], use_llm=False)
                     return
                 last_error = (stderr_text or proc_stdout or "").strip() or "Unknown pipeline failure"
                 if not should_try_next_model(last_error):
@@ -3971,6 +3990,8 @@ def run_job_batch(job_id: str) -> None:
             stage_message=f"Completed {completed}/{len(final_items)} items. Failed {failed}.",
             error="" if completed else "All batch items failed.",
         )
+        if completed:
+            persist_completed_job_items_async(job_id, use_llm=True)
     except Exception as exc:
         update_job(job_id, status="failed", error=friendly_error(str(exc)), completed_at=now_iso(), stage="failed", stage_message="Batch failed.")
 
