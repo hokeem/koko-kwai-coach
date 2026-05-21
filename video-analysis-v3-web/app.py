@@ -25,8 +25,10 @@ from uuid import uuid4
 PORT = int(os.environ.get("PORT", 8310))
 PIPELINE_TIMEOUT_SEC = int(os.environ.get("VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC", "720"))
 MAX_CONCURRENT_ANALYSES = max(1, int(os.environ.get("VIDEO_ANALYSIS_MAX_CONCURRENT_JOBS", "1")))
-RUNNING_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_RUNNING_STALE_SEC", "1800"))
-REVIEW_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_REVIEW_STALE_SEC", "1800"))
+RUNNING_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_RUNNING_STALE_SEC", "900"))
+REVIEW_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_REVIEW_STALE_SEC", "900"))
+PROCESSLESS_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_PROCESSLESS_STALE_SEC", "180"))
+WATCHDOG_INTERVAL_SEC = int(os.environ.get("VIDEO_ANALYSIS_WATCHDOG_INTERVAL_SEC", "15"))
 SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTION_DAYS", "3"))
 SOURCE_VIDEO_EXTENDED_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_EXTENDED_RETENTION_DAYS", "30"))
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "14"))
@@ -401,14 +403,32 @@ def is_item_cancelled(item_id: str) -> bool:
         return item_id in cancelled_item_ids
 
 
+def has_active_process(item_id: str) -> bool:
+    with active_processes_lock:
+        proc = active_processes.get(item_id)
+        return bool(proc and proc.poll() is None)
+
+
 def item_output_ready(item: dict[str, Any]) -> bool:
     item_id = str(item.get("id") or "").strip()
     if not item_id:
         return False
-    if item.get("result_json") and str(item.get("html_url") or "").strip():
+    if item.get("result_json") and (
+        str(item.get("html_url") or "").strip()
+        or str(item.get("report_url") or "").strip()
+        or str(item.get("docx_url") or "").strip()
+    ):
         return True
     output_dir = RESULTS_ROOT / item_id
-    return (output_dir / "script_table.json").exists() and (output_dir / "script_table.html").exists()
+    final_json = output_dir / "script_table.json"
+    final_html = output_dir / "script_table.html"
+    final_docx = output_dir / "script_export.docx"
+    product_report = output_dir / "product_report.html"
+    if final_json.exists() and final_html.exists():
+        return True
+    if final_json.exists() and (final_docx.exists() or product_report.exists()):
+        return True
+    return False
 
 
 def recompute_job_status(job_id: str) -> None:
@@ -456,16 +476,38 @@ def reconcile_stale_jobs() -> None:
     now_dt = datetime.now(timezone.utc)
     changed = False
     killed_item_ids: list[str] = []
+    requeue_job_ids: list[str] = []
+    with queue_condition:
+        queued_snapshot = set(job_queue)
+        queued_job_ids.intersection_update(queued_snapshot)
     with job_lock:
         for job_id, job in jobs.items():
             items = job.get("items") or []
+            job_changed = False
             for item in items:
                 item_id = str(item.get("id") or "")
                 status = str(item.get("status") or "").strip()
                 updated_at = parse_iso_datetime(item.get("updated_at") or item.get("created_at"))
                 if status == "running" and updated_at:
                     stale_for = (now_dt - updated_at).total_seconds()
-                    if stale_for > RUNNING_TASK_STALE_SEC:
+                    if item_output_ready(item):
+                        item["status"] = "completed"
+                        item["stage"] = "completed"
+                        item["stage_message"] = "Completed."
+                        item["completed_at"] = item.get("completed_at") or now_iso()
+                        item["updated_at"] = now_iso()
+                        changed = True
+                        job_changed = True
+                    elif not has_active_process(item_id) and stale_for > PROCESSLESS_TASK_STALE_SEC:
+                        item["status"] = "failed"
+                        item["stage"] = "failed"
+                        item["stage_message"] = "Worker stopped unexpectedly."
+                        item["error"] = "后台执行中断，任务已自动停止。"
+                        item["completed_at"] = now_iso()
+                        item["updated_at"] = now_iso()
+                        changed = True
+                        job_changed = True
+                    elif stale_for > RUNNING_TASK_STALE_SEC:
                         item["status"] = "failed"
                         item["stage"] = "failed"
                         item["stage_message"] = "Stopped after no progress."
@@ -475,6 +517,7 @@ def reconcile_stale_jobs() -> None:
                         mark_item_cancelled(item_id)
                         killed_item_ids.append(item_id)
                         changed = True
+                        job_changed = True
                 review_status = str(item.get("review_status") or "").strip()
                 if review_status == "running" and updated_at:
                     stale_for = (now_dt - updated_at).total_seconds()
@@ -485,10 +528,24 @@ def reconcile_stale_jobs() -> None:
                         item["updated_at"] = now_iso()
                         mark_item_cancelled(item_id)
                         changed = True
-            if changed:
+                        job_changed = True
+            has_running = any(str(item.get("status") or "").strip() == "running" for item in items)
+            has_running_review = any(str(item.get("review_status") or "").strip() == "running" for item in items)
+            has_queued = any(str(item.get("status") or "").strip() == "queued" for item in items)
+            if has_queued and not has_running and not has_running_review and job_id not in queued_snapshot:
+                job["status"] = "queued"
+                job["stage"] = "queued"
+                job["stage_message"] = "Recovered queued task."
+                job["updated_at"] = now_iso()
+                requeue_job_ids.append(job_id)
+                changed = True
+                job_changed = True
+            if job_changed:
                 recompute_job_status(job_id)
         if changed:
             save_jobs()
+    for job_id in requeue_job_ids:
+        enqueue_job(job_id)
     if killed_item_ids:
         with active_processes_lock:
             for item_id in killed_item_ids:
@@ -498,6 +555,15 @@ def reconcile_stale_jobs() -> None:
                         proc.kill()
                     except Exception:
                         pass
+
+
+def watchdog_loop() -> None:
+    while True:
+        try:
+            reconcile_stale_jobs()
+        except Exception as exc:
+            log_runtime_warning("watchdog_failed", "Background task watchdog failed.", error=str(exc))
+        time.sleep(max(5, WATCHDOG_INTERVAL_SEC))
 
 
 def stop_all_tasks() -> dict[str, int]:
@@ -619,6 +685,10 @@ def start_job_workers() -> None:
     for index in range(MAX_CONCURRENT_ANALYSES):
         thread = threading.Thread(target=job_worker_loop, name=f"koko-job-worker-{index+1}", daemon=True)
         thread.start()
+
+
+def start_watchdog() -> None:
+    threading.Thread(target=watchdog_loop, name="koko-task-watchdog", daemon=True).start()
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -5997,10 +6067,13 @@ def studio_html() -> str:
     let toastTimer = null;
     let pendingExportChoice = null;
     let restoringActiveJob = false;
+    let restoreAttempts = 0;
     const reviewTracker = Object.create(null);
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
     const ACTIVE_JOB_STORAGE_KEY = "koko_active_job_id";
+    const RESTORE_RETRY_LIMIT = 6;
+    const RESTORE_RETRY_DELAY_MS = 1500;
     const IDLE_STATUS_HTML = `
       <div class="status-empty">
         <div class="status-empty-title">已就绪。</div>
@@ -6618,6 +6691,7 @@ def studio_html() -> str:
     }}
 
     function renderBatchOverview(data, items) {{
+      const effectiveStatus = deriveEffectiveJobStatus(data);
       const total = data.total_items || items.length || 0;
       const completed = data.completed_items || 0;
       const failed = data.failed_items || 0;
@@ -6633,14 +6707,14 @@ def studio_html() -> str:
       const globalFocus = activeWorkloads[0] || null;
       const currentItem = findCurrentItem(items);
       const allItemsSettled = total > 0 && finishedCount >= total && !hasRunningReview(items);
-      if (!currentItem && (data.status === "completed" || allItemsSettled)) return "";
+      if (!currentItem && (effectiveStatus === "completed" || allItemsSettled)) return "";
       const currentIndex = currentItem ? ((items.indexOf(currentItem) >= 0 ? items.indexOf(currentItem) : 0) + 1) : 0;
       const leadItem = currentItem || items[0] || null;
       const stageLabel = STAGE_LABELS[data.stage] || STAGE_LABELS[currentItem?.stage] || "等待拆解";
       const stageMessage = data.stage_message || currentItem?.stage_message || data.message || "任务已经创建，系统会按顺序逐条拆解。";
       let subtitle = currentItem
         ? `当前正在拆解 ${{displayVideoName(currentItem, currentItem.index || 0)}}，其余任务会按照提交顺序继续排队。`
-        : (data.status === "completed"
+        : (effectiveStatus === "completed"
             ? "这批任务已经跑完了，你可以直接查看已完成脚本。"
             : "任务已经创建，系统会按顺序逐条拆解。");
       if (!currentItem && globalFocus) {{
@@ -6649,7 +6723,7 @@ def studio_html() -> str:
       const subtitleNode = currentItem
         ? `<a class="batch-overview-subtitle" href="${{escapeHtml(currentItem.video_url || "")}}" target="_blank" rel="noreferrer">${{escapeHtml(currentItem.video_url || "")}}</a>`
         : `<div class="focus-note">${{escapeHtml(subtitle)}}</div>`;
-      const queueHint = data.status === "queued" && currentPosition
+      const queueHint = effectiveStatus === "queued" && currentPosition
         ? `<div class="focus-note">你的任务当前排队第 ${{currentPosition}} 位，前方还有 ${{currentAhead}} 条任务。</div>`
         : "";
       const systemHint = globalFocus
@@ -6666,7 +6740,7 @@ def studio_html() -> str:
                 <button class="job-copy-btn" type="button" data-copy-text="${{escapeHtml(data.id || "")}}" aria-label="复制任务 ID">⧉</button>
               </div>
             </div>
-            <span class="status ${{data.status === "completed" ? "status-completed" : data.status === "failed" ? "status-failed" : data.status === "running" ? "status-running" : "status-queued"}}">${{escapeHtml(jobStatusLabel(data.status || "queued"))}}</span>
+            <span class="status ${{effectiveStatus === "completed" ? "status-completed" : effectiveStatus === "failed" ? "status-failed" : effectiveStatus === "running" ? "status-running" : "status-queued"}}">${{escapeHtml(jobStatusLabel(effectiveStatus || "queued"))}}</span>
           </div>
           <div class="batch-meta">
             <span class="batch-chip">总数 ${{total}}</span>
@@ -6777,6 +6851,19 @@ def studio_html() -> str:
       return (items || []).some((item) => item && item.review_status === "running");
     }}
 
+    function deriveEffectiveJobStatus(data) {{
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const totalItems = Number(data?.total_items || items.length || 0);
+      const completedItems = Number(data?.completed_items || items.filter((item) => item?.status === "completed").length || 0);
+      const failedItems = Number(data?.failed_items || items.filter((item) => item?.status === "failed").length || 0);
+      const reviewRunning = hasRunningReview(items);
+      const allItemsSettled = totalItems > 0 && completedItems + failedItems >= totalItems;
+      if (allItemsSettled && !reviewRunning) return completedItems > 0 ? "completed" : "failed";
+      if (items.some((item) => item?.status === "running") || reviewRunning) return "running";
+      if (items.some((item) => item?.status === "queued")) return "queued";
+      return String(data?.status || "queued").trim() || "queued";
+    }}
+
     function progressMarkup(stage, stageMessage, jobId) {{
       const index = Math.max(0, STAGE_ORDER.indexOf(stage));
       const percent = stage === "completed" ? 100 : stage === "failed" ? 100 : Math.max(6, Math.round(((index + 1) / STAGE_ORDER.length) * 100));
@@ -6813,7 +6900,13 @@ def studio_html() -> str:
         res = await fetch(`/api/jobs/${{jobId}}`);
       }} catch (error) {{
         if (restoringActiveJob) {{
+          restoreAttempts += 1;
+          if (restoreAttempts < RESTORE_RETRY_LIMIT) {{
+            schedulePoll(jobId, RESTORE_RETRY_DELAY_MS);
+            return;
+          }}
           restoringActiveJob = false;
+          restoreAttempts = 0;
           setIdleState();
           showToast("恢复失败", "没能恢复上次任务展示，页面已回到初始状态。");
           return;
@@ -6823,7 +6916,15 @@ def studio_html() -> str:
         return;
       }}
       if (!res.ok) {{
+        if (restoringActiveJob && res.status >= 500) {{
+          restoreAttempts += 1;
+          if (restoreAttempts < RESTORE_RETRY_LIMIT) {{
+            schedulePoll(jobId, RESTORE_RETRY_DELAY_MS);
+            return;
+          }}
+        }}
         restoringActiveJob = false;
+        restoreAttempts = 0;
         persistActiveJobId("");
         setIdleState();
         showToast("无法恢复任务", "这条任务可能已经不存在或已失效。");
@@ -6834,7 +6935,13 @@ def studio_html() -> str:
         data = await readJsonSafely(res);
       }} catch (error) {{
         if (restoringActiveJob) {{
+          restoreAttempts += 1;
+          if (restoreAttempts < RESTORE_RETRY_LIMIT) {{
+            schedulePoll(jobId, RESTORE_RETRY_DELAY_MS);
+            return;
+          }}
           restoringActiveJob = false;
+          restoreAttempts = 0;
           setIdleState();
           showToast("恢复失败", "服务返回异常，未能恢复上次任务展示。");
           return;
@@ -6844,13 +6951,15 @@ def studio_html() -> str:
         return;
       }}
       restoringActiveJob = false;
+      restoreAttempts = 0;
       const batchResults = renderBatchResults(data);
+      const effectiveStatus = deriveEffectiveJobStatus(data);
       const reviewRunning = hasRunningReview(data.items);
       const totalItems = Number(data.total_items || (Array.isArray(data.items) ? data.items.length : 0) || 0);
       const finishedItems = Number(data.completed_items || 0) + Number(data.failed_items || 0);
       const allItemsSettled = totalItems > 0 && finishedItems >= totalItems;
       checkReviewTransitions(data.items);
-      if (data.status === "completed" || (allItemsSettled && !reviewRunning)) {{
+      if (effectiveStatus === "completed" || (allItemsSettled && !reviewRunning)) {{
         const completedMessage = reviewRunning
           ? "主分析已完成，复盘任务仍在继续。"
           : (data.message || "分析完成。");
@@ -6858,19 +6967,16 @@ def studio_html() -> str:
         updateStopAllButtonState(reviewRunning);
         if (reviewRunning) {{
           schedulePoll(jobId, 2500);
-        }} else {{
-          persistActiveJobId("");
         }}
         return;
       }}
-      if (data.status === "failed") {{
+      if (effectiveStatus === "failed") {{
         const partial = Array.isArray(data.items) && data.items.length ? batchResults : "";
         setStatus(`<span class="status status-failed">失败</span><br><br>${{progressMarkup("failed", data.message || "分析失败。", data.id)}}<code>${{escapeHtml(data.error || "未知错误")}}</code>${{partial}}`);
         updateStopAllButtonState(false);
-        persistActiveJobId("");
         return;
       }}
-      const badge = data.status === "running" ? "status-running" : "status-queued";
+      const badge = effectiveStatus === "running" ? "status-running" : "status-queued";
       const runningMarkup = Array.isArray(data.items) && data.items.length
         ? renderBatchResults(data)
         : `${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}`;
@@ -7933,6 +8039,7 @@ def main() -> int:
     load_jobs()
     restore_pending_jobs_to_queue()
     start_job_workers()
+    start_watchdog()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AppHandler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT), "skill_root": str(SKILL_ROOT)}, ensure_ascii=False))
     try:
