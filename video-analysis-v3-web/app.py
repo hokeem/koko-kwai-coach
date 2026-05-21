@@ -6169,6 +6169,9 @@ def studio_html() -> str:
     let restoreAttempts = 0;
     let pollInFlight = false;
     let queuedImmediateRepoll = false;
+    let activePollController = null;
+    const POLL_REQUEST_TIMEOUT_MS = 12000;
+    const POLL_RECOVERY_DELAY_MS = 1500;
     const reviewTracker = Object.create(null);
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
@@ -7022,7 +7025,10 @@ def studio_html() -> str:
       persistActiveJobId(jobId);
       updateStopAllButtonState(true);
       if (pollInFlight) {{
-        if (options && options.force) queuedImmediateRepoll = true;
+        if (options && options.force) {{
+          queuedImmediateRepoll = true;
+          if (activePollController) activePollController.abort("forced-repoll");
+        }}
         return;
       }}
       pollInFlight = true;
@@ -7030,10 +7036,21 @@ def studio_html() -> str:
         clearTimeout(jobPollTimer);
         jobPollTimer = null;
       }}
+      const controller = new AbortController();
+      activePollController = controller;
+      const timeoutId = window.setTimeout(() => controller.abort("poll-timeout"), POLL_REQUEST_TIMEOUT_MS);
       let res;
       try {{
-        res = await fetch(`/api/jobs/${{jobId}}?_=${{Date.now()}}`, {{ cache: "no-store" }});
+        res = await fetch(`/api/jobs/${{jobId}}?_=${{Date.now()}}`, {{
+          cache: "no-store",
+          signal: controller.signal,
+          headers: {{
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache"
+          }}
+        }});
       }} catch (error) {{
+        const aborted = error && error.name === "AbortError";
         if (restoringActiveJob) {{
           restoreAttempts += 1;
           if (restoreAttempts < RESTORE_RETRY_LIMIT) {{
@@ -7046,9 +7063,22 @@ def studio_html() -> str:
           showToast("恢复失败", "没能恢复上次任务展示，页面已回到初始状态。");
           return;
         }}
+        if (aborted) {{
+          schedulePoll(jobId, POLL_RECOVERY_DELAY_MS);
+          return;
+        }}
+        const snapshot = readPersistedActiveJobSnapshot(jobId);
+        if (snapshot) {{
+          const snapshotResults = renderBatchResults(snapshot);
+          if (snapshotResults) setStatus(snapshotResults, deriveEffectiveJobStatus(snapshot) === "completed");
+          schedulePoll(jobId, POLL_RECOVERY_DELAY_MS);
+          return;
+        }}
         setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
         schedulePoll(jobId, 4000);
         return;
+      }} finally {{
+        window.clearTimeout(timeoutId);
       }}
       if (!res.ok) {{
         if (restoringActiveJob && res.status >= 500) {{
@@ -7079,6 +7109,13 @@ def studio_html() -> str:
           restoreAttempts = 0;
           setIdleState();
           showToast("恢复失败", "服务返回异常，未能恢复上次任务展示。");
+          return;
+        }}
+        const snapshot = readPersistedActiveJobSnapshot(jobId);
+        if (snapshot) {{
+          const snapshotResults = renderBatchResults(snapshot);
+          if (snapshotResults) setStatus(snapshotResults, deriveEffectiveJobStatus(snapshot) === "completed");
+          schedulePoll(jobId, POLL_RECOVERY_DELAY_MS);
           return;
         }}
         setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
@@ -7116,9 +7153,10 @@ def studio_html() -> str:
       const runningMarkup = Array.isArray(data.items) && data.items.length
         ? renderBatchResults(data)
         : `${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}`;
-      setStatus(`<span class="status ${{badge}}">${{jobStatusLabel(data.status)}}</span><br><br>${{runningMarkup}}`);
+      setStatus(`<span class="status ${{badge}}">${{jobStatusLabel(effectiveStatus)}}</span><br><br>${{runningMarkup}}`);
       schedulePoll(jobId, 2500);
       }} finally {{
+        if (activePollController === controller) activePollController = null;
         pollInFlight = false;
         if (queuedImmediateRepoll && activeJobId === jobId) {{
           queuedImmediateRepoll = false;
