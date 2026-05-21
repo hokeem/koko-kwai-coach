@@ -3936,6 +3936,375 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
 
 
 def page_html() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Koko</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
+    :root {
+      --brand: #FF8200;
+      --brand-deep: #F97300;
+      --ink: #171717;
+      --muted: #5f5f5f;
+      --line: rgba(255,130,0,.18);
+      --card: rgba(255,255,255,.78);
+      --soft: rgba(255,130,0,.08);
+    }
+    * { box-sizing: border-box; font-family: 'Readex Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 10%, rgba(255,130,0,.42), transparent 28%),
+        radial-gradient(circle at 92% 8%, rgba(249,115,0,.28), transparent 24%),
+        linear-gradient(180deg, #FFB15A 0%, #FFD9AF 30%, #FFF4E8 66%, #FFFFFF 100%);
+    }
+    .landing-shell {
+      width: min(1440px, calc(100% - 32px));
+      margin: 16px auto;
+      border-radius: 34px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.72);
+      background:
+        radial-gradient(circle at 12% 14%, rgba(255,130,0,.30), rgba(255,130,0,0) 24%),
+        radial-gradient(circle at 88% 12%, rgba(249,115,0,.22), rgba(249,115,0,0) 22%),
+        linear-gradient(180deg, rgba(255,238,219,.86) 0%, rgba(255,255,255,.74) 100%);
+      backdrop-filter: blur(28px);
+      -webkit-backdrop-filter: blur(28px);
+      box-shadow: 0 28px 80px rgba(249,115,0,.12);
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 18px 24px 0;
+    }
+    .brandbar {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      color: var(--ink);
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .brandbar img { height: 38px; width: auto; }
+    .nav {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .nav a {
+      text-decoration: none;
+      color: var(--brand);
+      border-radius: 999px;
+      padding: 10px 14px;
+      background: rgba(255,255,255,.54);
+      border: 1px solid var(--line);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 28px;
+      padding: 28px 24px 36px;
+      min-height: 76vh;
+      align-items: end;
+    }
+    .hero-copy {
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      gap: 18px;
+      padding: 24px 0;
+    }
+    .eyebrow {
+      display: inline-flex;
+      width: fit-content;
+      align-items: center;
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: var(--soft);
+      color: var(--brand);
+      border: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(4.2rem, 10vw, 8.6rem);
+      line-height: .92;
+      letter-spacing: -.08em;
+    }
+    .hero h1 span { color: var(--brand); }
+    .hero p {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.8;
+      color: var(--muted);
+      max-width: 34em;
+    }
+    .hero-actions {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .primary-btn, .ghost-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      text-decoration: none;
+      border-radius: 999px;
+      padding: 16px 22px;
+      font-size: 15px;
+      font-weight: 700;
+      border: 1px solid var(--line);
+    }
+    .primary-btn {
+      background: linear-gradient(135deg, #FF8200 0%, #F97300 100%);
+      color: #fff;
+      box-shadow: 0 14px 28px rgba(249,115,0,.2);
+    }
+    .ghost-btn {
+      background: rgba(255,255,255,.68);
+      color: var(--brand);
+    }
+    .hero-side {
+      align-self: stretch;
+      display: grid;
+      gap: 16px;
+      align-content: end;
+    }
+    .feature-card {
+      border-radius: 26px;
+      padding: 22px;
+      background: var(--card);
+      border: 1px solid rgba(255,255,255,.82);
+      box-shadow: 0 16px 42px rgba(249,115,0,.08);
+    }
+    .feature-card h3 {
+      margin: 0 0 10px;
+      color: var(--brand);
+      font-size: 26px;
+      letter-spacing: -.04em;
+    }
+    .feature-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.75;
+    }
+    .section {
+      padding: 0 24px 28px;
+    }
+    .section-wrap {
+      border-radius: 28px;
+      padding: 28px;
+      background: rgba(255,255,255,.68);
+      border: 1px solid rgba(255,255,255,.82);
+      box-shadow: 0 16px 42px rgba(249,115,0,.08);
+    }
+    .section-title {
+      margin: 0 0 10px;
+      font-size: 34px;
+      letter-spacing: -.05em;
+      color: var(--ink);
+    }
+    .section-lede {
+      margin: 0 0 22px;
+      font-size: 15px;
+      line-height: 1.85;
+      color: var(--muted);
+      max-width: 60em;
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .grid-card {
+      border-radius: 22px;
+      padding: 20px;
+      background: rgba(255,247,238,.76);
+      border: 1px solid var(--line);
+    }
+    .grid-card .num {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--brand);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      display: block;
+    }
+    .grid-card h4 {
+      margin: 0 0 10px;
+      font-size: 22px;
+      color: var(--brand);
+      letter-spacing: -.03em;
+    }
+    .grid-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.72;
+      font-size: 14px;
+    }
+    .workflow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 20px;
+    }
+    .workflow-step {
+      border-radius: 22px;
+      padding: 20px;
+      background: rgba(255,255,255,.78);
+      border: 1px solid var(--line);
+      min-height: 176px;
+    }
+    .workflow-step strong {
+      display: inline-flex;
+      width: 34px;
+      height: 34px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: var(--soft);
+      color: var(--brand);
+      margin-bottom: 16px;
+      font-size: 14px;
+    }
+    .workflow-step h5 {
+      margin: 0 0 10px;
+      font-size: 18px;
+      color: var(--ink);
+    }
+    .workflow-step p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.72;
+      font-size: 14px;
+    }
+    @media (max-width: 1080px) {
+      .hero { grid-template-columns: 1fr; min-height: auto; }
+      .grid-3, .workflow { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .landing-shell { width: min(100%, calc(100% - 16px)); margin: 8px auto; border-radius: 24px; }
+      .topbar, .hero, .section { padding-left: 16px; padding-right: 16px; }
+      .hero { padding-top: 20px; padding-bottom: 24px; }
+      .hero h1 { font-size: 4rem; }
+      .section-wrap { padding: 20px; }
+      .nav { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <main class="landing-shell">
+    <div class="topbar">
+      <a class="brandbar" href="/">
+        <img src="/brand/kwai-wordmark.svg" alt="Kwai" />
+      </a>
+      <nav class="nav">
+        <a href="#overview">产品介绍</a>
+        <a href="#workflow">工作流</a>
+        <a href="/studio">内容中台</a>
+        <a href="/library">脚本库</a>
+      </nav>
+    </div>
+    <section class="hero">
+      <div class="hero-copy">
+        <span class="eyebrow">Author Education Platform</span>
+        <h1><span>Ko</span>ko</h1>
+        <p>Koko 是一套面向运营团队的作者教育平台，把优质视频筛选、视频拆解和数据看板串成一个可复用的内容中台，帮助团队为不同作者提供更精准的脚本投喂、选题参考和内容风格指导。</p>
+        <div class="hero-actions">
+          <a class="primary-btn" href="/studio">进入内容中台 <span>→</span></a>
+          <a class="ghost-btn" href="#workflow">查看工作流</a>
+        </div>
+      </div>
+      <div class="hero-side">
+        <article class="feature-card">
+          <h3>视频筛选</h3>
+          <p>先筛出高表现、且适合孵化作者的优质内容，减少运营团队手动翻找素材的时间成本。</p>
+        </article>
+        <article class="feature-card">
+          <h3>视频拆解</h3>
+          <p>自动提炼主轴、对白、爆点与可替换元素，把爆款内容拆成可编辑、可投喂、可复盘的结构化脚本。</p>
+        </article>
+        <article class="feature-card">
+          <h3>数据看板</h3>
+          <p>追踪脚本生成、复盘和人工修改行为，让运营团队能用数据回看作者教育和内容投喂效果。</p>
+        </article>
+      </div>
+    </section>
+    <section id="overview" class="section">
+      <div class="section-wrap">
+        <h2 class="section-title">这不是单点工具，而是一套作者教育工作流</h2>
+        <p class="section-lede">Koko 面向运营团队，核心是把“优质视频筛选—脚本拆解—脚本库沉淀—按作者画像匹配投喂”这条链路标准化，让优质内容经验能被更稳定地复制给不同作者。</p>
+        <div class="grid-3">
+          <article class="grid-card">
+            <span class="num">01</span>
+            <h4>优质内容沉淀</h4>
+            <p>把内部高表现视频转成可追踪、可复用的内容资产，而不是只停留在零散案例层面。</p>
+          </article>
+          <article class="grid-card">
+            <span class="num">02</span>
+            <h4>作者定向投喂</h4>
+            <p>脚本和内容风格不再一刀切，而是围绕作者画像、内容阶段和孵化目标进行匹配。</p>
+          </article>
+          <article class="grid-card">
+            <span class="num">03</span>
+            <h4>可复盘可迭代</h4>
+            <p>每次拆解、复盘、人工修改和保存行为都会沉淀数据，帮助后续持续优化内容教育流程。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+    <section id="workflow" class="section">
+      <div class="section-wrap">
+        <h2 class="section-title">核心工作流</h2>
+        <p class="section-lede">运营团队先给 Koko 投喂一批视频，系统再完成筛选、拆解、沉淀和投喂建议，最终服务于作者教育和留存提升。</p>
+        <div class="workflow">
+          <article class="workflow-step">
+            <strong>1</strong>
+            <h5>投喂素材</h5>
+            <p>输入一批公开视频链接，Koko 接收并排队处理，准备进入筛选与拆解流程。</p>
+          </article>
+          <article class="workflow-step">
+            <strong>2</strong>
+            <h5>筛选优质视频</h5>
+            <p>优先挑出高表现且适合孵化作者的素材，帮助运营团队聚焦更值得复用的内容。</p>
+          </article>
+          <article class="workflow-step">
+            <strong>3</strong>
+            <h5>自动拆解脚本</h5>
+            <p>提炼故事主轴、对白、爆点、可替换元素与语言版本，生成可编辑、可导出的脚本结果。</p>
+          </article>
+          <article class="workflow-step">
+            <strong>4</strong>
+            <h5>沉淀并投喂作者</h5>
+            <p>把结果沉淀成脚本库，按作者画像匹配内容，为运营提供脚本投喂、选题参考和风格指导。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
+def studio_html() -> str:
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -5247,7 +5616,233 @@ def page_html() -> str:
       object-position: left center;
       transform: scale(1.65);
     }}
+    .studio-shell {{
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      min-height: 100vh;
+    }}
+    .studio-sidebar {{
+      position: sticky;
+      top: 0;
+      align-self: start;
+      min-height: 100vh;
+      padding: 24px 16px;
+      border-right: 1px solid rgba(255,255,255,.82);
+      background: rgba(255,255,255,.58);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      z-index: 5;
+    }}
+    .studio-brand {{
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 8px 10px 12px;
+      text-decoration: none;
+      color: #1f1f1f;
+      font-size: 16px;
+      font-weight: 800;
+    }}
+    .studio-brand img {{
+      width: 112px;
+      height: auto;
+      object-fit: contain;
+    }}
+    .studio-side-nav {{
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }}
+    .studio-tab-link {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      border: 1px solid transparent;
+      background: rgba(255,255,255,.48);
+      color: rgba(31,31,31,.76);
+      padding: 14px 16px;
+      border-radius: 18px;
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 700;
+      transition: border-color .18s ease, background .18s ease, color .18s ease;
+    }}
+    .studio-tab-link:hover {{
+      border-color: rgba(255,130,0,.18);
+      color: #FF8200;
+    }}
+    .studio-tab-link.active {{
+      color: #FF8200;
+      background: rgba(255,255,255,.88);
+      border-color: rgba(255,130,0,.18);
+      box-shadow: 0 10px 24px rgba(249,115,0,.08);
+    }}
+    .studio-tab-icon {{
+      font-size: 18px;
+      line-height: 1;
+    }}
+    .studio-side-meta {{
+      margin-top: auto;
+      border-radius: 20px;
+      border: 1px solid rgba(255,130,0,.12);
+      background: rgba(255,255,255,.68);
+      padding: 14px;
+    }}
+    .studio-side-meta strong {{
+      display: block;
+      font-size: 14px;
+      color: #1f1f1f;
+      margin-bottom: 6px;
+    }}
+    .studio-side-meta p {{
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.65;
+      color: rgba(31,31,31,.62);
+    }}
+    .studio-main {{
+      padding: 24px;
+      min-width: 0;
+    }}
+    .studio-page-title {{
+      margin: 0 0 6px;
+      font-size: clamp(2.2rem, 5vw, 3.2rem);
+      line-height: .96;
+      letter-spacing: -.06em;
+      color: #1f1f1f;
+    }}
+    .studio-page-copy {{
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.7;
+      color: rgba(31,31,31,.62);
+      max-width: 52em;
+    }}
+    .studio-panel {{
+      display: none;
+      margin-top: 22px;
+    }}
+    .studio-panel.active {{
+      display: block;
+    }}
+    .studio-card {{
+      border-radius: 28px;
+      border: 1px solid rgba(255,255,255,.82);
+      background: rgba(255,255,255,.78);
+      box-shadow: 0 22px 48px rgba(249,115,0,.08);
+      overflow: hidden;
+    }}
+    .studio-card-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding: 24px 24px 0;
+    }}
+    .studio-card-head h2 {{
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: -.04em;
+      color: #1f1f1f;
+    }}
+    .studio-card-head p {{
+      margin: 6px 0 0;
+      font-size: 14px;
+      line-height: 1.7;
+      color: rgba(31,31,31,.62);
+      max-width: 52em;
+    }}
+    .studio-kpis {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      padding: 0 24px 24px;
+      margin-top: 18px;
+    }}
+    .studio-kpi {{
+      border-radius: 22px;
+      border: 1px solid rgba(255,130,0,.12);
+      background: rgba(255,248,238,.76);
+      padding: 18px;
+    }}
+    .studio-kpi strong {{
+      display: block;
+      font-size: 14px;
+      color: #FF8200;
+      margin-bottom: 10px;
+    }}
+    .studio-kpi span {{
+      display: block;
+      font-size: 28px;
+      color: #1f1f1f;
+      font-weight: 800;
+      letter-spacing: -.04em;
+      margin-bottom: 10px;
+    }}
+    .studio-kpi p {{
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: rgba(31,31,31,.58);
+    }}
+    .studio-iframe {{
+      width: 100%;
+      min-height: 1280px;
+      border: 0;
+      display: block;
+      background: transparent;
+    }}
+    .composer-block {{
+      padding: 24px;
+      border-bottom: 1px solid rgba(255,130,0,.12);
+    }}
+    .studio-placeholder-grid {{
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 18px;
+      padding: 0 24px 24px;
+    }}
+    .studio-placeholder-box {{
+      border-radius: 22px;
+      border: 1px solid rgba(255,130,0,.12);
+      background: rgba(255,248,238,.76);
+      padding: 20px;
+    }}
+    .studio-placeholder-box h3 {{
+      margin: 0 0 12px;
+      font-size: 22px;
+      color: #1f1f1f;
+      letter-spacing: -.03em;
+    }}
+    .studio-placeholder-box p,
+    .studio-placeholder-box li {{
+      font-size: 14px;
+      line-height: 1.75;
+      color: rgba(31,31,31,.62);
+    }}
+    .studio-placeholder-box ul {{
+      margin: 10px 0 0;
+      padding-left: 18px;
+    }}
     @media (max-width: 1080px) {{
+      .studio-shell {{
+        grid-template-columns: 1fr;
+      }}
+      .studio-sidebar {{
+        position: static;
+        min-height: auto;
+        border-right: 0;
+        border-bottom: 1px solid rgba(255,255,255,.82);
+      }}
+      .studio-kpis,
+      .studio-placeholder-grid {{
+        grid-template-columns: 1fr;
+      }}
       .hero-copy {{
         grid-template-columns: 1fr;
         min-height: auto;
@@ -5259,6 +5854,16 @@ def page_html() -> str:
       }}
     }}
     @media (max-width: 720px) {{
+      .studio-main {{
+        padding: 16px;
+      }}
+      .composer-block,
+      .studio-card-head,
+      .studio-kpis,
+      .studio-placeholder-grid {{
+        padding-left: 16px;
+        padding-right: 16px;
+      }}
       .hero-shell {{
         padding: 12px;
       }}
@@ -5316,50 +5921,88 @@ def page_html() -> str:
   </style>
 </head>
 <body>
-  <main class="shell">
-    <div class="site">
-      <section class="hero-shell">
-        <div class="hero-panel">
-          <div class="brandbar">
-            <div class="navpill">
-              <a href="#workbench">Start</a>
-              <a href="#workbench">Studio</a>
-              <a href="#workbench">Preview</a>
-              <a href="/library">Library</a>
-              <a href="/stats">Stats</a>
+  <main class="studio-shell">
+    <aside class="studio-sidebar">
+      <a class="studio-brand" href="/">
+        <img src="/brand/kwai-wordmark.svg" alt="Kwai" />
+      </a>
+      <nav class="studio-side-nav" aria-label="Koko 内容中台导航">
+        <a class="studio-tab-link" href="/" data-nav-kind="home"><span class="studio-tab-icon">⌂</span><span>返回落地页</span></a>
+        <a class="studio-tab-link active" href="#filter-panel" data-panel-target="filter-panel"><span class="studio-tab-icon">⌕</span><span>视频筛选</span></a>
+        <a class="studio-tab-link" href="#split-panel" data-panel-target="split-panel"><span class="studio-tab-icon">▤</span><span>视频拆解</span></a>
+        <a class="studio-tab-link" href="#stats-panel" data-panel-target="stats-panel"><span class="studio-tab-icon">▥</span><span>数据看板</span></a>
+        <a class="studio-tab-link" href="/library"><span class="studio-tab-icon">☰</span><span>脚本库</span></a>
+      </nav>
+      <div class="studio-side-meta">
+        <strong>给运营看的内容中台</strong>
+        <p>围绕视频筛选、视频拆解和数据看板，支持优质内容筛选、脚本沉淀与作者投喂。</p>
+      </div>
+    </aside>
+    <section class="studio-main">
+      <h1 class="studio-page-title">Koko 内容中台</h1>
+      <p class="studio-page-copy">把优质视频筛选、结构化脚本拆解和数据看板放进同一个工作台，让运营团队能更高效地沉淀案例、复盘内容并给作者定向投喂。</p>
+
+      <section id="filter-panel" class="studio-panel active">
+        <div class="studio-card">
+          <div class="studio-card-head">
+            <div>
+              <h2>视频筛选</h2>
+              <p>这一块先提供轻量占位：围绕高表现内容、作者适配度和复用优先级做筛选建议，后续可以在这里接入更正式的批量打分和筛选能力。</p>
             </div>
           </div>
-          <div class="hero-stage">
-            <div class="hero-corner-logo">
-              <img src="/brand/kwai-wordmark.svg" alt="Kwai" />
+          <div class="studio-kpis">
+            <div class="studio-kpi">
+              <strong>高表现优先</strong>
+              <span>Top</span>
+              <p>优先挑出播放表现更好、且更适合沉淀成脚本资产的视频，减少运营人工翻找成本。</p>
             </div>
-            <div class="hero-copy">
-              <div class="hero-left">
-                <h1><span class="koko-k">K</span><span class="koko-rest">oKo</span></h1>
-                <p class="lede">Kwai Coach</p>
-              </div>
-              <div class="hero-side">
-                <p>
-                  Creator-side analysis for story clarity, stronger hooks, cleaner payoff, and better-performing short-form ideas.
-                </p>
-                <a class="hero-cta" href="#workbench">Start with a link <span>→</span></a>
-              </div>
+            <div class="studio-kpi">
+              <strong>作者匹配</strong>
+              <span>Match</span>
+              <p>从作者人设、内容阶段和风格角度判断视频是否值得进入后续拆解与投喂流程。</p>
+            </div>
+            <div class="studio-kpi">
+              <strong>复用潜力</strong>
+              <span>Reuse</span>
+              <p>判断视频是否具备可拆解、可替换、可复盘的爆款结构，为脚本库沉淀做前置筛选。</p>
+            </div>
+          </div>
+          <div class="studio-placeholder-grid">
+            <div class="studio-placeholder-box">
+              <h3>即将接入的筛选能力</h3>
+              <ul>
+                <li>批量视频输入后的优先级排序</li>
+                <li>高表现 / 高适配 / 高复用 三维度打分</li>
+                <li>适合投喂给哪类作者的筛选建议</li>
+              </ul>
+            </div>
+            <div class="studio-placeholder-box">
+              <h3>当前建议</h3>
+              <p>先把值得复用的视频送到“视频拆解”里做完整脚本生成，再沉淀进脚本库供作者教育和内容投喂使用。</p>
             </div>
           </div>
         </div>
       </section>
 
-      <section id="workbench" class="work-shell">
-        <div class="workspace">
-          <div class="composer">
-            <div class="composer-head">
-              <div></div>
+      <section id="split-panel" class="studio-panel">
+        <div class="studio-card">
+          <div class="studio-card-head">
+            <div>
+              <h2>视频拆解任务中心</h2>
+              <p>保留现有的视频分析、批量任务、队列、脚本预览、导出、复盘和直接修改能力。这里承接你现在全部的视频拆解逻辑。</p>
             </div>
-            <label for="video-url">视频链接</label>
-            <textarea id="video-url" placeholder="每行粘贴一个链接&#10;https://www.kwai.com/@.../video/...&#10;https://www.kwai.com/@.../video/..."></textarea>
-            <div class="actions">
-              <button id="submit-btn">开始拆解脚本</button>
-              <button class="action-link" id="stop-all-btn" type="button" disabled>停止所有任务</button>
+          </div>
+          <div class="composer-block">
+            <div class="composer">
+              <div class="composer-head">
+                <div></div>
+              </div>
+              <label for="video-url">视频链接</label>
+              <textarea id="video-url" placeholder="每行粘贴一个链接&#10;https://www.kwai.com/@.../video/...&#10;https://www.kwai.com/@.../video/..."></textarea>
+              <div class="actions">
+                <button id="submit-btn">开始拆解脚本</button>
+                <button class="action-link" id="stop-all-btn" type="button" disabled>停止所有任务</button>
+              </div>
             </div>
           </div>
           <div id="status-box" class="status-box">
@@ -5370,7 +6013,19 @@ def page_html() -> str:
           </div>
         </div>
       </section>
-    </div>
+
+      <section id="stats-panel" class="studio-panel">
+        <div class="studio-card">
+          <div class="studio-card-head">
+            <div>
+              <h2>数据看板</h2>
+              <p>这里直接承接现有 Stats 页面，用于查看脚本生成、复盘和直接修改等行为数据。</p>
+            </div>
+          </div>
+          <iframe class="studio-iframe" src="/stats" title="Koko 数据看板"></iframe>
+        </div>
+      </section>
+    </section>
   </main>
   <div id="app-toast" class="toast" aria-hidden="true">
     <div class="toast-title" id="app-toast-title"></div>
@@ -5393,6 +6048,8 @@ def page_html() -> str:
     const submitBtn = document.getElementById("submit-btn");
     const stopAllBtn = document.getElementById("stop-all-btn");
     const statusBox = document.getElementById("status-box");
+    const studioPanelLinks = Array.from(document.querySelectorAll("[data-panel-target]"));
+    const studioPanels = Array.from(document.querySelectorAll(".studio-panel"));
     const heroPanel = document.querySelector(".hero-panel");
     const appToast = document.getElementById("app-toast");
     const appToastTitle = document.getElementById("app-toast-title");
@@ -5417,6 +6074,16 @@ def page_html() -> str:
         <div class="status-empty-copy">输入一个或多个视频链接后，系统会在这里实时显示拆解进度。</div>
       </div>
     `;
+
+    function setStudioPanel(panelId) {{
+      const target = String(panelId || "filter-panel").trim() || "filter-panel";
+      studioPanels.forEach((panel) => {{
+        panel.classList.toggle("active", panel.id === target);
+      }});
+      studioPanelLinks.forEach((link) => {{
+        link.classList.toggle("active", link.getAttribute("data-panel-target") === target);
+      }});
+    }}
     const STAGE_ORDER = ["queued", "download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output", "completed"];
     const STAGE_LABELS = {{
       queued: "等待拆解",
@@ -6299,6 +6966,7 @@ def page_html() -> str:
         activeJobId = data.id;
         persistActiveJobId(data.id);
         updateStopAllButtonState(true);
+        setStudioPanel("split-panel");
         setStatus(`<span class="status status-queued">排队中</span><br><br>${{progressMarkup("queued", "任务已创建，正在准备分析。", data.id)}}`);
         pollJob(data.id);
       }} catch (error) {{
@@ -6324,6 +6992,7 @@ def page_html() -> str:
             throw new Error(data.error || "停止任务失败");
           }}
           setIdleState();
+          setStudioPanel("split-panel");
           showToast("已停止所有任务", `已停止 ${{data.stopped_items || 0}} 条分析，${{data.stopped_reviews || 0}} 条复盘。`);
         }} catch (error) {{
           showToast("停止失败", String(error.message || error));
@@ -6334,13 +7003,31 @@ def page_html() -> str:
       }});
     }}
 
+    studioPanelLinks.forEach((link) => {{
+      link.addEventListener("click", (event) => {{
+        const panelId = link.getAttribute("data-panel-target");
+        if (!panelId) return;
+        event.preventDefault();
+        setStudioPanel(panelId);
+        history.replaceState(null, "", `#${{panelId}}`);
+      }});
+    }});
+
+    window.addEventListener("hashchange", () => {{
+      const panelId = String(window.location.hash || "").replace(/^#/, "").trim();
+      if (panelId) setStudioPanel(panelId);
+    }});
+
     const restoredJobId = readPersistedActiveJobId();
     if (restoredJobId) {{
       restoringActiveJob = true;
       updateStopAllButtonState(true);
+      setStudioPanel("split-panel");
       pollJob(restoredJobId);
     }} else {{
       updateStopAllButtonState(false);
+      const initialPanelId = String(window.location.hash || "").replace(/^#/, "").trim() || "filter-panel";
+      setStudioPanel(initialPanelId);
     }}
 
     videoInput.addEventListener("keydown", (event) => {{
@@ -7080,6 +7767,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self.send_html(page_html())
             return
+        if parsed.path == "/studio":
+            self.send_html(studio_html())
+            return
         if parsed.path == "/error-cases":
             if has_error_case_access(self):
                 self.send_html(error_cases_html())
@@ -7123,6 +7813,13 @@ class AppHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             body = page_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return
+        if parsed.path == "/studio":
+            body = studio_html().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
