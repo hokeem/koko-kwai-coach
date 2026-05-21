@@ -199,7 +199,7 @@ def read_json_file(path: Path, *, default: Any, backup_on_error: bool = True) ->
 
 def write_text_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path = path.parent / f"{path.name}.{uuid4().hex}.tmp"
     temp_path.write_text(content, encoding="utf-8")
     temp_path.replace(path)
 
