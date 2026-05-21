@@ -6167,6 +6167,8 @@ def studio_html() -> str:
     let pendingExportChoice = null;
     let restoringActiveJob = false;
     let restoreAttempts = 0;
+    let pollInFlight = false;
+    let queuedImmediateRepoll = false;
     const reviewTracker = Object.create(null);
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
@@ -7015,10 +7017,19 @@ def studio_html() -> str:
       `;
     }}
 
-    async function pollJob(jobId) {{
+    async function pollJob(jobId, options = {{}}) {{
       activeJobId = jobId;
       persistActiveJobId(jobId);
       updateStopAllButtonState(true);
+      if (pollInFlight) {{
+        if (options && options.force) queuedImmediateRepoll = true;
+        return;
+      }}
+      pollInFlight = true;
+      if (jobPollTimer) {{
+        clearTimeout(jobPollTimer);
+        jobPollTimer = null;
+      }}
       let res;
       try {{
         res = await fetch(`/api/jobs/${{jobId}}?_=${{Date.now()}}`, {{ cache: "no-store" }});
@@ -7107,6 +7118,18 @@ def studio_html() -> str:
         : `${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}`;
       setStatus(`<span class="status ${{badge}}">${{jobStatusLabel(data.status)}}</span><br><br>${{runningMarkup}}`);
       schedulePoll(jobId, 2500);
+      }} finally {{
+        pollInFlight = false;
+        if (queuedImmediateRepoll && activeJobId === jobId) {{
+          queuedImmediateRepoll = false;
+          schedulePoll(jobId, 120);
+        }}
+      }}
+    }}
+
+    function requestImmediateJobSync() {{
+      if (!activeJobId) return;
+      pollJob(activeJobId, {{ force: true }});
     }}
 
     submitBtn.addEventListener("click", async () => {{
@@ -7180,6 +7203,16 @@ def studio_html() -> str:
     window.addEventListener("hashchange", () => {{
       const panelId = String(window.location.hash || "").replace(/^#/, "").trim();
       if (panelId) setStudioPanel(panelId);
+    }});
+
+    window.addEventListener("focus", () => {{
+      requestImmediateJobSync();
+    }});
+
+    document.addEventListener("visibilitychange", () => {{
+      if (document.visibilityState === "visible") {{
+        requestImmediateJobSync();
+      }}
     }});
 
     const restoredJobId = readPersistedActiveJobId();
