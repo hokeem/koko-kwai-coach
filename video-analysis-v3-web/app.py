@@ -4921,6 +4921,79 @@ def studio_html() -> str:
       color: #FF8200;
       white-space: nowrap;
     }}
+    .progress-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }}
+    .progress-meta-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,130,0,.14);
+      background: rgba(255,248,238,.84);
+      color: rgba(31,31,31,.72);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .thinking-shell {{
+      margin-top: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(255,130,0,.12);
+      background: rgba(255,250,244,.72);
+      padding: 14px 14px 10px;
+    }}
+    .thinking-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }}
+    .thinking-title {{
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: rgba(31,31,31,.56);
+    }}
+    .thinking-updated {{
+      font-size: 12px;
+      color: rgba(31,31,31,.48);
+    }}
+    .thinking-list {{
+      display: grid;
+      gap: 8px;
+    }}
+    .thinking-item {{
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: rgba(31,31,31,.74);
+    }}
+    .thinking-dot {{
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      margin-top: 6px;
+      flex: 0 0 8px;
+      background: rgba(255,130,0,.28);
+    }}
+    .thinking-item.done .thinking-dot {{
+      background: #57B56B;
+    }}
+    .thinking-item.active .thinking-dot {{
+      background: #FF8200;
+      box-shadow: 0 0 0 6px rgba(255,130,0,.12);
+    }}
+    .thinking-item.note .thinking-dot {{
+      background: rgba(31,31,31,.2);
+    }}
     .progress-rail {{
       width: 100%;
       height: 8px;
@@ -6366,6 +6439,95 @@ def studio_html() -> str:
       return (item.display_language || "zh") === "pt" ? "葡语视图" : "中文视图";
     }}
 
+    function formatClock(isoValue) {{
+      if (!isoValue) return "";
+      const date = new Date(isoValue);
+      if (Number.isNaN(date.getTime())) return "";
+      return date.toLocaleTimeString("zh-CN", {{
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }});
+    }}
+
+    function buildArtifactHints(data) {{
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const primaryItem = findCurrentItem(items) || items[0] || null;
+      const hints = [];
+      if (data?.updated_at) {{
+        const clock = formatClock(data.updated_at);
+        if (clock) hints.push(`最后更新：${{clock}}`);
+      }}
+      if (primaryItem?.result_json || primaryItem?.html_url) hints.push("最终脚本已生成");
+      if (primaryItem?.docx_url) hints.push("导出文件已生成");
+      if (primaryItem?.saved_to_library_at || primaryItem?.entry_id) hints.push("已同步脚本库");
+      if (primaryItem?.report_url || primaryItem?.evidence_url) hints.push("报告已生成");
+      return hints;
+    }}
+
+    function buildThinkingEvents(data) {{
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const primaryItem = findCurrentItem(items) || items[0] || null;
+      const stage = String(primaryItem?.stage || data?.stage || "queued").trim() || "queued";
+      const effectiveStatus = deriveEffectiveJobStatus(data);
+      const sequence = ["download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output"];
+      const stageIndex = stage === "completed"
+        ? sequence.length
+        : stage === "failed"
+          ? Math.max(0, sequence.indexOf("final_output"))
+          : Math.max(0, sequence.indexOf(stage));
+      const events = [];
+      if (effectiveStatus === "queued") {{
+        events.push({{ type: "active", text: "任务已创建，正在等待进入执行队列。" }});
+      }}
+      sequence.forEach((key, idx) => {{
+        if (effectiveStatus === "queued" && idx > 0) return;
+        if (effectiveStatus === "completed" || idx < stageIndex) {{
+          events.push({{ type: "done", text: `${{STAGE_LABELS[key]}}已完成` }});
+          return;
+        }}
+        if (idx === stageIndex) {{
+          events.push({{ type: stage === "failed" ? "note" : "active", text: stage === "failed" ? `${{STAGE_LABELS[key]}}阶段中断` : `正在${{STAGE_LABELS[key]}}` }});
+        }}
+      }});
+      if (primaryItem?.result_json || primaryItem?.html_url) {{
+        events.push({{ type: effectiveStatus === "completed" ? "done" : "note", text: "最终脚本文件已经生成。" }});
+      }}
+      if (primaryItem?.docx_url) {{
+        events.push({{ type: effectiveStatus === "completed" ? "done" : "note", text: "导出文件已经准备好。" }});
+      }}
+      if (primaryItem?.saved_to_library_at || primaryItem?.entry_id) {{
+        events.push({{ type: "done", text: "脚本已同步进入脚本库。" }});
+      }}
+      const stageMessage = String(primaryItem?.stage_message || data?.stage_message || data?.message || "").trim();
+      if (stageMessage) {{
+        events.push({{ type: "note", text: stageMessage }});
+      }}
+      return events.slice(-8);
+    }}
+
+    function renderThinkingLog(data) {{
+      const events = buildThinkingEvents(data);
+      if (!events.length) return "";
+      const updated = formatClock(data?.updated_at);
+      const rows = events.map((event) => `
+        <div class="thinking-item ${{event.type}}">
+          <span class="thinking-dot"></span>
+          <span>${{escapeHtml(event.text)}}</span>
+        </div>
+      `).join("");
+      return `
+        <div class="thinking-shell">
+          <div class="thinking-head">
+            <span class="thinking-title">Thinking</span>
+            <span class="thinking-updated">${{updated ? `最后同步 ${{updated}}` : "等待状态更新"}}</span>
+          </div>
+          <div class="thinking-list">${{rows}}</div>
+        </div>
+      `;
+    }}
+
     function closeExportChoice() {{
       pendingExportChoice = null;
       if (!exportChoiceOverlay) return;
@@ -6835,11 +6997,16 @@ def studio_html() -> str:
       const currentAhead = Number(systemQueue.current_job_ahead || 0);
       const globalFocus = activeWorkloads[0] || null;
       const currentItem = findCurrentItem(items);
+      const effectiveStage = effectiveStatus === "completed"
+        ? "completed"
+        : effectiveStatus === "failed"
+          ? "failed"
+          : (data.stage || currentItem?.stage || "queued");
       const allItemsSettled = total > 0 && finishedCount >= total && !hasRunningReview(items);
       if (!currentItem && (effectiveStatus === "completed" || allItemsSettled)) return "";
       const currentIndex = currentItem ? ((items.indexOf(currentItem) >= 0 ? items.indexOf(currentItem) : 0) + 1) : 0;
       const leadItem = currentItem || items[0] || null;
-      const stageLabel = STAGE_LABELS[data.stage] || STAGE_LABELS[currentItem?.stage] || "等待拆解";
+      const stageLabel = STAGE_LABELS[effectiveStage] || STAGE_LABELS[currentItem?.stage] || "等待拆解";
       const stageMessage = data.stage_message || currentItem?.stage_message || data.message || "任务已经创建，系统会按顺序逐条拆解。";
       let subtitle = currentItem
         ? `当前正在拆解 ${{displayVideoName(currentItem, currentItem.index || 0)}}，其余任务会按照提交顺序继续排队。`
@@ -6883,7 +7050,7 @@ def studio_html() -> str:
           ${{queueHint}}
           ${{systemHint}}
           <div class="focus-note">任务 ${{currentIndex || 1}}/${{total || 1}} · ${{escapeHtml(stageLabel)}}</div>
-          ${{progressMarkup(data.stage || "queued", stageMessage, data.id)}}
+          ${{progressMarkup(effectiveStage, stageMessage, data.id, data)}}
         </section>
       `;
     }}
@@ -6994,10 +7161,11 @@ def studio_html() -> str:
       return String(data?.status || "queued").trim() || "queued";
     }}
 
-    function progressMarkup(stage, stageMessage, jobId) {{
+    function progressMarkup(stage, stageMessage, jobId, data = null) {{
       const index = Math.max(0, STAGE_ORDER.indexOf(stage));
       const percent = stage === "completed" ? 100 : stage === "failed" ? 100 : Math.max(6, Math.round(((index + 1) / STAGE_ORDER.length) * 100));
       const displayMessage = stage === "failed" ? (stageMessage || "Analysis failed.") : (STAGE_COPY[stage] || stageMessage || "Running analysis...");
+      const meta = data ? buildArtifactHints(data).map((hint) => `<span class="progress-meta-chip">${{escapeHtml(hint)}}</span>`).join("") : "";
       const steps = ["download", "media_prep", "gemini_analysis", "v2_analysis", "consistency_audit", "targeted_recheck", "arbitration", "final_output"].map((key) => {{
         let cls = "step-pill";
         const keyIndex = STAGE_ORDER.indexOf(key);
@@ -7015,8 +7183,10 @@ def studio_html() -> str:
             </div>
             <span class="progress-percent">${{percent}}%</span>
           </div>
+          ${{meta ? `<div class="progress-meta">${{meta}}</div>` : ""}}
           <div class="progress-rail"><div class="progress-fill" style="width:${{percent}}%"></div></div>
           <div class="step-list">${{steps}}</div>
+          ${{data ? renderThinkingLog(data) : ""}}
         </div>
       `;
     }}
@@ -7147,14 +7317,19 @@ def studio_html() -> str:
       }}
       if (effectiveStatus === "failed") {{
         const partial = Array.isArray(data.items) && data.items.length ? batchResults : "";
-        setStatus(`<span class="status status-failed">失败</span><br><br>${{progressMarkup("failed", data.message || "分析失败。", data.id)}}<code>${{escapeHtml(data.error || "未知错误")}}</code>${{partial}}`);
+        setStatus(`<span class="status status-failed">失败</span><br><br>${{progressMarkup("failed", data.message || "分析失败。", data.id, data)}}<code>${{escapeHtml(data.error || "未知错误")}}</code>${{partial}}`);
         updateStopAllButtonState(false);
         return;
       }}
       const badge = effectiveStatus === "running" ? "status-running" : "status-queued";
+      const effectiveStage = effectiveStatus === "completed"
+        ? "completed"
+        : effectiveStatus === "failed"
+          ? "failed"
+          : (data.stage || "queued");
       const runningMarkup = Array.isArray(data.items) && data.items.length
         ? renderBatchResults(data)
-        : `${{progressMarkup(data.stage || "queued", data.stage_message || data.message, data.id)}}`;
+        : `${{progressMarkup(effectiveStage, data.stage_message || data.message, data.id, data)}}`;
       setStatus(`<span class="status ${{badge}}">${{jobStatusLabel(effectiveStatus)}}</span><br><br>${{runningMarkup}}`);
       schedulePoll(jobId, 2500);
       }} finally {{
@@ -7194,7 +7369,7 @@ def studio_html() -> str:
         persistActiveJobId(data.id);
         updateStopAllButtonState(true);
         setStudioPanel("split-panel");
-        setStatus(`<span class="status status-queued">排队中</span><br><br>${{progressMarkup("queued", "任务已创建，正在准备分析。", data.id)}}`);
+        setStatus(`<span class="status status-queued">排队中</span><br><br>${{progressMarkup("queued", "任务已创建，正在准备分析。", data.id, data)}}`);
         pollJob(data.id);
       }} catch (error) {{
         setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
