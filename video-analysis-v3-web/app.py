@@ -413,6 +413,8 @@ def item_output_ready(item: dict[str, Any]) -> bool:
     item_id = str(item.get("id") or "").strip()
     if not item_id:
         return False
+    if item.get("saved_to_library_at"):
+        return True
     if item.get("result_json") and (
         str(item.get("html_url") or "").strip()
         or str(item.get("report_url") or "").strip()
@@ -428,6 +430,8 @@ def item_output_ready(item: dict[str, Any]) -> bool:
         return True
     if final_json.exists() and (final_docx.exists() or product_report.exists()):
         return True
+    if final_json.exists() and library_entry_exists(item_id):
+        return True
     return False
 
 
@@ -442,8 +446,6 @@ def hydrate_item_from_outputs(item: dict[str, Any]) -> bool:
     report_path = output_dir / "product_report.html"
     evidence_path = output_dir / "evidence_bundle.json"
     if not script_json_path.exists():
-        return False
-    if not (script_html_path.exists() or docx_path.exists() or report_path.exists()):
         return False
     script_json = read_json(script_json_path) or read_json(output_dir / "analysis_result.json")
     if not script_json:
@@ -479,14 +481,18 @@ def recompute_job_status(job_id: str) -> None:
     items = job.get("items") or []
     if not items:
         return
+    changed = False
     for item in items:
         status = str(item.get("status") or "").strip()
         if status in {"queued", "running"} and item_output_ready(item):
-            hydrate_item_from_outputs(item)
+            changed = hydrate_item_from_outputs(item) or changed
     statuses = [str(item.get("status") or "").strip() for item in items]
     review_statuses = [str(item.get("review_status") or "").strip() for item in items]
     completed_count = sum(1 for status in statuses if status == "completed")
     failed_count = sum(1 for status in statuses if status == "failed")
+    previous_status = str(job.get("status") or "").strip()
+    previous_stage = str(job.get("stage") or "").strip()
+    previous_message = str(job.get("stage_message") or "").strip()
     if any(status == "running" for status in statuses) or any(status == "running" for status in review_statuses):
         job["status"] = "running"
     elif any(status == "queued" for status in statuses):
@@ -507,6 +513,27 @@ def recompute_job_status(job_id: str) -> None:
         job["stage"] = "failed"
         job["stage_message"] = job.get("stage_message") or "All batch items failed."
     job["updated_at"] = now_iso()
+    if (
+        changed
+        or previous_status != job.get("status")
+        or previous_stage != job.get("stage")
+        or previous_message != job.get("stage_message")
+    ):
+        save_jobs()
+
+
+def library_entry_exists(entry_id: str) -> bool:
+    target = str(entry_id or "").strip()
+    if not target or not LIBRARY_FILE.exists():
+        return False
+    try:
+        data = read_json(LIBRARY_FILE) or []
+    except Exception:
+        return False
+    for entry in data:
+        if str((entry or {}).get("entry_id") or "").strip() == target:
+            return True
+    return False
 
 
 def reconcile_stale_jobs() -> None:
@@ -6994,7 +7021,7 @@ def studio_html() -> str:
       updateStopAllButtonState(true);
       let res;
       try {{
-        res = await fetch(`/api/jobs/${{jobId}}`);
+        res = await fetch(`/api/jobs/${{jobId}}?_=${{Date.now()}}`, {{ cache: "no-store" }});
       }} catch (error) {{
         if (restoringActiveJob) {{
           restoreAttempts += 1;
@@ -7815,6 +7842,9 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         for key, value in headers or []:
             self.send_header(key, value)
         self.end_headers()
