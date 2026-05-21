@@ -3881,10 +3881,14 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                     script_json = read_json(output_dir / "script_table.json") or read_json(output_dir / "analysis_result.json") or result_json or {}
                     docx_path = write_script_docx(output_dir, script_json, item["video_url"])
                     docx_url = f"/results/{item['id']}/{docx_path.name}" if docx_path and docx_path.exists() else ""
+                    # Final pipeline completion must not block on an extra LLM
+                    # classification round, otherwise the UI can sit at 90%
+                    # long after the script files are already written.
                     decision = detect_content_type_decision_for_output(
                         output_dir,
                         script_json,
                         read_json(output_dir / "evidence_bundle.json"),
+                        use_llm=False,
                     )
                     content_type = decision["content_type"]
                     update_job_item(
@@ -3916,7 +3920,7 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                         content_type_confidence=decision["content_type_confidence"],
                         title=script_json.get("title") or "Video Script",
                     )
-                    persist_library_entry(parent_job_id, jobs[parent_job_id]["items"][item_index])
+                    persist_library_entry(parent_job_id, jobs[parent_job_id]["items"][item_index], use_llm=False)
                     return
                 last_error = (stderr_text or proc_stdout or "").strip() or "Unknown pipeline failure"
                 if not should_try_next_model(last_error):
