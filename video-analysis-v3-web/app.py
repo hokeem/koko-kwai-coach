@@ -7207,8 +7207,9 @@ def studio_html() -> str:
         clearTimeout(jobPollTimer);
         jobPollTimer = null;
       }}
+      let controller = null;
       try {{
-      const controller = new AbortController();
+      controller = new AbortController();
       activePollController = controller;
       const timeoutId = window.setTimeout(() => controller.abort("poll-timeout"), POLL_REQUEST_TIMEOUT_MS);
       let res;
