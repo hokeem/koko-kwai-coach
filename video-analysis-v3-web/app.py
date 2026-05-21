@@ -6246,8 +6246,11 @@ def studio_html() -> str:
     const POLL_REQUEST_TIMEOUT_MS = 12000;
     const POLL_RECOVERY_DELAY_MS = 1500;
     const reviewTracker = Object.create(null);
+    const reviewTerminalTracker = Object.create(null);
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
+    let lastStatusMarkup = "";
+    let lastStatusReady = false;
     const ACTIVE_JOB_STORAGE_KEY = "koko_active_job_id";
     const ACTIVE_JOB_SNAPSHOT_STORAGE_KEY = "koko_active_job_snapshot";
     const RESTORE_RETRY_LIMIT = 6;
@@ -6347,9 +6350,12 @@ def studio_html() -> str:
     }}
 
     function setStatus(html, ready = false) {{
+      if (html === lastStatusMarkup && ready === lastStatusReady) return;
       preserveDetailIframes();
       statusBox.className = ready ? "status-box visible ready" : "status-box visible";
       statusBox.innerHTML = html;
+      lastStatusMarkup = html;
+      lastStatusReady = ready;
       ensureDetailIframes(statusBox);
     }}
 
@@ -6366,6 +6372,8 @@ def studio_html() -> str:
       activeJobId = "";
       activeReviewItemId = "";
       persistActiveJobId("");
+      lastStatusMarkup = "";
+      lastStatusReady = false;
       setStatus(IDLE_STATUS_HTML, true);
       updateStopAllButtonState(false);
     }}
@@ -6746,7 +6754,7 @@ def studio_html() -> str:
       const reviewState = status ? `<div class="review-note">${{escapeHtml(status)}}${{message ? ` · ${{escapeHtml(message)}}` : ""}}</div>` : "";
       const reviewProgress = buildReviewProgressMarkup(stage, status, message);
       return `
-        <details class="editor-disclosure">
+        <details class="editor-disclosure" ${{status === "running" ? "open" : ""}}>
           <summary class="editor-summary">
             <span class="editor-summary-title">复盘重做</span>
           </summary>
@@ -7133,10 +7141,14 @@ def studio_html() -> str:
         if (!item || !item.id) continue;
         const prev = reviewTracker[item.id] || "";
         const next = item.review_status || "";
-        if (prev === "running" && next === "completed") {{
+        const terminalToken = `${{next}}|${{item.updated_at || ""}}|${{item.review_message || ""}}`;
+        const watchingThisItem = activeReviewItemId === item.id;
+        if ((prev === "running" || watchingThisItem) && next === "completed" && reviewTerminalTracker[item.id] !== terminalToken) {{
+          reviewTerminalTracker[item.id] = terminalToken;
           showToast("复盘成功", "Koko 已完成复盘重做，并更新了当前脚本。");
           if (activeReviewItemId === item.id) activeReviewItemId = "";
-        }} else if (prev === "running" && next === "failed") {{
+        }} else if ((prev === "running" || watchingThisItem) && next === "failed" && reviewTerminalTracker[item.id] !== terminalToken) {{
+          reviewTerminalTracker[item.id] = terminalToken;
           showToast("复盘失败", item.review_message || "复盘重做没有成功完成。");
           if (activeReviewItemId === item.id) activeReviewItemId = "";
         }}
