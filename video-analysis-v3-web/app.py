@@ -431,6 +431,47 @@ def item_output_ready(item: dict[str, Any]) -> bool:
     return False
 
 
+def hydrate_item_from_outputs(item: dict[str, Any]) -> bool:
+    item_id = str(item.get("id") or "").strip()
+    if not item_id:
+        return False
+    output_dir = RESULTS_ROOT / item_id
+    script_json_path = output_dir / "script_table.json"
+    script_html_path = output_dir / "script_table.html"
+    docx_path = output_dir / "script_export.docx"
+    report_path = output_dir / "product_report.html"
+    evidence_path = output_dir / "evidence_bundle.json"
+    if not script_json_path.exists():
+        return False
+    if not (script_html_path.exists() or docx_path.exists() or report_path.exists()):
+        return False
+    script_json = read_json(script_json_path) or read_json(output_dir / "analysis_result.json")
+    if not script_json:
+        return False
+    item["result_json"] = item.get("result_json") or script_json
+    item["zh_result_json"] = item.get("zh_result_json") or script_json
+    item["original_result_json"] = item.get("original_result_json") or script_json
+    if script_html_path.exists():
+        item["html_url"] = item.get("html_url") or f"/results/{item_id}/script_table.html"
+        item["zh_html_url"] = item.get("zh_html_url") or item["html_url"]
+    if docx_path.exists():
+        item["docx_url"] = item.get("docx_url") or f"/results/{item_id}/{docx_path.name}"
+        item["zh_docx_url"] = item.get("zh_docx_url") or item["docx_url"]
+    if report_path.exists():
+        item["report_url"] = item.get("report_url") or f"/results/{item_id}/product_report.html"
+    if evidence_path.exists():
+        item["evidence_url"] = item.get("evidence_url") or f"/results/{item_id}/evidence_bundle.json"
+    item["artifacts"] = item.get("artifacts") or summarize_artifacts(item_id, output_dir)
+    item["display_language"] = item.get("display_language") or "zh"
+    item["title"] = item.get("title") or script_json.get("title") or "Video Script"
+    item["status"] = "completed"
+    item["stage"] = "completed"
+    item["stage_message"] = "Completed."
+    item["completed_at"] = item.get("completed_at") or now_iso()
+    item["updated_at"] = now_iso()
+    return True
+
+
 def recompute_job_status(job_id: str) -> None:
     job = jobs.get(job_id)
     if not job:
@@ -441,11 +482,7 @@ def recompute_job_status(job_id: str) -> None:
     for item in items:
         status = str(item.get("status") or "").strip()
         if status in {"queued", "running"} and item_output_ready(item):
-            item["status"] = "completed"
-            item["stage"] = "completed"
-            item["stage_message"] = "Completed."
-            item["completed_at"] = item.get("completed_at") or now_iso()
-            item["updated_at"] = now_iso()
+            hydrate_item_from_outputs(item)
     statuses = [str(item.get("status") or "").strip() for item in items]
     review_statuses = [str(item.get("review_status") or "").strip() for item in items]
     completed_count = sum(1 for status in statuses if status == "completed")
@@ -491,11 +528,7 @@ def reconcile_stale_jobs() -> None:
                 if status == "running" and updated_at:
                     stale_for = (now_dt - updated_at).total_seconds()
                     if item_output_ready(item):
-                        item["status"] = "completed"
-                        item["stage"] = "completed"
-                        item["stage_message"] = "Completed."
-                        item["completed_at"] = item.get("completed_at") or now_iso()
-                        item["updated_at"] = now_iso()
+                        hydrate_item_from_outputs(item)
                         changed = True
                         job_changed = True
                     elif not has_active_process(item_id) and stale_for > PROCESSLESS_TASK_STALE_SEC:
@@ -532,6 +565,11 @@ def reconcile_stale_jobs() -> None:
             has_running = any(str(item.get("status") or "").strip() == "running" for item in items)
             has_running_review = any(str(item.get("review_status") or "").strip() == "running" for item in items)
             has_queued = any(str(item.get("status") or "").strip() == "queued" for item in items)
+            for item in items:
+                if str(item.get("status") or "").strip() in {"queued", "running"} and item_output_ready(item):
+                    if hydrate_item_from_outputs(item):
+                        changed = True
+                        job_changed = True
             if has_queued and not has_running and not has_running_review and job_id not in queued_snapshot:
                 job["status"] = "queued"
                 job["stage"] = "queued"
@@ -3175,7 +3213,16 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
-    items = [public_item_view(item) for item in job.get("items") or []]
+    hydrated_items: list[dict[str, Any]] = []
+    for item in job.get("items") or []:
+        if item_output_ready(item) and (
+            not item.get("result_json")
+            or not item.get("html_url")
+            or str(item.get("status") or "").strip() != "completed"
+        ):
+            hydrate_item_from_outputs(item)
+        hydrated_items.append(item)
+    items = [public_item_view(item) for item in hydrated_items]
     total_items = len(items)
     completed_items = sum(1 for item in items if item.get("status") == "completed")
     failed_items = sum(1 for item in items if item.get("status") == "failed")
@@ -6072,6 +6119,7 @@ def studio_html() -> str:
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
     const ACTIVE_JOB_STORAGE_KEY = "koko_active_job_id";
+    const ACTIVE_JOB_SNAPSHOT_STORAGE_KEY = "koko_active_job_snapshot";
     const RESTORE_RETRY_LIMIT = 6;
     const RESTORE_RETRY_DELAY_MS = 1500;
     const IDLE_STATUS_HTML = `
@@ -6201,13 +6249,37 @@ def studio_html() -> str:
       const value = String(jobId || "").trim();
       if (!value) {{
         window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
-        return;
+      }} else {{
+        window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, value);
       }}
-      window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, value);
     }}
 
     function readPersistedActiveJobId() {{
       return String(window.localStorage.getItem(ACTIVE_JOB_STORAGE_KEY) || "").trim();
+    }}
+
+    function persistActiveJobSnapshot(data) {{
+      try {{
+        if (!data || !data.id) {{
+          window.localStorage.removeItem(ACTIVE_JOB_SNAPSHOT_STORAGE_KEY);
+          return;
+        }}
+        window.localStorage.setItem(ACTIVE_JOB_SNAPSHOT_STORAGE_KEY, JSON.stringify(data));
+      }} catch (error) {{
+        // Best effort only.
+      }}
+    }}
+
+    function readPersistedActiveJobSnapshot(jobId) {{
+      try {{
+        const raw = String(window.localStorage.getItem(ACTIVE_JOB_SNAPSHOT_STORAGE_KEY) || "").trim();
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || String(parsed.id || "").trim() !== String(jobId || "").trim()) return null;
+        return parsed;
+      }} catch (error) {{
+        return null;
+      }}
     }}
 
     async function readJsonSafely(response) {{
@@ -6952,6 +7024,7 @@ def studio_html() -> str:
       }}
       restoringActiveJob = false;
       restoreAttempts = 0;
+      persistActiveJobSnapshot(data);
       const batchResults = renderBatchResults(data);
       const effectiveStatus = deriveEffectiveJobStatus(data);
       const reviewRunning = hasRunningReview(data.items);
@@ -7062,6 +7135,13 @@ def studio_html() -> str:
       restoringActiveJob = true;
       updateStopAllButtonState(true);
       setStudioPanel("split-panel");
+      const restoredSnapshot = readPersistedActiveJobSnapshot(restoredJobId);
+      if (restoredSnapshot) {{
+        const restoredResults = renderBatchResults(restoredSnapshot);
+        if (restoredResults) {{
+          setStatus(restoredResults, deriveEffectiveJobStatus(restoredSnapshot) === "completed");
+        }}
+      }}
       pollJob(restoredJobId);
     }} else {{
       updateStopAllButtonState(false);
