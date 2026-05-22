@@ -1155,9 +1155,15 @@ def classify_couple_candidate_with_llm(metadata: dict[str, Any], heuristic: dict
 启发式结果：{json.dumps(heuristic, ensure_ascii=False)}
 """.strip()
     models = unique_models(os.environ.get("VIDEO_FILTER_MODEL", "gemini-2.5-flash-lite"), *PRIMARY_FALLBACK_MODELS)
-    result = run_text_json_prompt_with_fallback(
-        prompt,
-        {
+    payload = {
+        "source_url": metadata.get("source_url") or "",
+        "title": metadata.get("title") or "",
+        "description": metadata.get("description") or "",
+        "transcript": metadata.get("transcript") or "",
+        "creator_name": metadata.get("creator_name") or "",
+        "creator_description": metadata.get("creator_description") or "",
+        "heuristic": heuristic,
+        "schema": {
             "type": "object",
             "properties": {
                 "bucket": {"type": "string"},
@@ -1167,7 +1173,13 @@ def classify_couple_candidate_with_llm(metadata: dict[str, Any], heuristic: dict
             },
             "required": ["bucket", "confidence", "reason", "signals"],
         },
-        models=models,
+    }
+    result, _, _ = run_text_json_prompt_with_fallback(
+        payload,
+        GOOGLE_API_KEY,
+        models,
+        prompt,
+        "couple candidate classification",
     )
     bucket = str(result.get("bucket") or heuristic.get("bucket") or "low").strip().lower()
     if bucket not in {"high", "medium", "low"}:
