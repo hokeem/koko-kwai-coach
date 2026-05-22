@@ -2,8 +2,11 @@
 """Public-facing web UI for video-analysis-v3."""
 from __future__ import annotations
 
+import base64
+import csv
 import errno
 import html
+import io
 import json
 import os
 import re
@@ -13,6 +16,10 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -32,6 +39,7 @@ WATCHDOG_INTERVAL_SEC = int(os.environ.get("VIDEO_ANALYSIS_WATCHDOG_INTERVAL_SEC
 SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTION_DAYS", "3"))
 SOURCE_VIDEO_EXTENDED_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_EXTENDED_RETENTION_DAYS", "30"))
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "14"))
+MAX_CONCURRENT_FILTERS = max(1, int(os.environ.get("VIDEO_FILTER_MAX_CONCURRENT_JOBS", "1")))
 
 
 def stage_timeout(name: str, default: int) -> int:
@@ -59,6 +67,7 @@ JOBS_FILE = DATA_ROOT / "jobs.json"
 RESULTS_ROOT = DATA_ROOT / "results"
 LIBRARY_FILE = DATA_ROOT / "script_library.json"
 ERROR_CASE_LIBRARY_FILE = DATA_ROOT / "error_case_library.json"
+FILTER_JOBS_FILE = DATA_ROOT / "filter_jobs.json"
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 ERROR_CASE_PASSWORD = "kwai666"
 ERROR_CASE_AUTH_COOKIE = "koko_error_case_auth"
@@ -97,6 +106,11 @@ active_processes_lock = threading.Lock()
 active_processes: dict[str, subprocess.Popen[str]] = {}
 cancelled_item_ids_lock = threading.Lock()
 cancelled_item_ids: set[str] = set()
+filter_jobs_lock = threading.Lock()
+filter_jobs: dict[str, dict[str, Any]] = {}
+filter_queue: deque[str] = deque()
+queued_filter_job_ids: set[str] = set()
+filter_queue_condition = threading.Condition()
 
 if (SKILL_ROOT / "scripts").exists():
     sys.path.insert(0, str(SKILL_ROOT / "scripts"))
@@ -367,6 +381,18 @@ def load_jobs() -> None:
 
 def save_jobs() -> None:
     write_json_atomic(JOBS_FILE, jobs)
+
+
+def load_filter_jobs() -> None:
+    global filter_jobs
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    filter_jobs = read_json_file(FILTER_JOBS_FILE, default={})
+    if not isinstance(filter_jobs, dict):
+        filter_jobs = {}
+
+
+def save_filter_jobs() -> None:
+    write_json_atomic(FILTER_JOBS_FILE, filter_jobs)
 
 
 def enqueue_job(job_id: str) -> None:
@@ -735,6 +761,43 @@ def restore_pending_jobs_to_queue() -> None:
         enqueue_job(job_id)
 
 
+def restore_pending_filter_jobs_to_queue() -> None:
+    pending_job_ids: list[str] = []
+    changed = False
+    with filter_jobs_lock:
+        for job_id, job in filter_jobs.items():
+            items = job.get("items") or []
+            if not items:
+                continue
+            pending = False
+            for item in items:
+                status = str(item.get("status") or "").strip()
+                if status in {"completed", "failed"}:
+                    continue
+                pending = True
+                if status != "queued":
+                    item["status"] = "queued"
+                    item["stage"] = "queued"
+                    item["stage_message"] = "Queued after service restart."
+                    item["updated_at"] = now_iso()
+                    changed = True
+            if pending:
+                job["status"] = "queued"
+                job["stage"] = "queued"
+                job["stage_message"] = "Queued after service restart."
+                job["updated_at"] = now_iso()
+                pending_job_ids.append(job_id)
+                changed = True
+        if changed:
+            save_filter_jobs()
+    for job_id in pending_job_ids:
+        with filter_queue_condition:
+            if job_id not in queued_filter_job_ids:
+                queued_filter_job_ids.add(job_id)
+                filter_queue.append(job_id)
+                filter_queue_condition.notify()
+
+
 def job_worker_loop() -> None:
     while True:
         with queue_condition:
@@ -816,21 +879,311 @@ def save_error_case_entries(entries: list[dict[str, Any]]) -> bool:
 
 
 def split_video_urls(raw: str) -> list[str]:
-    urls: list[str] = []
-    for part in re.split(r"[\n\r,]+", raw or ""):
-        value = part.strip()
-        if not value:
-            continue
-        if re.match(r"^https?://", value, re.IGNORECASE):
-            urls.append(value)
+    return unique_urls_from_values(extract_http_urls(raw))
+
+
+def extract_http_urls(raw: str) -> list[str]:
+    text = str(raw or "")
+    candidates = re.findall(r"https?://[^\s<>'\"）)\]}]+", text, flags=re.IGNORECASE)
+    cleaned: list[str] = []
+    for candidate in candidates:
+        value = candidate.strip().rstrip(".,;!?)]}>")
+        if value:
+            cleaned.append(value)
+    return cleaned
+
+
+def unique_urls_from_values(values: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
-    for url in urls:
-        if url in seen:
+    for value in values:
+        url = str(value or "").strip()
+        if not url or url in seen:
             continue
         seen.add(url)
         ordered.append(url)
     return ordered
+
+
+def text_from_tabular_rows(rows: list[list[str]]) -> str:
+    return "\n".join("\t".join(cell for cell in row if cell) for row in rows if any(cell for cell in row))
+
+
+def parse_csv_like_bytes(blob: bytes, *, delimiter: str | None = None) -> str:
+    for encoding in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
+        try:
+            text = blob.decode(encoding)
+            break
+        except Exception:
+            text = ""
+    if not text:
+        return ""
+    sample = text[:4096]
+    if delimiter is None:
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+            delimiter = dialect.delimiter
+        except Exception:
+            delimiter = ","
+    try:
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        rows = [[str(cell or "").strip() for cell in row] for row in reader]
+        return text_from_tabular_rows(rows)
+    except Exception:
+        return text
+
+
+def parse_xlsx_bytes(blob: bytes) -> str:
+    ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    shared_strings: list[str] = []
+    rows: list[list[str]] = []
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for si in root.findall("main:si", ns):
+                text_parts = [node.text or "" for node in si.findall(".//main:t", ns)]
+                shared_strings.append("".join(text_parts).strip())
+        worksheet_names = sorted(name for name in archive.namelist() if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"))
+        for worksheet_name in worksheet_names:
+            root = ET.fromstring(archive.read(worksheet_name))
+            for row in root.findall(".//main:sheetData/main:row", ns):
+                cells: list[str] = []
+                for cell in row.findall("main:c", ns):
+                    cell_type = cell.attrib.get("t", "")
+                    value_node = cell.find("main:v", ns)
+                    inline_node = cell.find("main:is", ns)
+                    value = ""
+                    if cell_type == "inlineStr" and inline_node is not None:
+                        value = "".join(node.text or "" for node in inline_node.findall(".//main:t", ns)).strip()
+                    elif value_node is not None and value_node.text is not None:
+                        raw_value = value_node.text.strip()
+                        if cell_type == "s":
+                            try:
+                                value = shared_strings[int(raw_value)]
+                            except Exception:
+                                value = raw_value
+                        else:
+                            value = raw_value
+                    cells.append(value)
+                rows.append(cells)
+    return text_from_tabular_rows(rows)
+
+
+def extract_urls_from_uploaded_file(filename: str, file_b64: str) -> list[str]:
+    name = str(filename or "").strip().lower()
+    raw_b64 = str(file_b64 or "").strip()
+    if not raw_b64:
+        return []
+    if "," in raw_b64 and raw_b64.startswith("data:"):
+        raw_b64 = raw_b64.split(",", 1)[1]
+    blob = base64.b64decode(raw_b64)
+    text = ""
+    if name.endswith(".xlsx"):
+        text = parse_xlsx_bytes(blob)
+    elif name.endswith(".tsv"):
+        text = parse_csv_like_bytes(blob, delimiter="\t")
+    elif name.endswith(".csv"):
+        text = parse_csv_like_bytes(blob, delimiter=",")
+    else:
+        text = parse_csv_like_bytes(blob)
+    return unique_urls_from_values(extract_http_urls(text))
+
+
+def kwai_candidate_from_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return host.endswith("kwai.com") or host.endswith("k.kwai.com")
+
+
+def fetch_remote_text(url: str, *, timeout: int = 20) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        body = response.read()
+    return body.decode(charset, errors="ignore")
+
+
+def search_meta_tag(html_text: str, patterns: list[str]) -> str:
+    for key in patterns:
+        regex = rf'<meta[^>]+(?:property|name)=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']+)["\']'
+        match = re.search(regex, html_text, flags=re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1).strip())
+    return ""
+
+
+def parse_embedded_json_ld(html_text: str) -> dict[str, Any]:
+    for match in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html_text, flags=re.IGNORECASE | re.DOTALL):
+        raw = html.unescape(match.group(1).strip())
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(data, dict) and (data.get("@type") == "VideoObject" or data.get("contentUrl") or data.get("transcript")):
+            return data
+    return {}
+
+
+def fetch_kwai_light_metadata(url: str) -> dict[str, Any]:
+    html_text = fetch_remote_text(url)
+    json_ld = parse_embedded_json_ld(html_text)
+    creator = json_ld.get("creator") or {}
+    creator_main = creator.get("mainEntity") if isinstance(creator, dict) else {}
+    transcript = str(json_ld.get("transcript") or "").strip()
+    title = str(json_ld.get("name") or search_meta_tag(html_text, ["og:title", "title"]) or "").strip()
+    description = str(json_ld.get("description") or search_meta_tag(html_text, ["description", "og:description"]) or "").strip()
+    thumbnail = ""
+    thumb_list = json_ld.get("thumbnailUrl")
+    if isinstance(thumb_list, list) and thumb_list:
+        thumbnail = str(thumb_list[0] or "").strip()
+    elif isinstance(thumb_list, str):
+        thumbnail = thumb_list.strip()
+    if not thumbnail:
+        thumbnail = search_meta_tag(html_text, ["og:image", "twitter:image"])
+    creator_description = ""
+    if isinstance(creator_main, dict):
+        creator_description = str(creator_main.get("description") or "").strip()
+    return {
+        "source_url": url,
+        "title": title,
+        "description": description,
+        "transcript": transcript,
+        "thumbnail_url": thumbnail,
+        "content_url": str(json_ld.get("contentUrl") or "").strip(),
+        "creator_name": str((creator_main or {}).get("name") or "").strip() if isinstance(creator_main, dict) else "",
+        "creator_handle": str((creator_main or {}).get("alternateName") or "").strip() if isinstance(creator_main, dict) else "",
+        "creator_description": creator_description,
+        "duration": str(json_ld.get("duration") or "").strip(),
+        "genre": json_ld.get("genre") if isinstance(json_ld.get("genre"), list) else [],
+    }
+
+
+COUPLE_KEYWORDS = {
+    "high": [
+        "casal", "marido", "esposa", "husband", "wife", "老公", "老婆", "丈夫", "妻子", "夫妻",
+        "namorado", "namorada", "boyfriend", "girlfriend", "伴侣", "情侣", "婚姻", "casamento",
+    ],
+    "context": [
+        "dia das mães", "mãe", "ciúmes", "ciume", "família", "family", "humor", "relationship",
+        "house", "casa", "cozinha", "kitchen", "present", "gift", "carro", "car", "争吵", "吵架",
+        "礼物", "家务", "卧室", "沙发", "妈妈", "爸爸", "母亲节",
+    ],
+}
+
+
+def score_couple_candidate(metadata: dict[str, Any]) -> dict[str, Any]:
+    combined = "\n".join(
+        str(metadata.get(key) or "")
+        for key in ("title", "description", "transcript", "creator_description", "creator_name", "creator_handle")
+    ).lower()
+    score = 0
+    reasons: list[str] = []
+    for keyword in COUPLE_KEYWORDS["high"]:
+        if keyword.lower() in combined:
+            score += 3
+            reasons.append(f"命中强关系词：{keyword}")
+    for keyword in COUPLE_KEYWORDS["context"]:
+        if keyword.lower() in combined:
+            score += 1
+            reasons.append(f"命中场景词：{keyword}")
+    title = str(metadata.get("title") or "")
+    transcript = str(metadata.get("transcript") or "")
+    if title and transcript and title.strip() != transcript.strip():
+        score += 1
+        reasons.append("页面标题与转写都可用")
+    if metadata.get("thumbnail_url"):
+        score += 1
+        reasons.append("存在封面图，可供后续视觉扩展")
+    if "casal" in str(metadata.get("creator_description") or "").lower():
+        score += 2
+        reasons.append("账号简介包含 casal")
+    if score >= 8:
+        bucket = "high"
+    elif score >= 4:
+        bucket = "medium"
+    else:
+        bucket = "low"
+    return {"score": score, "bucket": bucket, "reasons": reasons}
+
+
+def classify_couple_candidate_with_llm(metadata: dict[str, Any], heuristic: dict[str, Any]) -> dict[str, Any]:
+    if not GOOGLE_API_KEY or run_text_json_prompt_with_fallback is None:
+        return {
+            "bucket": heuristic.get("bucket") or "low",
+            "confidence": "medium" if heuristic.get("bucket") in {"high", "medium"} else "low",
+            "reason": "使用关键词与页面公开信息做初筛。",
+            "signals": heuristic.get("reasons") or [],
+            "used_llm": False,
+        }
+    prompt = f"""
+你是 Koko 的视频筛选器。目标是判断一个 Kwai 视频是否“可能属于夫妻类型”，这里的夫妻类型包括：
+- 明确是夫妻/老公老婆/丈夫妻子
+- 或非常像固定亲密伴侣关系的家庭喜剧视频
+
+请严格返回 JSON，字段：
+{{
+  "bucket": "high" | "medium" | "low",
+  "confidence": "high" | "medium" | "low",
+  "reason": "一句中文解释",
+  "signals": ["最多4条中文信号"]
+}}
+
+判断标准：
+- high：高度像夫妻/伴侣关系主导的视频
+- medium：疑似夫妻/伴侣，但证据不够稳
+- low：不太像夫妻类型，或无法判断
+
+不要编造不存在的画面，只能基于页面公开信息判断。
+
+视频链接：{metadata.get("source_url") or ""}
+标题：{metadata.get("title") or ""}
+简介：{metadata.get("description") or ""}
+转写：{metadata.get("transcript") or ""}
+账号名：{metadata.get("creator_name") or ""}
+账号简介：{metadata.get("creator_description") or ""}
+启发式结果：{json.dumps(heuristic, ensure_ascii=False)}
+""".strip()
+    models = unique_models(os.environ.get("VIDEO_FILTER_MODEL", "gemini-2.5-flash-lite"), *PRIMARY_FALLBACK_MODELS)
+    result = run_text_json_prompt_with_fallback(
+        prompt,
+        {
+            "type": "object",
+            "properties": {
+                "bucket": {"type": "string"},
+                "confidence": {"type": "string"},
+                "reason": {"type": "string"},
+                "signals": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["bucket", "confidence", "reason", "signals"],
+        },
+        models=models,
+    )
+    bucket = str(result.get("bucket") or heuristic.get("bucket") or "low").strip().lower()
+    if bucket not in {"high", "medium", "low"}:
+        bucket = heuristic.get("bucket") or "low"
+    confidence = str(result.get("confidence") or "medium").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+    reason = str(result.get("reason") or "").strip() or "已基于页面信息完成轻量判断。"
+    signals = [str(signal or "").strip() for signal in (result.get("signals") or []) if str(signal or "").strip()][:4]
+    return {
+        "bucket": bucket,
+        "confidence": confidence,
+        "reason": reason,
+        "signals": signals or (heuristic.get("reasons") or [])[:4],
+        "used_llm": True,
+    }
 
 
 def parse_video_display_name(url: object, index: int = 0) -> str:
@@ -3292,6 +3645,208 @@ def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def public_filter_item_view(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(item.get("id") or "").strip(),
+        "index": int(item.get("index") or 0),
+        "video_url": item.get("video_url") or "",
+        "display_name": item.get("display_name") or "",
+        "status": item.get("status") or "",
+        "stage": item.get("stage") or "",
+        "stage_message": item.get("stage_message") or "",
+        "bucket": item.get("bucket") or "",
+        "confidence": item.get("confidence") or "",
+        "reason": item.get("reason") or "",
+        "signals": item.get("signals") or [],
+        "score": item.get("score") or 0,
+        "thumbnail_url": item.get("thumbnail_url") or "",
+        "metadata": item.get("metadata") or {},
+        "error": item.get("error") or "",
+    }
+
+
+def public_filter_job_view(job: dict[str, Any]) -> dict[str, Any]:
+    items = [public_filter_item_view(item) for item in (job.get("items") or [])]
+    matched = [item for item in items if item.get("bucket") in {"high", "medium"}]
+    return {
+        "id": str(job.get("id") or "").strip(),
+        "status": job.get("status") or "",
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "stage": job.get("stage") or "",
+        "stage_message": job.get("stage_message") or "",
+        "input_count": len(items),
+        "matched_count": len(matched),
+        "items": items,
+        "matched_links": [item.get("video_url") for item in matched if item.get("video_url")],
+        "message": job.get("message") or "",
+    }
+
+
+def create_filter_job(video_urls: list[str], *, source_label: str = "") -> dict[str, Any]:
+    job_id = uuid4().hex
+    items: list[dict[str, Any]] = []
+    for index, video_url in enumerate(video_urls):
+        items.append(
+            {
+                "id": uuid4().hex,
+                "index": index,
+                "video_url": video_url,
+                "display_name": parse_video_display_name(video_url, index),
+                "status": "queued",
+                "stage": "queued",
+                "stage_message": "Queued.",
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "bucket": "",
+                "confidence": "",
+                "reason": "",
+                "signals": [],
+                "score": 0,
+                "thumbnail_url": "",
+                "metadata": {},
+                "error": "",
+            }
+        )
+    job = {
+        "id": job_id,
+        "status": "queued",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "stage": "queued",
+        "stage_message": "Queued.",
+        "source_label": source_label,
+        "items": items,
+        "message": "",
+    }
+    with filter_jobs_lock:
+        filter_jobs[job_id] = job
+        save_filter_jobs()
+    with filter_queue_condition:
+        if job_id not in queued_filter_job_ids:
+            queued_filter_job_ids.add(job_id)
+            filter_queue.append(job_id)
+            filter_queue_condition.notify()
+    return public_filter_job_view(job)
+
+
+def update_filter_job(job_id: str, **changes: Any) -> None:
+    with filter_jobs_lock:
+        job = filter_jobs.get(job_id)
+        if not job:
+            return
+        job.update(changes)
+        job["updated_at"] = now_iso()
+        save_filter_jobs()
+
+
+def update_filter_item(job_id: str, index: int, **changes: Any) -> None:
+    with filter_jobs_lock:
+        job = filter_jobs.get(job_id)
+        if not job:
+            return
+        items = job.get("items") or []
+        if not (0 <= index < len(items)):
+            return
+        items[index].update(changes)
+        items[index]["updated_at"] = now_iso()
+        job["updated_at"] = now_iso()
+        save_filter_jobs()
+
+
+def finalize_filter_job(job_id: str) -> None:
+    with filter_jobs_lock:
+        job = filter_jobs.get(job_id)
+        if not job:
+            return
+        items = job.get("items") or []
+        statuses = [str(item.get("status") or "").strip() for item in items]
+        matched = sum(1 for item in items if str(item.get("bucket") or "").strip() in {"high", "medium"})
+        if items and all(status == "completed" for status in statuses):
+            job["status"] = "completed"
+            job["stage"] = "completed"
+            job["stage_message"] = f"Completed {len(items)}/{len(items)} items."
+            job["message"] = f"已筛出 {matched} 条可能属于夫妻类型的视频。"
+        elif any(status == "running" for status in statuses):
+            job["status"] = "running"
+        elif any(status == "queued" for status in statuses):
+            job["status"] = "queued"
+        else:
+            job["status"] = "failed"
+            job["stage"] = "failed"
+            job["stage_message"] = "筛选失败。"
+            job["message"] = "没有成功完成任何筛选项。"
+        job["updated_at"] = now_iso()
+        save_filter_jobs()
+
+
+def run_filter_job(job_id: str) -> None:
+    update_filter_job(job_id, status="running", stage="metadata", stage_message="正在抓取页面公开信息。", message="")
+    with filter_jobs_lock:
+        job = filter_jobs.get(job_id)
+        items = list(job.get("items") or []) if job else []
+    any_completed = False
+    for index, item in enumerate(items):
+        update_filter_item(job_id, index, status="running", stage="metadata", stage_message="正在抓取页面公开信息。")
+        try:
+            metadata = fetch_kwai_light_metadata(str(item.get("video_url") or "").strip())
+            heuristic = score_couple_candidate(metadata)
+            update_filter_item(
+                job_id,
+                index,
+                stage="classify",
+                stage_message="正在判断是否属于夫妻类型。",
+                metadata=metadata,
+                thumbnail_url=metadata.get("thumbnail_url") or "",
+                score=heuristic.get("score") or 0,
+            )
+            decision = classify_couple_candidate_with_llm(metadata, heuristic)
+            update_filter_item(
+                job_id,
+                index,
+                status="completed",
+                stage="completed",
+                stage_message="筛选完成。",
+                bucket=decision.get("bucket") or "low",
+                confidence=decision.get("confidence") or "low",
+                reason=decision.get("reason") or "",
+                signals=decision.get("signals") or [],
+                metadata=metadata,
+                thumbnail_url=metadata.get("thumbnail_url") or "",
+                score=heuristic.get("score") or 0,
+            )
+            any_completed = True
+        except Exception as exc:
+            update_filter_item(
+                job_id,
+                index,
+                status="failed",
+                stage="failed",
+                stage_message="筛选失败。",
+                error=friendly_error(str(exc)),
+                reason="页面公开信息抓取或判断失败。",
+            )
+    finalize_filter_job(job_id)
+    if not any_completed:
+        update_filter_job(job_id, message="没有成功完成任何筛选项。")
+
+
+def filter_worker_loop() -> None:
+    while True:
+        with filter_queue_condition:
+            while not filter_queue:
+                filter_queue_condition.wait()
+            job_id = filter_queue.popleft()
+            queued_filter_job_ids.discard(job_id)
+        run_filter_job(job_id)
+
+
+def start_filter_workers() -> None:
+    for index in range(MAX_CONCURRENT_FILTERS):
+        thread = threading.Thread(target=filter_worker_loop, name=f"koko-filter-worker-{index+1}", daemon=True)
+        thread.start()
+
+
 def update_job(job_id: str, **changes: Any) -> None:
     with job_lock:
         job = jobs[job_id]
@@ -4771,6 +5326,26 @@ def studio_html() -> str:
       box-shadow: 0 0 0 4px rgba(255,130,0,.10);
       transform: translateY(-1px);
     }}
+    input[type="file"] {{
+      width: 100%;
+      border: 1px dashed rgba(255,130,0,.24);
+      background: rgba(255,255,255,.78);
+      border-radius: 16px;
+      padding: 12px 14px;
+      font-size: 13px;
+      color: var(--ink);
+    }}
+    .filter-upload-row {{
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }}
+    .filter-upload-hint {{
+      font-size: 12px;
+      line-height: 1.7;
+      color: rgba(255,130,0,.82);
+    }}
     .actions {{
       margin-top: 16px;
       display: grid;
@@ -6122,38 +6697,46 @@ def studio_html() -> str:
           <div class="studio-card-head">
             <div>
               <h2>视频筛选</h2>
-              <p>这一块先提供轻量占位：围绕高表现内容、作者适配度和复用优先级做筛选建议，后续可以在这里接入更正式的批量打分和筛选能力。</p>
+              <p>批量输入 Kwai 外部链接后，系统会优先利用页面公开信息做轻量判断，筛出可能属于“夫妻类型”的视频，尽量不下载整条视频，保证更快更省。</p>
             </div>
           </div>
           <div class="studio-kpis">
             <div class="studio-kpi">
-              <strong>高表现优先</strong>
-              <span>Top</span>
-              <p>优先挑出播放表现更好、且更适合沉淀成脚本资产的视频，减少运营人工翻找成本。</p>
+              <strong>轻量识别</strong>
+              <span>Fast</span>
+              <p>优先读取页面标题、简介、转写与账号描述，避免一开始就走完整视频下载与拆解。</p>
             </div>
             <div class="studio-kpi">
-              <strong>作者匹配</strong>
+              <strong>夫妻候选</strong>
               <span>Match</span>
-              <p>从作者人设、内容阶段和风格角度判断视频是否值得进入后续拆解与投喂流程。</p>
+              <p>输出高概率、疑似、非夫妻三档结果，先帮运营缩小候选池，再决定是否进入脚本拆解。</p>
             </div>
             <div class="studio-kpi">
-              <strong>复用潜力</strong>
-              <span>Reuse</span>
-              <p>判断视频是否具备可拆解、可替换、可复盘的爆款结构，为脚本库沉淀做前置筛选。</p>
+              <strong>兼容表格</strong>
+              <span>Sheet</span>
+              <p>支持直接粘贴一大段文字自动识别链接，也支持上传 Excel / CSV / TSV 做批量筛选。</p>
             </div>
           </div>
-          <div class="studio-placeholder-grid">
-            <div class="studio-placeholder-box">
-              <h3>即将接入的筛选能力</h3>
-              <ul>
-                <li>批量视频输入后的优先级排序</li>
-                <li>高表现 / 高适配 / 高复用 三维度打分</li>
-                <li>适合投喂给哪类作者的筛选建议</li>
-              </ul>
+          <div class="composer-block">
+            <div class="composer">
+              <div class="composer-head">
+                <div></div>
+              </div>
+              <label for="filter-input">批量视频输入</label>
+              <textarea id="filter-input" placeholder="可直接粘贴聊天记录、文档或一批链接，系统会自动识别其中的 http / https 字段。&#10;&#10;例如：&#10;这是今天候选： https://www.kwai.com/@.../video/...&#10;还有这个 https://www.kwai.com/@.../video/..."></textarea>
+              <div class="filter-upload-row">
+                <input id="filter-file-input" type="file" accept=".xlsx,.csv,.tsv,.txt" />
+                <span class="filter-upload-hint">支持上传 Excel、CSV、TSV、TXT。系统会自动抽取其中的链接。</span>
+              </div>
+              <div class="actions">
+                <button id="filter-submit-btn">开始筛选夫妻类型</button>
+              </div>
             </div>
-            <div class="studio-placeholder-box">
-              <h3>当前建议</h3>
-              <p>先把值得复用的视频送到“视频拆解”里做完整脚本生成，再沉淀进脚本库供作者教育和内容投喂使用。</p>
+          </div>
+          <div id="filter-status-box" class="status-box">
+            <div class="status-empty">
+              <div class="status-empty-title">筛选器已就绪。</div>
+              <div class="status-empty-copy">贴入一批链接或上传表格后，Koko 会优先用页面公开信息做轻量判断，并输出可能属于夫妻类型的视频。</div>
             </div>
           </div>
         </div>
@@ -6219,6 +6802,10 @@ def studio_html() -> str:
   </div>
 
   <script>
+    const filterInput = document.getElementById("filter-input");
+    const filterFileInput = document.getElementById("filter-file-input");
+    const filterSubmitBtn = document.getElementById("filter-submit-btn");
+    const filterStatusBox = document.getElementById("filter-status-box");
     const videoInput = document.getElementById("video-url");
     const submitBtn = document.getElementById("submit-btn");
     const stopAllBtn = document.getElementById("stop-all-btn");
@@ -6261,6 +6848,15 @@ def studio_html() -> str:
         <div class="status-empty-copy">输入一个或多个视频链接后，系统会在这里实时显示拆解进度。</div>
       </div>
     `;
+    const FILTER_IDLE_HTML = `
+      <div class="status-empty">
+        <div class="status-empty-title">筛选器已就绪。</div>
+        <div class="status-empty-copy">贴入一批链接或上传表格后，Koko 会优先用页面公开信息做轻量判断，并输出可能属于夫妻类型的视频。</div>
+      </div>
+    `;
+    let activeFilterJobId = "";
+    let filterPollTimer = null;
+    const ACTIVE_FILTER_JOB_STORAGE_KEY = "koko_active_filter_job_id";
 
     function setStudioPanel(panelId) {{
       const target = String(panelId || "filter-panel").trim() || "filter-panel";
@@ -6364,6 +6960,47 @@ def studio_html() -> str:
       stopAllBtn.disabled = !active;
     }}
 
+    function setFilterStatus(html, ready = false) {{
+      if (!filterStatusBox) return;
+      filterStatusBox.className = ready ? "status-box visible ready" : "status-box visible";
+      filterStatusBox.innerHTML = html;
+    }}
+
+    function setFilterIdleState() {{
+      if (filterPollTimer) {{
+        clearTimeout(filterPollTimer);
+        filterPollTimer = null;
+      }}
+      activeFilterJobId = "";
+      try {{
+        window.localStorage.removeItem(ACTIVE_FILTER_JOB_STORAGE_KEY);
+      }} catch (error) {{
+        // Ignore storage failures.
+      }}
+      setFilterStatus(FILTER_IDLE_HTML, true);
+    }}
+
+    function persistActiveFilterJobId(jobId) {{
+      const value = String(jobId || "").trim();
+      try {{
+        if (!value) {{
+          window.localStorage.removeItem(ACTIVE_FILTER_JOB_STORAGE_KEY);
+        }} else {{
+          window.localStorage.setItem(ACTIVE_FILTER_JOB_STORAGE_KEY, value);
+        }}
+      }} catch (error) {{
+        // Ignore storage failures.
+      }}
+    }}
+
+    function readPersistedActiveFilterJobId() {{
+      try {{
+        return String(window.localStorage.getItem(ACTIVE_FILTER_JOB_STORAGE_KEY) || "").trim();
+      }} catch (error) {{
+        return "";
+      }}
+    }}
+
     function setIdleState() {{
       if (jobPollTimer) {{
         clearTimeout(jobPollTimer);
@@ -6381,6 +7018,11 @@ def studio_html() -> str:
     function schedulePoll(jobId, delay = 2500) {{
       if (jobPollTimer) clearTimeout(jobPollTimer);
       jobPollTimer = setTimeout(() => pollJob(jobId), delay);
+    }}
+
+    function scheduleFilterPoll(jobId, delay = 1800) {{
+      if (filterPollTimer) clearTimeout(filterPollTimer);
+      filterPollTimer = setTimeout(() => pollFilterJob(jobId), delay);
     }}
 
     function persistActiveJobId(jobId) {{
@@ -6601,6 +7243,28 @@ def studio_html() -> str:
       }}
     }}
 
+    function filterBucketLabel(bucket) {{
+      if (bucket === "high") return "高概率夫妻类型";
+      if (bucket === "medium") return "疑似夫妻类型";
+      if (bucket === "low") return "非夫妻类型";
+      return "待判断";
+    }}
+
+    function filterBucketClass(bucket) {{
+      if (bucket === "high") return "completed";
+      if (bucket === "medium") return "running";
+      if (bucket === "low") return "waiting";
+      return "waiting";
+    }}
+
+    function filterStageLabel(stage) {{
+      if (stage === "metadata") return "读取页面信息";
+      if (stage === "classify") return "判断夫妻候选";
+      if (stage === "completed") return "筛选完成";
+      if (stage === "failed") return "筛选失败";
+      return "等待筛选";
+    }}
+
     function displayVideoName(item, idx = 0) {{
       const title = String(item?.title || "").trim();
       if (title) return title;
@@ -6650,6 +7314,27 @@ def studio_html() -> str:
         .split(/[\\n\\r,]+/)
         .map((value) => value.trim())
         .filter((value, index, arr) => value && /^https?:\\/\\//i.test(value) && arr.indexOf(value) === index);
+    }}
+
+    function collectFilterUrls() {{
+      const text = String(filterInput?.value || "").trim();
+      const matches = text.match(/https?:\\/\\/[^\\s<>\"]+/gi) || [];
+      return matches
+        .map((value) => value.trim().replace(/[),.;!?]+$/, ""))
+        .filter((value, index, arr) => value && arr.indexOf(value) === index);
+    }}
+
+    function readFileAsBase64(file) {{
+      return new Promise((resolve, reject) => {{
+        const reader = new FileReader();
+        reader.onload = () => {{
+          const raw = String(reader.result || "");
+          const marker = raw.indexOf(",");
+          resolve(marker >= 0 ? raw.slice(marker + 1) : raw);
+        }};
+        reader.onerror = () => reject(reader.error || new Error("文件读取失败"));
+        reader.readAsDataURL(file);
+      }});
     }}
 
     function normalizeRows(script) {{
@@ -7360,6 +8045,124 @@ def studio_html() -> str:
       pollJob(activeJobId, {{ force: true }});
     }}
 
+    function renderFilterResults(data) {{
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const matchedLinks = Array.isArray(data?.matched_links) ? data.matched_links.filter(Boolean) : [];
+      const statusLabel = data?.status === "completed"
+        ? "筛选完成"
+        : data?.status === "failed"
+          ? "筛选失败"
+          : data?.status === "running"
+            ? "筛选中"
+            : "排队中";
+      const badgeClass = data?.status === "completed"
+        ? "status-running"
+        : data?.status === "failed"
+          ? "status-failed"
+          : data?.status === "running"
+            ? "status-running"
+            : "status-queued";
+      const matchedMarkup = matchedLinks.length
+        ? matchedLinks.map((url, index) => `
+            <li>
+              <span class="queue-index">命中 ${{index + 1}}</span>
+              <div class="queue-url"><span class="queue-link-icon">🔗</span>${{escapeHtml(url)}}</div>
+            </li>
+          `).join("")
+        : `<li><div class="queue-stage">当前还没有命中“夫妻类型”的链接。</div></li>`;
+      const itemCards = items.map((item, index) => {{
+        const title = item.display_name || parseVideoDisplayName(item.video_url || "", index);
+        const bucket = String(item.bucket || "").trim();
+        const status = String(item.status || "").trim();
+        const thumb = String(item.thumbnail_url || "").trim();
+        const reason = String(item.reason || "").trim();
+        const stageMessage = String(item.stage_message || "").trim();
+        const signals = Array.isArray(item.signals) ? item.signals : [];
+        const meta = [];
+        if (item.confidence) meta.push(`置信度：${{escapeHtml(item.confidence)}}`);
+        if (typeof item.score === "number" && item.score) meta.push(`启发式分数：${{escapeHtml(item.score)}}`);
+        const signalMarkup = signals.length ? `<div class="progress-meta">${{signals.map((signal) => `<span class="progress-meta-chip">${{escapeHtml(signal)}}</span>`).join("")}}</div>` : "";
+        return `
+          <article class="queue-card ${{status === "completed" && bucket === "high" ? "current" : ""}}">
+            <div class="queue-card-top">
+              <div class="queue-index">候选 ${{index + 1}}</div>
+              <span class="queue-status ${{filterBucketClass(bucket)}}">${{escapeHtml(filterBucketLabel(bucket))}}</span>
+            </div>
+            <h4 class="queue-title">${{escapeHtml(title)}}</h4>
+            <div class="queue-url"><span class="queue-link-icon">🔗</span>${{escapeHtml(item.video_url || "")}}</div>
+            ${{thumb ? `<div class="queue-url"><span class="queue-link-icon">🖼️</span>${{escapeHtml(thumb)}}</div>` : ""}}
+            <div class="queue-stage">${{escapeHtml(stageMessage || filterStageLabel(item.stage))}}</div>
+            ${{meta.length ? `<div class="queue-stage">${{meta.join(" · ")}}</div>` : ""}}
+            ${{reason ? `<div class="queue-stage">${{escapeHtml(reason)}}</div>` : ""}}
+            ${{signalMarkup}}
+            ${{item.error ? `<div class="queue-error">${{escapeHtml(item.error)}}</div>` : ""}}
+          </article>
+        `;
+      }}).join("");
+      return `
+        <span class="status ${{badgeClass}}">${{statusLabel}}</span>
+        <br><br>
+        <div class="batch-dashboard">
+          <section class="batch-overview">
+            <div class="overview-header">
+              <div>
+                <h3>夫妻类型候选结果</h3>
+                <p>${{escapeHtml(data?.message || "Koko 正在按页面信息与轻量规则判断夫妻候选。")}}</p>
+              </div>
+            </div>
+            <div class="overview-stats">
+              <div class="overview-stat"><span>输入链接</span><strong>${{Number(data?.input_count || items.length || 0)}}</strong></div>
+              <div class="overview-stat"><span>命中候选</span><strong>${{Number(data?.matched_count || matchedLinks.length || 0)}}</strong></div>
+              <div class="overview-stat"><span>当前阶段</span><strong>${{escapeHtml(filterStageLabel(data?.stage || "queued"))}}</strong></div>
+            </div>
+          </section>
+          <section class="queue-shell">
+            <div class="queue-header">
+              <h3>命中链接</h3>
+              <p>高概率和疑似夫妻类型的链接会优先列在这里，便于后续一键送去视频拆解。</p>
+            </div>
+            <ul class="queue-list">${{matchedMarkup}}</ul>
+          </section>
+          <section class="queue-shell">
+            <div class="queue-header">
+              <h3>逐条筛选明细</h3>
+              <p>基于公开页面信息做轻量识别，不下载整条视频。</p>
+            </div>
+            <div class="queue-list">${{itemCards}}</div>
+          </section>
+        </div>
+      `;
+    }}
+
+    async function pollFilterJob(jobId) {{
+      activeFilterJobId = jobId;
+      persistActiveFilterJobId(jobId);
+      try {{
+        const res = await fetch(`/api/filter-jobs/${{jobId}}?_=${{Date.now()}}`, {{
+          cache: "no-store",
+          headers: {{
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache"
+          }}
+        }});
+        const data = await readJsonSafely(res);
+        if (!res.ok) {{
+          throw new Error(data.error || "筛选状态获取失败");
+        }}
+        setFilterStatus(renderFilterResults(data), data.status === "completed");
+        if (data.status === "running" || data.status === "queued") {{
+          scheduleFilterPoll(jobId, 1800);
+          return;
+        }}
+        if (data.status === "completed") {{
+          showToast("筛选完成", `已筛出 ${{Number(data.matched_count || 0)}} 条可能属于夫妻类型的视频。`);
+          return;
+        }}
+      }} catch (error) {{
+        setFilterStatus(`<span class="status status-failed">筛选失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+      }}
+    }}
+
     submitBtn.addEventListener("click", async () => {{
       const videoUrls = collectUrls();
       if (!videoUrls.length) {{
@@ -7391,6 +8194,51 @@ def studio_html() -> str:
         submitBtn.disabled = false;
       }}
     }});
+
+    if (filterSubmitBtn) {{
+      filterSubmitBtn.addEventListener("click", async () => {{
+        const directUrls = collectFilterUrls();
+        const file = filterFileInput?.files?.[0] || null;
+        if (!directUrls.length && !file) {{
+          setFilterStatus(`<span class="status status-failed">缺少输入</span><br><br><code>请先粘贴一批包含链接的文本，或上传表格文件。</code>`);
+          return;
+        }}
+        filterSubmitBtn.disabled = true;
+        setStudioPanel("filter-panel");
+        setFilterStatus(`<span class="status status-running">准备筛选</span><br><br><div class="status-empty"><div class="status-empty-title">Koko 正在解析输入。</div><div class="status-empty-copy">先识别文本和表格里的所有链接，再进入夫妻类型轻量筛选。</div></div>`);
+        try {{
+          let upload = null;
+          if (file) {{
+            const fileDataBase64 = await readFileAsBase64(file);
+            upload = {{
+              filename: file.name,
+              file_data_base64: fileDataBase64,
+            }};
+          }}
+          const res = await fetch("/api/filter-jobs", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{
+              raw_text: String(filterInput?.value || ""),
+              video_urls: directUrls,
+              upload,
+            }})
+          }});
+          const data = await readJsonSafely(res);
+          if (!res.ok) {{
+            throw new Error(data.error || "筛选任务创建失败");
+          }}
+          activeFilterJobId = data.id;
+          persistActiveFilterJobId(data.id);
+          setFilterStatus(renderFilterResults(data), false);
+          pollFilterJob(data.id);
+        }} catch (error) {{
+          setFilterStatus(`<span class="status status-failed">筛选失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        }} finally {{
+          filterSubmitBtn.disabled = false;
+        }}
+      }});
+    }}
 
     if (stopAllBtn) {{
       stopAllBtn.addEventListener("click", async () => {{
@@ -7435,11 +8283,13 @@ def studio_html() -> str:
 
     window.addEventListener("focus", () => {{
       requestImmediateJobSync();
+      if (activeFilterJobId) pollFilterJob(activeFilterJobId);
     }});
 
     document.addEventListener("visibilitychange", () => {{
       if (document.visibilityState === "visible") {{
         requestImmediateJobSync();
+        if (activeFilterJobId) pollFilterJob(activeFilterJobId);
       }}
     }});
 
@@ -7462,11 +8312,27 @@ def studio_html() -> str:
       setStudioPanel(initialPanelId);
     }}
 
+    const restoredFilterJobId = readPersistedActiveFilterJobId();
+    if (restoredFilterJobId) {{
+      activeFilterJobId = restoredFilterJobId;
+      pollFilterJob(restoredFilterJobId);
+    }} else {{
+      setFilterIdleState();
+    }}
+
     videoInput.addEventListener("keydown", (event) => {{
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {{
         submitBtn.click();
       }}
     }});
+
+    if (filterInput) {{
+      filterInput.addEventListener("keydown", (event) => {{
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && filterSubmitBtn) {{
+          filterSubmitBtn.click();
+        }}
+      }});
+    }}
 
     document.addEventListener("keydown", (event) => {{
       if (event.key === "Escape") {{
@@ -8226,6 +9092,15 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/library":
             self.send_json({"entries": load_library_entries()})
             return
+        if parsed.path.startswith("/api/filter-jobs/"):
+            job_id = parsed.path.split("/")[-1]
+            with filter_jobs_lock:
+                job = filter_jobs.get(job_id)
+            if not job:
+                self.send_json({"error": "Filter job not found."}, status=404)
+                return
+            self.send_json(public_filter_job_view(job))
+            return
         if parsed.path.startswith("/api/jobs/"):
             reconcile_stale_jobs()
             job_id = parsed.path.split("/")[-1]
@@ -8395,7 +9270,36 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "entry": updated})
             return
         if parsed.path != "/api/jobs":
-            self.send_error(HTTPStatus.NOT_FOUND)
+            if parsed.path != "/api/filter-jobs":
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            raw_text = str(payload.get("raw_text") or "")
+            direct_values = payload.get("video_urls")
+            direct_urls: list[str] = []
+            if isinstance(direct_values, list):
+                direct_urls = unique_urls_from_values(direct_values)
+            urls = unique_urls_from_values([*extract_http_urls(raw_text), *direct_urls])
+            upload = payload.get("upload")
+            if isinstance(upload, dict):
+                filename = str(upload.get("filename") or "").strip()
+                file_data = str(upload.get("file_data_base64") or "").strip()
+                if filename and file_data:
+                    try:
+                        urls = unique_urls_from_values([*urls, *extract_urls_from_uploaded_file(filename, file_data)])
+                    except Exception as exc:
+                        self.send_json({"error": friendly_error(str(exc))}, status=400)
+                        return
+            kwai_urls = [url for url in urls if "kwai.com/" in url or "k.kwai.com/" in url]
+            if not kwai_urls:
+                self.send_json({"error": "请至少提供一个可识别的 Kwai 视频链接。"}, status=400)
+                return
+            job = create_filter_job(kwai_urls, source_label="studio-filter")
+            self.send_json(job, status=202)
             return
         try:
             payload = self.read_json()
@@ -8433,8 +9337,11 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def main() -> int:
     load_jobs()
+    load_filter_jobs()
     restore_pending_jobs_to_queue()
+    restore_pending_filter_jobs_to_queue()
     start_job_workers()
+    start_filter_workers()
     start_watchdog()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AppHandler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT), "skill_root": str(SKILL_ROOT)}, ensure_ascii=False))
