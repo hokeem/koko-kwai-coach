@@ -2,10 +2,11 @@
 
 Static daily report site for the World Cup 2026 Brazil watch workflow.
 
-- `index.html`: latest visual report.
+- `index.html`: archive-style portal listing recent reports.
 - `reports/YYYY-MM-DD.html`: archived visual report.
 - `reports/YYYY-MM-DD.md`: archived text report.
-- `scripts/send_lark.py`: optional Lark webhook sender.
+- `scripts/build_index.py`: rebuilds the archive portal from `reports/`.
+- `scripts/send_lark.py`: optional Lark webhook sender with a structured card.
 
 Suggested GitHub Pages URL:
 

@@ -3,402 +3,222 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>世界杯2026巴西区热点播报 - 2026-05-25</title>
+  <title>世界杯2026巴西区热点播报</title>
   <style>
     :root {
-      --ink: #17212b;
-      --muted: #65727f;
-      --line: #dce4ea;
-      --paper: #f7faf8;
-      --panel: #ffffff;
-      --green: #178a4b;
-      --yellow: #f1c232;
-      --blue: #1e5f94;
-      --red: #c14436;
+      --ink:#17212b;
+      --muted:#66737f;
+      --line:#dce4ea;
+      --paper:#f6faf7;
+      --green:#176b48;
+      --yellow:#f2c94c;
+      --blue:#1e5f94;
     }
-    * { box-sizing: border-box; }
+    * { box-sizing:border-box; }
     body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
-      color: var(--ink);
-      background: var(--paper);
-      line-height: 1.55;
+      margin:0;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Arial,sans-serif;
+      color:var(--ink);
+      background:var(--paper);
+      line-height:1.55;
     }
-    a { color: inherit; text-decoration: none; }
-    .hero {
-      min-height: 86vh;
-      display: grid;
-      align-items: end;
-      background:
-        linear-gradient(180deg, rgba(6, 32, 21, .18), rgba(6, 32, 21, .86)),
-        url("https://s2-ge.glbimg.com/OHKW5OoiNMRxOyUbYZfMzWfNFss=/1280x0/filters:format(jpeg)/https://s03.video.glbimg.com/x720/14624354.jpg") center / cover no-repeat;
-      color: #fff;
-      padding: 28px;
+    a { color:inherit; text-decoration:none; }
+    .topbar {
+      border-bottom:1px solid var(--line);
+      background:#fff;
+      position:sticky;
+      top:0;
+      z-index:3;
     }
-    .hero-inner {
-      max-width: 1180px;
-      width: 100%;
-      margin: 0 auto;
-      padding-bottom: 34px;
+    .topbar-inner {
+      max-width:1180px;
+      margin:0 auto;
+      padding:14px 22px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:16px;
     }
-    .kicker {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 7px 12px;
-      border: 1px solid rgba(255,255,255,.42);
-      background: rgba(255,255,255,.12);
-      backdrop-filter: blur(8px);
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: .02em;
+    .brand { font-weight:900; color:var(--green); }
+    .topbar span { color:var(--muted); font-size:13px; }
+    .wrap { max-width:1180px; margin:0 auto; padding:28px 22px 72px; }
+    .latest {
+      min-height:430px;
+      background-size:cover;
+      background-position:center;
+      color:#fff;
+      display:flex;
+      align-items:end;
+      padding:32px;
+      margin-bottom:30px;
     }
+    .latest div { max-width:760px; }
+    .eyebrow {
+      margin:0 0 8px;
+      color:var(--blue);
+      font-size:12px;
+      font-weight:900;
+      letter-spacing:.04em;
+      text-transform:uppercase;
+    }
+    .latest .eyebrow { color:rgba(255,255,255,.8); }
     h1 {
-      margin: 18px 0 12px;
-      max-width: 920px;
-      font-size: clamp(38px, 6vw, 82px);
-      line-height: 1.02;
-      letter-spacing: 0;
-    }
-    .hero p {
-      max-width: 760px;
-      margin: 0;
-      font-size: clamp(16px, 2vw, 22px);
-      color: rgba(255,255,255,.9);
-    }
-    .wrap {
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 34px 22px 70px;
-    }
-    .meta-grid {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 12px;
-      margin: -74px 0 32px;
-      position: relative;
-      z-index: 2;
-    }
-    .metric {
-      background: rgba(255,255,255,.94);
-      border: 1px solid var(--line);
-      padding: 16px;
-      min-height: 96px;
-      box-shadow: 0 10px 30px rgba(18, 45, 30, .12);
-    }
-    .metric b { display: block; font-size: 24px; color: var(--green); }
-    .metric span { color: var(--muted); font-size: 13px; }
-    .section {
-      margin-top: 36px;
-      border-top: 3px solid var(--ink);
-      padding-top: 18px;
-    }
-    .section-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 18px;
-      align-items: end;
-      margin-bottom: 18px;
+      margin:0 0 18px;
+      font-size:clamp(34px,5vw,68px);
+      line-height:1.04;
+      letter-spacing:0;
     }
     h2 {
-      margin: 0;
-      font-size: clamp(24px, 3vw, 38px);
-      letter-spacing: 0;
+      margin:0 0 12px;
+      font-size:clamp(32px,5vw,60px);
+      line-height:1.05;
+      letter-spacing:0;
     }
-    .section-note {
-      max-width: 520px;
-      color: var(--muted);
-      font-size: 14px;
-      text-align: right;
+    h3 { margin:0 0 8px; font-size:22px; line-height:1.25; }
+    .latest p:not(.eyebrow) { color:rgba(255,255,255,.88); font-size:17px; max-width:680px; }
+    .hero-actions, .actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; }
+    .hero-actions a {
+      border:1px solid rgba(255,255,255,.78);
+      padding:10px 14px;
+      font-weight:900;
+      background:rgba(255,255,255,.12);
     }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
+    .intro {
+      display:grid;
+      grid-template-columns:1.2fr .8fr;
+      gap:18px;
+      margin-bottom:24px;
+      align-items:end;
     }
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      display: flex;
-      flex-direction: column;
-      min-height: 100%;
+    .intro p { margin:0; color:var(--muted); }
+    .stat {
+      display:grid;
+      grid-template-columns:repeat(3,1fr);
+      gap:10px;
     }
-    .card.wide {
-      grid-column: span 2;
-      display: grid;
-      grid-template-columns: minmax(240px, .95fr) 1.05fr;
+    .stat div {
+      background:#fff;
+      border:1px solid var(--line);
+      padding:14px;
     }
-    .media {
-      min-height: 210px;
-      background: #d8e3dd center / cover no-repeat;
-      border-bottom: 1px solid var(--line);
+    .stat b { display:block; font-size:24px; color:var(--green); }
+    .archive-head {
+      display:flex;
+      justify-content:space-between;
+      align-items:end;
+      border-top:3px solid var(--ink);
+      padding-top:18px;
+      margin:30px 0 16px;
     }
-    .card.wide .media { border-bottom: 0; border-right: 1px solid var(--line); min-height: 100%; }
-    .body { padding: 18px; }
-    .tag-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 7px;
-      margin-bottom: 11px;
+    .archive-head p { margin:0; color:var(--muted); font-size:14px; }
+    .reports {
+      display:grid;
+      grid-template-columns:repeat(3,1fr);
+      gap:16px;
     }
-    .tag {
-      font-size: 12px;
-      color: #fff;
-      background: var(--blue);
-      padding: 4px 8px;
-      font-weight: 700;
+    .report-card {
+      background:#fff;
+      border:1px solid var(--line);
+      min-height:100%;
+      display:flex;
+      flex-direction:column;
     }
-    .tag.hot { background: var(--red); }
-    .tag.official { background: var(--green); }
-    .date { color: var(--muted); font-size: 13px; margin-left: auto; padding-top: 4px; }
-    h3 {
-      margin: 0 0 8px;
-      font-size: 20px;
-      line-height: 1.25;
-      letter-spacing: 0;
+    .thumb {
+      min-height:210px;
+      background-size:cover !important;
+      background-position:center !important;
+      display:flex;
+      align-items:end;
+      padding:14px;
+      color:#fff;
+      font-weight:900;
     }
-    .pt {
-      color: var(--blue);
-      font-weight: 800;
-      margin-bottom: 4px;
+    .thumb span { background:rgba(12,30,20,.82); padding:6px 9px; }
+    .card-body { padding:18px; display:flex; flex-direction:column; flex:1; }
+    .card-body p:not(.eyebrow) { color:#3d4a55; margin:0; }
+    .actions { margin-top:auto; padding-top:18px; }
+    .actions a {
+      border:1px solid var(--ink);
+      padding:8px 11px;
+      font-size:13px;
+      font-weight:900;
+      background:#fff;
     }
-    .summary { color: #33404c; margin: 12px 0 14px; font-size: 14px; }
-    .score {
-      display: grid;
-      gap: 8px;
-      margin: 14px 0;
+    .footer {
+      margin-top:40px;
+      padding:20px;
+      background:#14251d;
+      color:rgba(255,255,255,.84);
+      font-size:14px;
     }
-    .bar {
-      display: grid;
-      grid-template-columns: 66px 1fr 30px;
-      align-items: center;
-      gap: 8px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .track {
-      height: 8px;
-      background: #e8eef1;
-      overflow: hidden;
-    }
-    .fill {
-      display: block;
-      height: 100%;
-      background: linear-gradient(90deg, var(--green), var(--yellow));
-    }
-    .evidence {
-      border-left: 3px solid var(--yellow);
-      padding-left: 10px;
-      color: #46515b;
-      font-size: 13px;
-      margin-top: 12px;
-    }
-    .button {
-      display: inline-flex;
-      margin-top: 12px;
-      padding: 9px 12px;
-      border: 1px solid var(--ink);
-      font-size: 13px;
-      font-weight: 800;
-      background: #fff;
-    }
-    .logic {
-      background: #14251d;
-      color: #eaf3ee;
-      padding: 22px;
-      margin-top: 18px;
-    }
-    .logic p { margin: 0 0 12px; color: rgba(234,243,238,.88); }
-    .logic p:last-child { margin-bottom: 0; }
-    .source-strip {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 14px;
-    }
-    .source-strip span {
-      border: 1px solid rgba(234,243,238,.28);
-      padding: 5px 8px;
-      font-size: 12px;
-      color: rgba(234,243,238,.86);
-    }
-    @media (max-width: 900px) {
-      .meta-grid, .grid { grid-template-columns: 1fr; }
-      .card.wide { grid-column: span 1; grid-template-columns: 1fr; }
-      .card.wide .media { min-height: 220px; border-right: 0; border-bottom: 1px solid var(--line); }
-      .section-head { display: block; }
-      .section-note { text-align: left; margin-top: 8px; }
-      .hero { min-height: 78vh; padding: 22px; }
-      .meta-grid { margin-top: -50px; }
+    @media (max-width:900px) {
+      .intro, .reports, .stat { grid-template-columns:1fr; }
+      .latest { min-height:360px; padding:24px; }
+      .archive-head { display:block; }
     }
   </style>
 </head>
 <body>
-  <header class="hero">
-    <div class="hero-inner">
-      <div class="kicker">WORLD CUP 2026 · BRAZIL WATCH</div>
-      <h1>世界杯2026巴西区热点播报</h1>
-      <p>更新时间：2026-05-25。仅输出过去3天内、真实可访问、权威来源的世界杯相关内容。</p>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="./">世界杯2026巴西区热点播报</a>
+      <span>每日 08:00 更新 · 图文版 + 文字版归档</span>
     </div>
   </header>
-
   <main class="wrap">
-    <section class="meta-grid" aria-label="report summary">
-      <div class="metric"><b>7</b><span>入选条目</span></div>
-      <div class="metric"><b>3天</b><span>发布时间窗口</span></div>
-      <div class="metric"><b>GE + YouTube</b><span>主要可验证来源</span></div>
-      <div class="metric"><b>X趋势替代</b><span>Trends24 / GetDayTrends</span></div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <h2>模块A：世界杯重要资讯</h2>
-        <div class="section-note">优先巴西国家队、重点国家球星、世界杯备战伤病与官方/权威媒体报道。</div>
+    <section class="intro">
+      <div>
+        <p class="eyebrow">Brazil Watch Desk</p>
+        <h1>每日世界杯热点资讯站</h1>
+        <p>按日期归档每天的图文版和文字版日报。内容只保留过去3天内、真实可访问、权威来源的世界杯相关信息。</p>
       </div>
-      <div class="grid">
-        <article class="card wide">
-          <a class="media" style="background-image:url('https://s2-ge.glbimg.com/OHKW5OoiNMRxOyUbYZfMzWfNFss=/1280x0/filters:format(jpeg)/https://s03.video.glbimg.com/x720/14624354.jpg')" href="https://ge.globo.com/futebol/selecao-brasileira/noticia/2026/05/24/alisson-volta-a-jogar-apos-dois-meses-e-selecao-monitora-neymar-as-vesperas-de-apresentacao.ghtml"></a>
-          <div class="body">
-            <div class="tag-row"><span class="tag official">GE</span><span class="tag hot">巴西队</span><span class="date">2026-05-24</span></div>
-            <div class="pt">Alisson volta a jogar após dois meses, e Seleção monitora Neymar às vésperas de apresentação</div>
-            <h3>阿利松伤愈复出，巴西队继续监测内马尔身体状态</h3>
-            <p class="summary">阿利松在伤停两个月后代表利物浦复出；巴西队即将在 Granja Comary 集结，教练组同时持续关注内马尔状态。这是巴西世界杯备战中最直接影响阵容健康度的消息。</p>
-            <div class="score">
-              <div class="bar"><span>传播</span><span class="track"><i class="fill" style="width:80%"></i></span><strong>4/5</strong></div>
-              <div class="bar"><span>娱乐</span><span class="track"><i class="fill" style="width:60%"></i></span><strong>3/5</strong></div>
-              <div class="bar"><span>争议</span><span class="track"><i class="fill" style="width:40%"></i></span><strong>2/5</strong></div>
-            </div>
-            <a class="button" href="https://ge.globo.com/futebol/selecao-brasileira/noticia/2026/05/24/alisson-volta-a-jogar-apos-dois-meses-e-selecao-monitora-neymar-as-vesperas-de-apresentacao.ghtml">查看来源</a>
-          </div>
-        </article>
-
-        <article class="card">
-          <div class="media" style="background:linear-gradient(135deg,#0b5c3b,#f0c53b);"></div>
-          <div class="body">
-            <div class="tag-row"><span class="tag official">GE</span><span class="date">2026-05-24</span></div>
-            <div class="pt">Bruno Guimarães deixa jogo do Newcastle após atendimento médico, mas não preocupa Seleção</div>
-            <h3>布鲁诺·吉马良斯被换下，巴西队暂不担心</h3>
-            <p class="summary">布鲁诺在纽卡比赛中接受医疗处理后被换下，GE 称这是预防性调整，并非明确伤病。他仍计划按时向巴西队报到。</p>
-            <div class="score">
-              <div class="bar"><span>传播</span><span class="track"><i class="fill" style="width:80%"></i></span><strong>4/5</strong></div>
-              <div class="bar"><span>娱乐</span><span class="track"><i class="fill" style="width:40%"></i></span><strong>2/5</strong></div>
-              <div class="bar"><span>争议</span><span class="track"><i class="fill" style="width:40%"></i></span><strong>2/5</strong></div>
-            </div>
-            <a class="button" href="https://ge.globo.com/futebol/selecao-brasileira/noticia/2026/05/24/bruno-guimaraes-deixa-jogo-do-newcastle-apos-atendimento-medico-mas-tranquiliza-selecao.ghtml">查看来源</a>
-          </div>
-        </article>
-
-        <article class="card">
-          <a class="media" style="background-image:url('https://s2-ge.glbimg.com/1PdQKYUK3akpa5ymRW0Cr3snVPM=/3735x0/filters:format(jpeg)/https://i.s3.glbimg.com/v1/AUTH_bc8228b6673f488aa253bbcb03c80ec5/internal_photos/bs/2026/W/m/0Myh23TcSZ8Y1mNvpu7g/gettyimages-2277532207.jpg')" href="https://ge.globo.com/futebol/futebol-internacional/mls/noticia/2026/05/25/messi-sai-de-campo-com-dores-no-ultimo-jogo-antes-de-se-apresentar-a-selecao-tecnico-tranquiliza.ghtml"></a>
-          <div class="body">
-            <div class="tag-row"><span class="tag official">GE</span><span class="tag hot">阿根廷</span><span class="date">2026-05-25</span></div>
-            <div class="pt">Messi sai de campo com dores no último jogo antes de se apresentar à seleção</div>
-            <h3>梅西因疼痛离场，主帅称只是疲劳</h3>
-            <p class="summary">梅西在世界杯前向阿根廷队报到前的最后一场俱乐部比赛中提前离场。阿根廷是巴西区最高关注对手之一，因此具备高传播价值。</p>
-            <div class="score">
-              <div class="bar"><span>传播</span><span class="track"><i class="fill" style="width:80%"></i></span><strong>4/5</strong></div>
-              <div class="bar"><span>娱乐</span><span class="track"><i class="fill" style="width:60%"></i></span><strong>3/5</strong></div>
-              <div class="bar"><span>争议</span><span class="track"><i class="fill" style="width:60%"></i></span><strong>3/5</strong></div>
-            </div>
-            <a class="button" href="https://ge.globo.com/futebol/futebol-internacional/mls/noticia/2026/05/25/messi-sai-de-campo-com-dores-no-ultimo-jogo-antes-de-se-apresentar-a-selecao-tecnico-tranquiliza.ghtml">查看来源</a>
-          </div>
-        </article>
+      <div class="stat">
+        <div><b>1</b><span>日报归档</span></div>
+        <div><b>08:00</b><span>中国时间更新</span></div>
+        <div><b>HTML+MD</b><span>双版本</span></div>
       </div>
     </section>
-
-    <section class="section">
-      <div class="section-head">
-        <h2>模块B：巴西全网热点</h2>
-        <div class="section-note">优先短视频、趋势榜、社区讨论和多源共振；未验证的社媒内容不单独入选。</div>
-      </div>
-      <div class="grid">
-        <article class="card">
-          <a class="media" style="background-image:url('https://i.ytimg.com/vi/p4TQhIA06SY/oar2.jpg?sqp=-oaymwEkCJUDENAFSFqQAgHyq4qpAxMIARUAAAAAJQAAyEI9AICiQ3gB&rs=AOn4CLCvpwE0WytnAkR9e5K_FDAUpZUe9w&usqp=CCk')" href="https://www.youtube.com/shorts/p4TQhIA06SY"></a>
-          <div class="body">
-            <div class="tag-row"><span class="tag hot">YouTube Shorts</span><span class="date">2026-05-23</span></div>
-            <div class="pt">O Neymar sabia que seria convocado pra Copa do Mundo??</div>
-            <h3>内马尔是否早知道入选世界杯名单，引发短视频讨论</h3>
-            <p class="summary">Desimpedidos 围绕内马尔世界杯征召做娱乐化表达，叠加 GE 对其身体状态的报道，以及 Trends24 Brazil 中 Neymar 的趋势信号。</p>
-            <div class="evidence">证据：Desimpedidos YouTube Shorts、GE 巴西队报道、Trends24 Brazil 出现 Neymar。</div>
-            <a class="button" href="https://www.youtube.com/shorts/p4TQhIA06SY">查看来源</a>
+    
+      <section class="latest" style="background-image:linear-gradient(90deg,rgba(8,28,20,.88),rgba(8,28,20,.35)),url('https://s2-ge.glbimg.com/OHKW5OoiNMRxOyUbYZfMzWfNFss=/1280x0/filters:format(jpeg)/https://s03.video.glbimg.com/x720/14624354.jpg')">
+        <div>
+          <p class="eyebrow">Latest Report · 2026-05-25</p>
+          <h2>世界杯2026巴西区热点播报</h2>
+          <p>GE 报道称，阿利松在伤停两个月后代表利物浦复出；巴西队即将在 Granja Comary 集结，教练组同时持续关注内马尔的身体状态。这是巴西队世界杯备战中最直接影响阵容健康度的重点消息。</p>
+          <div class="hero-actions">
+            <a href="reports/2026-05-25.html">打开最新图文版</a>
+            <a href="reports/2026-05-25.md">查看文字版</a>
           </div>
-        </article>
-
-        <article class="card">
-          <a class="media" style="background-image:url('https://i.ytimg.com/vi/jro6vi-u7pE/maxresdefault.jpg')" href="https://www.youtube.com/watch?v=jro6vi-u7pE"></a>
-          <div class="body">
-            <div class="tag-row"><span class="tag official">CazéTV</span><span class="date">2026-05-24</span></div>
-            <div class="pt">Fred Caldeira bate um papo com Diogo Dalot sobre Copa do Mundo e Manchester United</div>
-            <h3>CazéTV 采访达洛特谈世界杯与曼联</h3>
-            <p class="summary">葡萄牙属于巴西区世界杯高关注国家之一，CazéTV 是巴西足球视频传播强源，适合作为站外热点观察。</p>
-            <div class="evidence">证据：CazéTV 官方 YouTube RSS 可抓取，标题明确包含 Copa do Mundo。</div>
-            <a class="button" href="https://www.youtube.com/watch?v=jro6vi-u7pE">查看来源</a>
-          </div>
-        </article>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <h2>模块C：站内热点预测</h2>
-        <div class="section-note">基于权威新闻和热点证据，挑选适合站内二创、投票、剪辑和评论互动的话题。</div>
-      </div>
-      <div class="grid">
-        <article class="card">
-          <a class="media" style="background-image:url('https://s2-ge.glbimg.com/OHKW5OoiNMRxOyUbYZfMzWfNFss=/1280x0/filters:format(jpeg)/https://s03.video.glbimg.com/x720/14624354.jpg')" href="https://ge.globo.com/futebol/selecao-brasileira/noticia/2026/05/24/alisson-volta-a-jogar-apos-dois-meses-e-selecao-monitora-neymar-as-vesperas-de-apresentacao.ghtml"></a>
-          <div class="body">
-            <div class="tag-row"><span class="tag hot">预测</span><span class="date">2026-05-24</span></div>
-            <div class="pt">Neymar monitorado pela Seleção pode puxar debates sobre condição física antes da Copa</div>
-            <h3>内马尔身体状态或成为站内核心讨论点</h3>
-            <p class="summary">GE 报道巴西队监测内马尔状态，Desimpedidos 又以短视频方式引发征召讨论。预计“内马尔能否扛起世界杯”会带来高互动。</p>
-            <div class="evidence">适合传播：短视频剪辑、投票互动、球迷观点征集、内马尔世界杯状态盘点。</div>
-            <a class="button" href="https://ge.globo.com/futebol/selecao-brasileira/noticia/2026/05/24/alisson-volta-a-jogar-apos-dois-meses-e-selecao-monitora-neymar-as-vesperas-de-apresentacao.ghtml">查看来源</a>
-          </div>
-        </article>
-
-        <article class="card">
-          <a class="media" style="background-image:url('https://s2-ge.glbimg.com/zjzBEFzsjHf867MYJrY6v2EueBM=/3000x0/filters:format(jpeg)/https://i.s3.glbimg.com/v1/AUTH_bc8228b6673f488aa253bbcb03c80ec5/internal_photos/bs/2026/O/B/65l3aBSGW6B5POQKfCiA/agif26051621380389.jpg')" href="https://ge.globo.com/futebol/times/palmeiras/noticia/2026/05/25/apos-liberar-piquerez-palmeiras-tem-semana-decisiva-com-sosa-de-olho-na-copa-do-mundo.ghtml"></a>
-          <div class="body">
-            <div class="tag-row"><span class="tag hot">预测</span><span class="date">2026-05-25</span></div>
-            <div class="pt">Palmeiras tem semana decisiva com Sosa de olho na Copa do Mundo</div>
-            <h3>帕尔梅拉斯外援冲刺世界杯名单，俱乐部战力或受影响</h3>
-            <p class="summary">Piquerez、Sosa 等球员围绕世界杯进行伤病恢复和国家队准备，帕尔梅拉斯可能因多名南美国脚被征召而受影响。</p>
-            <div class="evidence">适合传播：俱乐部受世界杯影响盘点、南美国脚名单预测、伤病恢复追踪。</div>
-            <a class="button" href="https://ge.globo.com/futebol/times/palmeiras/noticia/2026/05/25/apos-liberar-piquerez-palmeiras-tem-semana-decisiva-com-sosa-de-olho-na-copa-do-mundo.ghtml">查看来源</a>
-          </div>
-        </article>
-
-        <article class="card">
-          <a class="media" style="background-image:url('https://s2-ge.glbimg.com/phRusOmr70d_xRqyquYbtus-Zbg=/2048x0/filters:format(jpeg)/https://i.s3.glbimg.com/v1/AUTH_bc8228b6673f488aa253bbcb03c80ec5/internal_photos/bs/2026/9/R/y9TN9zSRaHtKyiBNcBAw/55289657060-aa84bce5bf-k.jpg')" href="https://ge.globo.com/futebol/times/botafogo/noticia/2026/05/24/barrera-sai-do-banco-salva-botafogo-com-golaco-e-mira-copa-do-mundo.ghtml"></a>
-          <div class="body">
-            <div class="tag-row"><span class="tag hot">预测</span><span class="date">2026-05-24</span></div>
-            <div class="pt">Barrera sai do banco, salva Botafogo com golaço e mira Copa do Mundo</div>
-            <h3>巴雷拉替补救主并冲击世界杯，或带动“黑马国脚”讨论</h3>
-            <p class="summary">Botafogo 的哥伦比亚球员 Barrera 替补进球后继续瞄准世界杯名单，兼具高光进球、名单悬念和俱乐部球迷讨论。</p>
-            <div class="evidence">适合传播：高光进球剪辑、世界杯黑马球员盘点、评论区预测是否入选。</div>
-            <a class="button" href="https://ge.globo.com/futebol/times/botafogo/noticia/2026/05/24/barrera-sai-do-banco-salva-botafogo-com-golaco-e-mira-copa-do-mundo.ghtml">查看来源</a>
-          </div>
-        </article>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <h2>内容筛选逻辑说明</h2>
-      </div>
-      <div class="logic">
-        <p>本次只保留 2026-05-23 至 2026-05-25 内可访问内容，核心来源为 GE Futebol RSS、GE 原文、CazéTV/Desimpedidos 官方 YouTube RSS、Trends24 Brazil。优先选择巴西国家队、世界杯名单/伤病、重点国家球星、世界杯备战影响俱乐部战力等 S/A 级内容。</p>
-        <p>X、Instagram、TikTok 账号页未作为直接证据源；X 热度用 Trends24/GetDayTrends 替代，YouTube 用官方 RSS 验证。没有足够证据的内容不入选，不凑数。</p>
-        <div class="source-strip">
-          <span>GE Globo Esporte</span>
-          <span>GE Futebol RSS</span>
-          <span>CazéTV RSS</span>
-          <span>Desimpedidos RSS</span>
-          <span>Trends24 Brazil</span>
-          <span>GetDayTrends Brazil</span>
         </div>
+      </section>
+    <section>
+      <div class="archive-head">
+        <div>
+          <p class="eyebrow">Archive</p>
+          <h3>最近日报</h3>
+        </div>
+        <p>按时间倒序排列，点击任意日期查看当天内容。</p>
+      </div>
+      <div class="reports">
+        
+        <article class="report-card">
+          <a class="thumb" style="background-image:linear-gradient(180deg,rgba(8,28,20,.08),rgba(8,28,20,.58)),url('https://s2-ge.glbimg.com/OHKW5OoiNMRxOyUbYZfMzWfNFss=/1280x0/filters:format(jpeg)/https://s03.video.glbimg.com/x720/14624354.jpg')" href="reports/2026-05-25.html">
+            <span>2026-05-25</span>
+          </a>
+          <div class="card-body">
+            <p class="eyebrow">Daily Archive</p>
+            <h3>世界杯2026巴西区热点播报</h3>
+            <p>GE 报道称，阿利松在伤停两个月后代表利物浦复出；巴西队即将在 Granja Comary 集结，教练组同时持续关注内马尔的身体状态。这是巴西队世界杯备战中最直接影响阵容健康度的重点消息。</p>
+            <div class="actions">
+              <a href="reports/2026-05-25.html">图文版</a>
+              <a href="reports/2026-05-25.md">文字版</a>
+            </div>
+          </div>
+        </article>
       </div>
     </section>
+    <footer class="footer">
+      来源策略：GE / Google News RSS / CBF / FIFA / YouTube 官方 RSS / Reddit / Trends24 / GetDayTrends。Instagram、TikTok、X账号直连若无法验证，不作为唯一证据源。
+    </footer>
   </main>
 </body>
 </html>

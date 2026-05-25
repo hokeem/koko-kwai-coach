@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+import html
+import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+REPORTS = ROOT / "reports"
+
+
+def read_title(md_text: str) -> str:
+    match = re.search(r"^#\s+(.+)$", md_text, flags=re.M)
+    return match.group(1).strip() if match else "世界杯2026巴西区热点播报"
+
+
+def read_first_summary(md_text: str) -> str:
+    match = re.search(r"背景：(?P<body>.*?)(?=\n热度等级：|\n链接：|\Z)", md_text, flags=re.S)
+    if not match:
+        return "过去3天内、真实可访问、权威来源的世界杯相关内容。"
+    return " ".join(match.group("body").strip().split())[:180]
+
+
+def read_cover(html_text: str) -> str:
+    match = re.search(r"url\('(?P<url>https?://[^']+)'\)", html_text)
+    return match.group("url") if match else ""
+
+
+def collect_reports() -> list[dict[str, str]]:
+    reports = []
+    for md_path in sorted(REPORTS.glob("*.md"), reverse=True):
+        date = md_path.stem
+        html_path = REPORTS / f"{date}.html"
+        md_text = md_path.read_text(encoding="utf-8")
+        html_text = html_path.read_text(encoding="utf-8") if html_path.exists() else ""
+        reports.append(
+            {
+                "date": date,
+                "title": read_title(md_text),
+                "summary": read_first_summary(md_text),
+                "cover": read_cover(html_text),
+                "html": f"reports/{date}.html",
+                "md": f"reports/{date}.md",
+            }
+        )
+    return reports
+
+
+def render(reports: list[dict[str, str]]) -> str:
+    latest = reports[0] if reports else None
+    cards = []
+    for report in reports:
+        cover_style = (
+            f"background-image:linear-gradient(180deg,rgba(8,28,20,.08),rgba(8,28,20,.58)),url('{html.escape(report['cover'])}')"
+            if report["cover"]
+            else "background:linear-gradient(135deg,#176b48,#f2c94c)"
+        )
+        cards.append(
+            f"""
+        <article class="report-card">
+          <a class="thumb" style="{cover_style}" href="{html.escape(report['html'])}">
+            <span>{html.escape(report['date'])}</span>
+          </a>
+          <div class="card-body">
+            <p class="eyebrow">Daily Archive</p>
+            <h3>{html.escape(report['title'])}</h3>
+            <p>{html.escape(report['summary'])}</p>
+            <div class="actions">
+              <a href="{html.escape(report['html'])}">图文版</a>
+              <a href="{html.escape(report['md'])}">文字版</a>
+            </div>
+          </div>
+        </article>"""
+        )
+
+    latest_block = ""
+    if latest:
+        latest_cover = (
+            f"background-image:linear-gradient(90deg,rgba(8,28,20,.88),rgba(8,28,20,.35)),url('{html.escape(latest['cover'])}')"
+            if latest["cover"]
+            else "background:linear-gradient(135deg,#10281e,#176b48 50%,#f2c94c)"
+        )
+        latest_block = f"""
+      <section class="latest" style="{latest_cover}">
+        <div>
+          <p class="eyebrow">Latest Report · {html.escape(latest['date'])}</p>
+          <h2>{html.escape(latest['title'])}</h2>
+          <p>{html.escape(latest['summary'])}</p>
+          <div class="hero-actions">
+            <a href="{html.escape(latest['html'])}">打开最新图文版</a>
+            <a href="{html.escape(latest['md'])}">查看文字版</a>
+          </div>
+        </div>
+      </section>"""
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>世界杯2026巴西区热点播报</title>
+  <style>
+    :root {{
+      --ink:#17212b;
+      --muted:#66737f;
+      --line:#dce4ea;
+      --paper:#f6faf7;
+      --green:#176b48;
+      --yellow:#f2c94c;
+      --blue:#1e5f94;
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{
+      margin:0;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Arial,sans-serif;
+      color:var(--ink);
+      background:var(--paper);
+      line-height:1.55;
+    }}
+    a {{ color:inherit; text-decoration:none; }}
+    .topbar {{
+      border-bottom:1px solid var(--line);
+      background:#fff;
+      position:sticky;
+      top:0;
+      z-index:3;
+    }}
+    .topbar-inner {{
+      max-width:1180px;
+      margin:0 auto;
+      padding:14px 22px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:16px;
+    }}
+    .brand {{ font-weight:900; color:var(--green); }}
+    .topbar span {{ color:var(--muted); font-size:13px; }}
+    .wrap {{ max-width:1180px; margin:0 auto; padding:28px 22px 72px; }}
+    .latest {{
+      min-height:430px;
+      background-size:cover;
+      background-position:center;
+      color:#fff;
+      display:flex;
+      align-items:end;
+      padding:32px;
+      margin-bottom:30px;
+    }}
+    .latest div {{ max-width:760px; }}
+    .eyebrow {{
+      margin:0 0 8px;
+      color:var(--blue);
+      font-size:12px;
+      font-weight:900;
+      letter-spacing:.04em;
+      text-transform:uppercase;
+    }}
+    .latest .eyebrow {{ color:rgba(255,255,255,.8); }}
+    h1 {{
+      margin:0 0 18px;
+      font-size:clamp(34px,5vw,68px);
+      line-height:1.04;
+      letter-spacing:0;
+    }}
+    h2 {{
+      margin:0 0 12px;
+      font-size:clamp(32px,5vw,60px);
+      line-height:1.05;
+      letter-spacing:0;
+    }}
+    h3 {{ margin:0 0 8px; font-size:22px; line-height:1.25; }}
+    .latest p:not(.eyebrow) {{ color:rgba(255,255,255,.88); font-size:17px; max-width:680px; }}
+    .hero-actions, .actions {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; }}
+    .hero-actions a {{
+      border:1px solid rgba(255,255,255,.78);
+      padding:10px 14px;
+      font-weight:900;
+      background:rgba(255,255,255,.12);
+    }}
+    .intro {{
+      display:grid;
+      grid-template-columns:1.2fr .8fr;
+      gap:18px;
+      margin-bottom:24px;
+      align-items:end;
+    }}
+    .intro p {{ margin:0; color:var(--muted); }}
+    .stat {{
+      display:grid;
+      grid-template-columns:repeat(3,1fr);
+      gap:10px;
+    }}
+    .stat div {{
+      background:#fff;
+      border:1px solid var(--line);
+      padding:14px;
+    }}
+    .stat b {{ display:block; font-size:24px; color:var(--green); }}
+    .archive-head {{
+      display:flex;
+      justify-content:space-between;
+      align-items:end;
+      border-top:3px solid var(--ink);
+      padding-top:18px;
+      margin:30px 0 16px;
+    }}
+    .archive-head p {{ margin:0; color:var(--muted); font-size:14px; }}
+    .reports {{
+      display:grid;
+      grid-template-columns:repeat(3,1fr);
+      gap:16px;
+    }}
+    .report-card {{
+      background:#fff;
+      border:1px solid var(--line);
+      min-height:100%;
+      display:flex;
+      flex-direction:column;
+    }}
+    .thumb {{
+      min-height:210px;
+      background-size:cover !important;
+      background-position:center !important;
+      display:flex;
+      align-items:end;
+      padding:14px;
+      color:#fff;
+      font-weight:900;
+    }}
+    .thumb span {{ background:rgba(12,30,20,.82); padding:6px 9px; }}
+    .card-body {{ padding:18px; display:flex; flex-direction:column; flex:1; }}
+    .card-body p:not(.eyebrow) {{ color:#3d4a55; margin:0; }}
+    .actions {{ margin-top:auto; padding-top:18px; }}
+    .actions a {{
+      border:1px solid var(--ink);
+      padding:8px 11px;
+      font-size:13px;
+      font-weight:900;
+      background:#fff;
+    }}
+    .footer {{
+      margin-top:40px;
+      padding:20px;
+      background:#14251d;
+      color:rgba(255,255,255,.84);
+      font-size:14px;
+    }}
+    @media (max-width:900px) {{
+      .intro, .reports, .stat {{ grid-template-columns:1fr; }}
+      .latest {{ min-height:360px; padding:24px; }}
+      .archive-head {{ display:block; }}
+    }}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="./">世界杯2026巴西区热点播报</a>
+      <span>每日 08:00 更新 · 图文版 + 文字版归档</span>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="intro">
+      <div>
+        <p class="eyebrow">Brazil Watch Desk</p>
+        <h1>每日世界杯热点资讯站</h1>
+        <p>按日期归档每天的图文版和文字版日报。内容只保留过去3天内、真实可访问、权威来源的世界杯相关信息。</p>
+      </div>
+      <div class="stat">
+        <div><b>{len(reports)}</b><span>日报归档</span></div>
+        <div><b>08:00</b><span>中国时间更新</span></div>
+        <div><b>HTML+MD</b><span>双版本</span></div>
+      </div>
+    </section>
+    {latest_block}
+    <section>
+      <div class="archive-head">
+        <div>
+          <p class="eyebrow">Archive</p>
+          <h3>最近日报</h3>
+        </div>
+        <p>按时间倒序排列，点击任意日期查看当天内容。</p>
+      </div>
+      <div class="reports">
+        {''.join(cards)}
+      </div>
+    </section>
+    <footer class="footer">
+      来源策略：GE / Google News RSS / CBF / FIFA / YouTube 官方 RSS / Reddit / Trends24 / GetDayTrends。Instagram、TikTok、X账号直连若无法验证，不作为唯一证据源。
+    </footer>
+  </main>
+</body>
+</html>
+"""
+
+
+def main() -> int:
+    reports = collect_reports()
+    (ROOT / "index.html").write_text(render(reports), encoding="utf-8")
+    print(f"Built index.html with {len(reports)} report(s).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
