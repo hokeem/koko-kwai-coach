@@ -40,6 +40,7 @@ SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTIO
 SOURCE_VIDEO_EXTENDED_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_EXTENDED_RETENTION_DAYS", "30"))
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "14"))
 MAX_CONCURRENT_FILTERS = max(1, int(os.environ.get("VIDEO_FILTER_MAX_CONCURRENT_JOBS", "1")))
+FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def stage_timeout(name: str, default: int) -> int:
@@ -68,6 +69,8 @@ RESULTS_ROOT = DATA_ROOT / "results"
 LIBRARY_FILE = DATA_ROOT / "script_library.json"
 ERROR_CASE_LIBRARY_FILE = DATA_ROOT / "error_case_library.json"
 FILTER_JOBS_FILE = DATA_ROOT / "filter_jobs.json"
+FILTER_CACHE_ROOT = DATA_ROOT / "filter_cache"
+VISION_MODELS_DIR = DATA_ROOT / "vision_models"
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 ERROR_CASE_PASSWORD = "kwai666"
 ERROR_CASE_AUTH_COOKIE = "koko_error_case_auth"
@@ -119,6 +122,11 @@ try:
     from docx import Document
 except Exception:
     Document = None
+
+try:
+    import cv2  # type: ignore
+except Exception:
+    cv2 = None
 
 try:
     from hybrid_v2_pipeline import (
@@ -1069,6 +1077,243 @@ def fetch_kwai_light_metadata(url: str) -> dict[str, Any]:
     }
 
 
+GENDER_PROTO_URL = "https://raw.githubusercontent.com/spmallick/learnopencv/master/AgeGender/gender_deploy.prototxt"
+GENDER_MODEL_URL = "https://raw.githubusercontent.com/GilLevi/AgeGenderDeepLearning/master/models/gender_net.caffemodel"
+FACE_PROTO_URL = "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt"
+FACE_MODEL_URL = "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20180205_fp16/res10_300x300_ssd_iter_140000_fp16.caffemodel"
+GENDER_MODEL_MEAN_VALUES = (78.4263377603, 87.7689143744, 114.895847746)
+GENDER_LABELS = ["male", "female"]
+_gender_net_lock = threading.Lock()
+_gender_net_cache: Any = None
+_face_net_lock = threading.Lock()
+_face_net_cache: Any = None
+
+
+def parse_duration_seconds(duration_text: object) -> float:
+    text = str(duration_text or "").strip()
+    if not text:
+        return 0.0
+    match = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?", text)
+    if not match:
+        return 0.0
+    hours = float(match.group(1) or 0)
+    minutes = float(match.group(2) or 0)
+    seconds = float(match.group(3) or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def download_url_to_file(url: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=60) as response, target.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+
+
+def ensure_gender_net() -> Any:
+    if cv2 is None:
+        raise RuntimeError("cv2 not available")
+    global _gender_net_cache
+    with _gender_net_lock:
+        if _gender_net_cache is not None:
+            return _gender_net_cache
+        proto_path = VISION_MODELS_DIR / "gender_deploy.prototxt"
+        model_path = VISION_MODELS_DIR / "gender_net.caffemodel"
+        if not proto_path.exists():
+            download_url_to_file(GENDER_PROTO_URL, proto_path)
+        if not model_path.exists():
+            download_url_to_file(GENDER_MODEL_URL, model_path)
+        _gender_net_cache = cv2.dnn.readNet(str(model_path), str(proto_path))
+        return _gender_net_cache
+
+
+def ensure_face_net() -> Any:
+    if cv2 is None:
+        raise RuntimeError("cv2 not available")
+    global _face_net_cache
+    with _face_net_lock:
+        if _face_net_cache is not None:
+            return _face_net_cache
+        proto_path = VISION_MODELS_DIR / "face_deploy.prototxt"
+        model_path = VISION_MODELS_DIR / "face_res10_fp16.caffemodel"
+        if not proto_path.exists():
+            download_url_to_file(FACE_PROTO_URL, proto_path)
+        if not model_path.exists():
+            download_url_to_file(FACE_MODEL_URL, model_path)
+        _face_net_cache = cv2.dnn.readNet(str(model_path), str(proto_path))
+        return _face_net_cache
+
+
+def detect_faces_dnn(image: Any, *, min_confidence: float = 0.45, min_face_size: int = 24) -> list[tuple[int, int, int, int]]:
+    if cv2 is None or image is None:
+        return []
+    net = ensure_face_net()
+    (height, width) = image.shape[:2]
+    blob = cv2.dnn.blobFromImage(cv2.resize(image, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
+    net.setInput(blob)
+    detections = net.forward()
+    faces: list[tuple[int, int, int, int]] = []
+    for i in range(detections.shape[2]):
+        confidence = float(detections[0, 0, i, 2])
+        if confidence < min_confidence:
+            continue
+        box = detections[0, 0, i, 3:7] * [width, height, width, height]
+        x1, y1, x2, y2 = box.astype(int)
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(width, x2)
+        y2 = min(height, y2)
+        if (x2 - x1) < min_face_size or (y2 - y1) < min_face_size:
+            continue
+        faces.append((x1, y1, x2, y2))
+    return faces
+
+
+def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir: Path) -> list[Path]:
+    if not content_url:
+        return []
+    try:
+        import imageio_ffmpeg  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"imageio_ffmpeg unavailable: {exc}") from exc
+    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    duration = duration_seconds if duration_seconds > 1 else 8.0
+    timestamps = [0.2, max(duration * 0.5, 0.4), max(duration - 0.4, 0.6)]
+    names = ["start.jpg", "middle.jpg", "end.jpg"]
+    frames: list[Path] = []
+    for ts, name in zip(timestamps, names):
+        out_path = out_dir / name
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-ss",
+            f"{max(ts, 0):.2f}",
+            "-i",
+            content_url,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=360:-1",
+            str(out_path),
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            frames.append(out_path)
+    return frames
+
+
+def count_thumbnail_faces(thumbnail_url: str, cache_dir: Path) -> dict[str, Any]:
+    if cv2 is None or not thumbnail_url:
+        return {"available": False, "face_count": 0}
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    thumb_path = cache_dir / "thumbnail.webp"
+    try:
+        if not thumb_path.exists():
+            download_url_to_file(thumbnail_url, thumb_path)
+        image = cv2.imread(str(thumb_path))
+        if image is None:
+            return {"available": False, "face_count": 0}
+        faces = detect_faces_dnn(image, min_confidence=0.4, min_face_size=24)
+        return {"available": True, "face_count": len(faces), "path": str(thumb_path)}
+    except Exception:
+        return {"available": False, "face_count": 0}
+
+
+def detect_gender_presence_from_frames(content_url: str, duration_text: object, cache_dir: Path) -> dict[str, Any]:
+    if cv2 is None:
+        return {"available": False, "reason": "cv2 unavailable", "bucket": "low", "signals": [], "score_boost": 0}
+    if not content_url:
+        return {"available": False, "reason": "content url missing", "bucket": "low", "signals": [], "score_boost": 0}
+    duration_seconds = parse_duration_seconds(duration_text)
+    frames = extract_remote_keyframes(content_url, duration_seconds, cache_dir)
+    if not frames:
+        return {"available": False, "reason": "frames unavailable", "bucket": "low", "signals": [], "score_boost": 0}
+    gender_net = ensure_gender_net()
+    male_count = 0
+    female_count = 0
+    pair_frames = 0
+    inspected_frames = 0
+    face_total = 0
+    max_faces_single_frame = 0
+    frame_summaries: list[dict[str, Any]] = []
+    for frame_path in frames:
+        image = cv2.imread(str(frame_path))
+        if image is None:
+            continue
+        inspected_frames += 1
+        faces = detect_faces_dnn(image, min_confidence=0.45, min_face_size=24)
+        frame_male = 0
+        frame_female = 0
+        face_total += len(faces)
+        max_faces_single_frame = max(max_faces_single_frame, len(faces))
+        for (x1, y1, x2, y2) in faces:
+            face = image[y1:y2, x1:x2]
+            if face.size == 0:
+                continue
+            blob = cv2.dnn.blobFromImage(
+                cv2.resize(face, (227, 227)),
+                1.0,
+                (227, 227),
+                GENDER_MODEL_MEAN_VALUES,
+                swapRB=False,
+            )
+            gender_net.setInput(blob)
+            preds = gender_net.forward()[0]
+            label = GENDER_LABELS[int(preds.argmax())]
+            if label == "male":
+                male_count += 1
+                frame_male += 1
+            elif label == "female":
+                female_count += 1
+                frame_female += 1
+        if len(faces) == 2 and frame_male == 1 and frame_female == 1:
+            pair_frames += 1
+        frame_summaries.append(
+            {
+                "name": frame_path.name,
+                "face_count": len(faces),
+                "male_count": frame_male,
+                "female_count": frame_female,
+                "is_pair_frame": len(faces) == 2 and frame_male == 1 and frame_female == 1,
+            }
+        )
+    has_both = male_count > 0 and female_count > 0
+    signals: list[str] = []
+    score_boost = 0
+    bucket = "low"
+    if max_faces_single_frame >= 3:
+        signals.append(f"关键帧出现三人及以上主场景（单帧最多 {max_faces_single_frame} 张脸）")
+        bucket = "low"
+    elif pair_frames >= 1:
+        signals.append("至少一帧满足双人一男一女主场景")
+        score_boost += 8
+        bucket = "high"
+    elif has_both:
+        signals.append(f"跨帧检测到男女都出现过（男 {male_count} / 女 {female_count}），但没有稳定双人主场景")
+        bucket = "low"
+    elif male_count > 0 or female_count > 0:
+        signals.append(f"关键帧只稳定检测到单一性别（男 {male_count} / 女 {female_count}）")
+        bucket = "low"
+    else:
+        signals.append("关键帧里未稳定识别出可用人脸")
+    return {
+        "available": True,
+        "frame_count": len(frames),
+        "inspected_frames": inspected_frames,
+        "face_total": face_total,
+        "male_count": male_count,
+        "female_count": female_count,
+        "pair_frames": pair_frames,
+        "has_both": has_both,
+        "max_faces_single_frame": max_faces_single_frame,
+        "frame_summaries": frame_summaries,
+        "bucket": bucket,
+        "signals": signals,
+        "score_boost": score_boost,
+        "frame_paths": [str(path) for path in frames],
+    }
+
+
 COUPLE_KEYWORDS = {
     "high": [
         "casal", "marido", "esposa", "husband", "wife", "老公", "老婆", "丈夫", "妻子", "夫妻",
@@ -1081,8 +1326,33 @@ COUPLE_KEYWORDS = {
     ],
 }
 
+EXPLICIT_SPOUSE_TERMS = {
+    "casal", "marido", "esposa", "husband", "wife", "老公", "老婆", "丈夫", "妻子", "夫妻"
+}
 
-def score_couple_candidate(metadata: dict[str, Any]) -> dict[str, Any]:
+
+def has_duo_creator_signal(metadata: dict[str, Any]) -> bool:
+    creator_name = str(metadata.get("creator_name") or "").strip().lower()
+    creator_handle = str(metadata.get("creator_handle") or "").strip().lower()
+    if not creator_name:
+        return False
+    duo_markers = [" e ", " & ", " and ", "+", "/"]
+    if any(marker in creator_name for marker in duo_markers):
+        return True
+    if any(marker in creator_handle for marker in duo_markers):
+        return True
+    return False
+
+
+def has_explicit_spouse_signal(metadata: dict[str, Any]) -> bool:
+    combined = "\n".join(
+        str(metadata.get(key) or "")
+        for key in ("title", "description", "transcript")
+    ).lower()
+    return any(term in combined for term in EXPLICIT_SPOUSE_TERMS)
+
+
+def score_couple_candidate(metadata: dict[str, Any], visual: dict[str, Any] | None = None) -> dict[str, Any]:
     combined = "\n".join(
         str(metadata.get(key) or "")
         for key in ("title", "description", "transcript", "creator_description", "creator_name", "creator_handle")
@@ -1108,22 +1378,75 @@ def score_couple_candidate(metadata: dict[str, Any]) -> dict[str, Any]:
     if "casal" in str(metadata.get("creator_description") or "").lower():
         score += 2
         reasons.append("账号简介包含 casal")
+    visual_bucket = "low"
+    if visual:
+        visual_bucket = str(visual.get("bucket") or "low").strip().lower()
+        score += int(visual.get("score_boost") or 0)
+        reasons.extend(
+            str(signal or "").strip()
+            for signal in (visual.get("signals") or [])
+            if str(signal or "").strip()
+        )
     if score >= 8:
         bucket = "high"
     elif score >= 4:
         bucket = "medium"
     else:
         bucket = "low"
-    return {"score": score, "bucket": bucket, "reasons": reasons}
+    return {"score": score, "bucket": bucket, "reasons": reasons, "visual_bucket": visual_bucket}
 
 
-def classify_couple_candidate_with_llm(metadata: dict[str, Any], heuristic: dict[str, Any]) -> dict[str, Any]:
-    if not GOOGLE_API_KEY or run_text_json_prompt_with_fallback is None:
+def classify_couple_candidate(metadata: dict[str, Any], heuristic: dict[str, Any], visual: dict[str, Any] | None = None) -> dict[str, Any]:
+    visual_data = visual or {}
+    max_faces_single_frame = int(visual_data.get("max_faces_single_frame") or 0)
+    pair_frames = int(visual_data.get("pair_frames") or 0)
+    thumbnail_face_count = int((visual_data.get("thumbnail_faces") or {}).get("face_count") or 0)
+    explicit_spouse = has_explicit_spouse_signal(metadata)
+    duo_creator = has_duo_creator_signal(metadata)
+    if max_faces_single_frame >= 3 or thumbnail_face_count >= 3:
         return {
-            "bucket": heuristic.get("bucket") or "low",
-            "confidence": "medium" if heuristic.get("bucket") in {"high", "medium"} else "low",
-            "reason": "使用关键词与页面公开信息做初筛。",
-            "signals": heuristic.get("reasons") or [],
+            "bucket": "low",
+            "confidence": "high",
+            "reason": "关键帧或封面明显出现三人及以上，不判为夫妻双人主场景。",
+            "signals": (
+                [f"关键帧单帧最多 {max_faces_single_frame} 张脸"] if max_faces_single_frame >= 3 else []
+            ) + ([f"封面检测到 {thumbnail_face_count} 张脸"] if thumbnail_face_count >= 3 else []),
+            "used_llm": False,
+        }
+    if pair_frames >= 1:
+        return {
+            "bucket": "high",
+            "confidence": "high",
+            "reason": "关键帧里出现了明确的双人一男一女主场景。",
+            "signals": [str(signal or "").strip() for signal in (visual_data.get("signals") or []) if str(signal or "").strip()][:4]
+            or ["至少一帧满足双人一男一女主场景"],
+            "used_llm": False,
+        }
+    if explicit_spouse:
+        return {
+            "bucket": "high",
+            "confidence": "medium",
+            "reason": "标题或转写里出现了明确的配偶关系词，判为夫妻候选。",
+            "signals": ["命中明确配偶关系词"] + (heuristic.get("reasons") or [])[:3],
+            "used_llm": False,
+        }
+    if duo_creator and 1 <= thumbnail_face_count <= 2:
+        return {
+            "bucket": "high",
+            "confidence": "medium",
+            "reason": "账号明显是双人组合，且封面未出现三人以上，判为夫妻候选。",
+            "signals": [f"账号名呈现双人组合", f"封面检测到 {thumbnail_face_count} 张脸"],
+            "used_llm": False,
+        }
+    if not FILTER_USE_LLM or not GOOGLE_API_KEY or run_text_json_prompt_with_fallback is None:
+        return {
+            "bucket": "low",
+            "confidence": "high" if max_faces_single_frame >= 1 or thumbnail_face_count >= 1 else "medium",
+            "reason": "未满足双人一男一女主场景，也没有命中明确的夫妻候选信号。",
+            "signals": (
+                [str(signal or "").strip() for signal in (visual_data.get("signals") or []) if str(signal or "").strip()][:2]
+                + (heuristic.get("reasons") or [])[:2]
+            )[:4],
             "used_llm": False,
         }
     prompt = f"""
@@ -1153,6 +1476,7 @@ def classify_couple_candidate_with_llm(metadata: dict[str, Any], heuristic: dict
 账号名：{metadata.get("creator_name") or ""}
 账号简介：{metadata.get("creator_description") or ""}
 启发式结果：{json.dumps(heuristic, ensure_ascii=False)}
+关键帧视觉结果：{json.dumps(visual_data, ensure_ascii=False)}
 """.strip()
     models = unique_models(os.environ.get("VIDEO_FILTER_MODEL", "gemini-2.5-flash-lite"), *PRIMARY_FALLBACK_MODELS)
     payload = {
@@ -1163,6 +1487,7 @@ def classify_couple_candidate_with_llm(metadata: dict[str, Any], heuristic: dict
         "creator_name": metadata.get("creator_name") or "",
         "creator_description": metadata.get("creator_description") or "",
         "heuristic": heuristic,
+        "visual": visual_data,
         "schema": {
             "type": "object",
             "properties": {
@@ -3658,6 +3983,8 @@ def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_filter_item_view(item: dict[str, Any]) -> dict[str, Any]:
+    visual = item.get("visual") or {}
+    thumbnail_faces = visual.get("thumbnail_faces") or {}
     return {
         "id": str(item.get("id") or "").strip(),
         "index": int(item.get("index") or 0),
@@ -3673,13 +4000,28 @@ def public_filter_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "score": item.get("score") or 0,
         "thumbnail_url": item.get("thumbnail_url") or "",
         "metadata": item.get("metadata") or {},
+        "visual": {
+            "available": bool(visual.get("available")),
+            "frame_count": int(visual.get("frame_count") or 0),
+            "inspected_frames": int(visual.get("inspected_frames") or 0),
+            "male_count": int(visual.get("male_count") or 0),
+            "female_count": int(visual.get("female_count") or 0),
+            "pair_frames": int(visual.get("pair_frames") or 0),
+            "has_both": bool(visual.get("has_both")),
+            "max_faces_single_frame": int(visual.get("max_faces_single_frame") or 0),
+            "frame_summaries": visual.get("frame_summaries") or [],
+            "thumbnail_faces": {
+                "available": bool(thumbnail_faces.get("available")),
+                "face_count": int(thumbnail_faces.get("face_count") or 0),
+            },
+        },
         "error": item.get("error") or "",
     }
 
 
 def public_filter_job_view(job: dict[str, Any]) -> dict[str, Any]:
     items = [public_filter_item_view(item) for item in (job.get("items") or [])]
-    matched = [item for item in items if item.get("bucket") in {"high", "medium"}]
+    matched = [item for item in items if item.get("bucket") == "high"]
     return {
         "id": str(job.get("id") or "").strip(),
         "status": job.get("status") or "",
@@ -3773,12 +4115,12 @@ def finalize_filter_job(job_id: str) -> None:
             return
         items = job.get("items") or []
         statuses = [str(item.get("status") or "").strip() for item in items]
-        matched = sum(1 for item in items if str(item.get("bucket") or "").strip() in {"high", "medium"})
+        matched = sum(1 for item in items if str(item.get("bucket") or "").strip() == "high")
         if items and all(status == "completed" for status in statuses):
             job["status"] = "completed"
             job["stage"] = "completed"
             job["stage_message"] = f"Completed {len(items)}/{len(items)} items."
-            job["message"] = f"已筛出 {matched} 条可能属于夫妻类型的视频。"
+            job["message"] = f"已筛出 {matched} 条通过“双人一男一女主场景”规则的视频。"
         elif any(status == "running" for status in statuses):
             job["status"] = "running"
         elif any(status == "queued" for status in statuses):
@@ -3802,7 +4144,31 @@ def run_filter_job(job_id: str) -> None:
         update_filter_item(job_id, index, status="running", stage="metadata", stage_message="正在抓取页面公开信息。")
         try:
             metadata = fetch_kwai_light_metadata(str(item.get("video_url") or "").strip())
-            heuristic = score_couple_candidate(metadata)
+            cache_dir = FILTER_CACHE_ROOT / job_id / str(item.get("id") or f"item-{index}")
+            update_filter_item(
+                job_id,
+                index,
+                stage="frames",
+                stage_message="正在抽取关键帧。",
+                metadata=metadata,
+                thumbnail_url=metadata.get("thumbnail_url") or "",
+            )
+            try:
+                visual = detect_gender_presence_from_frames(
+                    str(metadata.get("content_url") or "").strip(),
+                    metadata.get("duration"),
+                    cache_dir,
+                )
+            except Exception as exc:
+                visual = {
+                    "available": False,
+                    "reason": f"visual fallback: {exc}",
+                    "bucket": "low",
+                    "signals": ["关键帧男女识别失败，已回退到文本初筛。"],
+                    "score_boost": 0,
+                }
+            visual["thumbnail_faces"] = count_thumbnail_faces(str(metadata.get("thumbnail_url") or "").strip(), cache_dir)
+            heuristic = score_couple_candidate(metadata, visual)
             update_filter_item(
                 job_id,
                 index,
@@ -3811,8 +4177,9 @@ def run_filter_job(job_id: str) -> None:
                 metadata=metadata,
                 thumbnail_url=metadata.get("thumbnail_url") or "",
                 score=heuristic.get("score") or 0,
+                visual=visual,
             )
-            decision = classify_couple_candidate_with_llm(metadata, heuristic)
+            decision = classify_couple_candidate(metadata, heuristic, visual)
             update_filter_item(
                 job_id,
                 index,
@@ -3826,6 +4193,7 @@ def run_filter_job(job_id: str) -> None:
                 metadata=metadata,
                 thumbnail_url=metadata.get("thumbnail_url") or "",
                 score=heuristic.get("score") or 0,
+                visual=visual,
             )
             any_completed = True
         except Exception as exc:
@@ -7256,9 +7624,8 @@ def studio_html() -> str:
     }}
 
     function filterBucketLabel(bucket) {{
-      if (bucket === "high") return "高概率夫妻类型";
-      if (bucket === "medium") return "疑似夫妻类型";
-      if (bucket === "low") return "非夫妻类型";
+      if (bucket === "high") return "通过";
+      if (bucket === "low") return "不通过";
       return "待判断";
     }}
 
@@ -8081,7 +8448,7 @@ def studio_html() -> str:
               <div class="queue-url"><span class="queue-link-icon">🔗</span>${{escapeHtml(url)}}</div>
             </li>
           `).join("")
-        : `<li><div class="queue-stage">当前还没有命中“夫妻类型”的链接。</div></li>`;
+        : `<li><div class="queue-stage">当前还没有通过“双人一男一女主场景”规则的链接。</div></li>`;
       const itemCards = items.map((item, index) => {{
         const title = item.display_name || parseVideoDisplayName(item.video_url || "", index);
         const bucket = String(item.bucket || "").trim();
@@ -8090,9 +8457,20 @@ def studio_html() -> str:
         const reason = String(item.reason || "").trim();
         const stageMessage = String(item.stage_message || "").trim();
         const signals = Array.isArray(item.signals) ? item.signals : [];
+        const visual = item.visual && typeof item.visual === "object" ? item.visual : {{}};
         const meta = [];
         if (item.confidence) meta.push(`置信度：${{escapeHtml(item.confidence)}}`);
-        if (typeof item.score === "number" && item.score) meta.push(`启发式分数：${{escapeHtml(item.score)}}`);
+        const frameStats = [];
+        if (typeof visual.inspected_frames === "number" && visual.inspected_frames) frameStats.push(`抽帧：${{escapeHtml(String(visual.inspected_frames))}}`);
+        if (typeof visual.pair_frames === "number") frameStats.push(`双人一男一女帧：${{escapeHtml(String(visual.pair_frames))}}`);
+        if (typeof visual.max_faces_single_frame === "number" && visual.max_faces_single_frame) frameStats.push(`单帧最多人脸：${{escapeHtml(String(visual.max_faces_single_frame))}}`);
+        if (typeof visual.male_count === "number" || typeof visual.female_count === "number") {{
+          frameStats.push(`男脸：${{escapeHtml(String(visual.male_count || 0))}} · 女脸：${{escapeHtml(String(visual.female_count || 0))}}`);
+        }}
+        const thumbnailFaceCount = visual.thumbnail_faces && typeof visual.thumbnail_faces.face_count === "number"
+          ? visual.thumbnail_faces.face_count
+          : 0;
+        if (thumbnailFaceCount) frameStats.push(`封面人脸：${{escapeHtml(String(thumbnailFaceCount))}}`);
         const signalMarkup = signals.length ? `<div class="progress-meta">${{signals.map((signal) => `<span class="progress-meta-chip">${{escapeHtml(signal)}}</span>`).join("")}}</div>` : "";
         return `
           <article class="queue-card ${{status === "completed" && bucket === "high" ? "current" : ""}}">
@@ -8105,6 +8483,7 @@ def studio_html() -> str:
             ${{thumb ? `<div class="queue-url"><span class="queue-link-icon">🖼️</span>${{escapeHtml(thumb)}}</div>` : ""}}
             <div class="queue-stage">${{escapeHtml(stageMessage || filterStageLabel(item.stage))}}</div>
             ${{meta.length ? `<div class="queue-stage">${{meta.join(" · ")}}</div>` : ""}}
+            ${{frameStats.length ? `<div class="queue-stage">${{frameStats.join(" · ")}}</div>` : ""}}
             ${{reason ? `<div class="queue-stage">${{escapeHtml(reason)}}</div>` : ""}}
             ${{signalMarkup}}
             ${{item.error ? `<div class="queue-error">${{escapeHtml(item.error)}}</div>` : ""}}
@@ -8118,27 +8497,27 @@ def studio_html() -> str:
           <section class="batch-overview">
             <div class="overview-header">
               <div>
-                <h3>夫妻类型候选结果</h3>
-                <p>${{escapeHtml(data?.message || "Koko 正在按页面信息与轻量规则判断夫妻候选。")}}</p>
+                <h3>双人男女主场景筛选结果</h3>
+                <p>${{escapeHtml(data?.message || "Koko 正在按关键帧中的“双人一男一女主场景”规则做轻量筛选。")}}</p>
               </div>
             </div>
             <div class="overview-stats">
               <div class="overview-stat"><span>输入链接</span><strong>${{Number(data?.input_count || items.length || 0)}}</strong></div>
-              <div class="overview-stat"><span>命中候选</span><strong>${{Number(data?.matched_count || matchedLinks.length || 0)}}</strong></div>
+              <div class="overview-stat"><span>通过规则</span><strong>${{Number(data?.matched_count || matchedLinks.length || 0)}}</strong></div>
               <div class="overview-stat"><span>当前阶段</span><strong>${{escapeHtml(filterStageLabel(data?.stage || "queued"))}}</strong></div>
             </div>
           </section>
           <section class="queue-shell">
             <div class="queue-header">
-              <h3>命中链接</h3>
-              <p>高概率和疑似夫妻类型的链接会优先列在这里，便于后续一键送去视频拆解。</p>
+              <h3>通过链接</h3>
+              <p>这里只保留通过“双人一男一女主场景”规则的链接，便于后续送去视频拆解。</p>
             </div>
             <ul class="queue-list">${{matchedMarkup}}</ul>
           </section>
           <section class="queue-shell">
             <div class="queue-header">
               <h3>逐条筛选明细</h3>
-              <p>基于公开页面信息做轻量识别，不下载整条视频。</p>
+              <p>基于公开页面信息和远程 3 帧做人脸与性别识别，不下载整条视频。</p>
             </div>
             <div class="queue-list">${{itemCards}}</div>
           </section>
@@ -8167,7 +8546,7 @@ def studio_html() -> str:
           return;
         }}
         if (data.status === "completed") {{
-          showToast("筛选完成", `已筛出 ${{Number(data.matched_count || 0)}} 条可能属于夫妻类型的视频。`);
+          showToast("筛选完成", `已筛出 ${{Number(data.matched_count || 0)}} 条通过“双人一男一女主场景”规则的视频。`);
           return;
         }}
       }} catch (error) {{
