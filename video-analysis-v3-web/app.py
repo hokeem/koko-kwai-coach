@@ -1087,6 +1087,10 @@ _gender_net_lock = threading.Lock()
 _gender_net_cache: Any = None
 _face_net_lock = threading.Lock()
 _face_net_cache: Any = None
+_haar_face_lock = threading.Lock()
+_haar_face_cache: Any = None
+_haar_profile_lock = threading.Lock()
+_haar_profile_cache: Any = None
 
 
 def parse_duration_seconds(duration_text: object) -> float:
@@ -1143,6 +1147,34 @@ def ensure_face_net() -> Any:
         return _face_net_cache
 
 
+def ensure_haar_face_cascade() -> Any:
+    if cv2 is None:
+        raise RuntimeError("cv2 not available")
+    global _haar_face_cache
+    with _haar_face_lock:
+        if _haar_face_cache is not None:
+            return _haar_face_cache
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        if cascade.empty():
+            raise RuntimeError("failed to load frontal face cascade")
+        _haar_face_cache = cascade
+        return _haar_face_cache
+
+
+def ensure_haar_profile_cascade() -> Any:
+    if cv2 is None:
+        raise RuntimeError("cv2 not available")
+    global _haar_profile_cache
+    with _haar_profile_lock:
+        if _haar_profile_cache is not None:
+            return _haar_profile_cache
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
+        if cascade.empty():
+            raise RuntimeError("failed to load profile face cascade")
+        _haar_profile_cache = cascade
+        return _haar_profile_cache
+
+
 def detect_faces_dnn(image: Any, *, min_confidence: float = 0.45, min_face_size: int = 24) -> list[tuple[int, int, int, int]]:
     if cv2 is None or image is None:
         return []
@@ -1166,6 +1198,55 @@ def detect_faces_dnn(image: Any, *, min_confidence: float = 0.45, min_face_size:
             continue
         faces.append((x1, y1, x2, y2))
     return faces
+
+
+def dedupe_face_boxes(boxes: list[tuple[int, int, int, int]], iou_threshold: float = 0.35) -> list[tuple[int, int, int, int]]:
+    if not boxes:
+        return []
+    kept: list[tuple[int, int, int, int]] = []
+    for box in sorted(boxes, key=lambda item: (item[2] - item[0]) * (item[3] - item[1]), reverse=True):
+        x1, y1, x2, y2 = box
+        keep = True
+        for kx1, ky1, kx2, ky2 in kept:
+            inter_x1 = max(x1, kx1)
+            inter_y1 = max(y1, ky1)
+            inter_x2 = min(x2, kx2)
+            inter_y2 = min(y2, ky2)
+            inter_w = max(0, inter_x2 - inter_x1)
+            inter_h = max(0, inter_y2 - inter_y1)
+            inter = inter_w * inter_h
+            area_a = max(1, (x2 - x1) * (y2 - y1))
+            area_b = max(1, (kx2 - kx1) * (ky2 - ky1))
+            union = area_a + area_b - inter
+            iou = inter / union if union > 0 else 0.0
+            if iou >= iou_threshold:
+                keep = False
+                break
+        if keep:
+            kept.append(box)
+    return kept
+
+
+def detect_faces_haar(image: Any, *, min_face_size: int = 20) -> list[tuple[int, int, int, int]]:
+    if cv2 is None or image is None:
+        return []
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    frontal = ensure_haar_face_cascade()
+    profile = ensure_haar_profile_cascade()
+    boxes: list[tuple[int, int, int, int]] = []
+    for raw_boxes in (
+        frontal.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(min_face_size, min_face_size)),
+        profile.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(min_face_size, min_face_size)),
+    ):
+        for x, y, w, h in raw_boxes:
+            boxes.append((int(x), int(y), int(x + w), int(y + h)))
+    return dedupe_face_boxes(boxes)
+
+
+def detect_faces_combined(image: Any, *, dnn_confidence: float = 0.3, min_face_size: int = 18) -> list[tuple[int, int, int, int]]:
+    boxes = detect_faces_dnn(image, min_confidence=dnn_confidence, min_face_size=min_face_size)
+    boxes.extend(detect_faces_haar(image, min_face_size=min_face_size))
+    return dedupe_face_boxes(boxes)
 
 
 def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir: Path) -> list[Path]:
@@ -1213,7 +1294,7 @@ def count_thumbnail_faces(thumbnail_url: str, cache_dir: Path) -> dict[str, Any]
         image = cv2.imread(str(thumb_path))
         if image is None:
             return {"available": False, "face_count": 0}
-        faces = detect_faces_dnn(image, min_confidence=0.4, min_face_size=24)
+        faces = detect_faces_combined(image, dnn_confidence=0.3, min_face_size=18)
         return {"available": True, "face_count": len(faces), "path": str(thumb_path)}
     except Exception:
         return {"available": False, "face_count": 0}
@@ -1241,7 +1322,7 @@ def detect_gender_presence_from_frames(content_url: str, duration_text: object, 
         if image is None:
             continue
         inspected_frames += 1
-        faces = detect_faces_dnn(image, min_confidence=0.45, min_face_size=24)
+        faces = detect_faces_combined(image, dnn_confidence=0.3, min_face_size=18)
         frame_male = 0
         frame_female = 0
         face_total += len(faces)
@@ -1281,13 +1362,13 @@ def detect_gender_presence_from_frames(content_url: str, duration_text: object, 
     signals: list[str] = []
     score_boost = 0
     bucket = "low"
-    if max_faces_single_frame >= 3:
-        signals.append(f"关键帧出现三人及以上主场景（单帧最多 {max_faces_single_frame} 张脸）")
-        bucket = "low"
-    elif pair_frames >= 1:
+    if pair_frames >= 1:
         signals.append("至少一帧满足双人一男一女主场景")
         score_boost += 8
         bucket = "high"
+    elif max_faces_single_frame >= 3:
+        signals.append(f"关键帧出现三人及以上主场景（单帧最多 {max_faces_single_frame} 张脸）")
+        bucket = "low"
     elif has_both:
         signals.append(f"跨帧检测到男女都出现过（男 {male_count} / 女 {female_count}），但没有稳定双人主场景")
         bucket = "low"
@@ -1347,7 +1428,7 @@ def has_duo_creator_signal(metadata: dict[str, Any]) -> bool:
 def has_explicit_spouse_signal(metadata: dict[str, Any]) -> bool:
     combined = "\n".join(
         str(metadata.get(key) or "")
-        for key in ("title", "description", "transcript")
+        for key in ("title", "description", "transcript", "creator_description", "creator_name")
     ).lower()
     return any(term in combined for term in EXPLICIT_SPOUSE_TERMS)
 
@@ -1400,26 +1481,21 @@ def classify_couple_candidate(metadata: dict[str, Any], heuristic: dict[str, Any
     visual_data = visual or {}
     max_faces_single_frame = int(visual_data.get("max_faces_single_frame") or 0)
     pair_frames = int(visual_data.get("pair_frames") or 0)
+    has_both = bool(visual_data.get("has_both"))
     thumbnail_face_count = int((visual_data.get("thumbnail_faces") or {}).get("face_count") or 0)
     explicit_spouse = has_explicit_spouse_signal(metadata)
     duo_creator = has_duo_creator_signal(metadata)
-    if max_faces_single_frame >= 3 or thumbnail_face_count >= 3:
-        return {
-            "bucket": "low",
-            "confidence": "high",
-            "reason": "关键帧或封面明显出现三人及以上，不判为夫妻双人主场景。",
-            "signals": (
-                [f"关键帧单帧最多 {max_faces_single_frame} 张脸"] if max_faces_single_frame >= 3 else []
-            ) + ([f"封面检测到 {thumbnail_face_count} 张脸"] if thumbnail_face_count >= 3 else []),
-            "used_llm": False,
-        }
-    if pair_frames >= 1:
+    cover_not_crowded = thumbnail_face_count == 0 or thumbnail_face_count <= 2
+    stable_duo_scene = cover_not_crowded and has_both and max_faces_single_frame <= 2 and (
+        pair_frames >= 2 or (pair_frames >= 1 and 1 <= thumbnail_face_count <= 2)
+    )
+    if stable_duo_scene:
         return {
             "bucket": "high",
             "confidence": "high",
-            "reason": "关键帧里出现了明确的双人一男一女主场景。",
+            "reason": "关键帧里出现了稳定的双人一男一女主场景。",
             "signals": [str(signal or "").strip() for signal in (visual_data.get("signals") or []) if str(signal or "").strip()][:4]
-            or ["至少一帧满足双人一男一女主场景"],
+            or ["关键帧满足稳定双人一男一女主场景"],
             "used_llm": False,
         }
     if explicit_spouse:
@@ -7077,24 +7153,6 @@ def studio_html() -> str:
           <div class="studio-card-head">
             <div>
               <h2>视频筛选</h2>
-              <p>批量输入 Kwai 外部链接后，系统会优先利用页面公开信息做轻量判断，筛出可能属于“夫妻类型”的视频，尽量不下载整条视频，保证更快更省。</p>
-            </div>
-          </div>
-          <div class="studio-kpis">
-            <div class="studio-kpi">
-              <strong>轻量识别</strong>
-              <span>Fast</span>
-              <p>优先读取页面标题、简介、转写与账号描述，避免一开始就走完整视频下载与拆解。</p>
-            </div>
-            <div class="studio-kpi">
-              <strong>夫妻候选</strong>
-              <span>Match</span>
-              <p>输出高概率、疑似、非夫妻三档结果，先帮运营缩小候选池，再决定是否进入脚本拆解。</p>
-            </div>
-            <div class="studio-kpi">
-              <strong>兼容表格</strong>
-              <span>Sheet</span>
-              <p>支持直接粘贴一大段文字自动识别链接，也支持上传 Excel / CSV / TSV 做批量筛选。</p>
             </div>
           </div>
           <div class="composer-block">
