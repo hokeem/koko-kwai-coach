@@ -4473,16 +4473,26 @@ def apply_script_edits(script: dict[str, Any], payload: dict[str, Any]) -> dict[
     rows = choose_script_rows(edited)
     incoming_rows = payload.get("rows")
     if isinstance(incoming_rows, list):
+        rebuilt_rows: list[dict[str, Any]] = []
         for idx, incoming in enumerate(incoming_rows):
-            if idx >= len(rows) or not isinstance(incoming, dict):
+            if not isinstance(incoming, dict):
                 continue
-            row = rows[idx]
+            original_index_raw = incoming.get("original_index", idx)
+            try:
+                original_index = int(original_index_raw)
+            except (TypeError, ValueError):
+                original_index = idx
+            if not (0 <= original_index < len(rows)):
+                continue
+            row = json.loads(json.dumps(rows[original_index], ensure_ascii=False))
             for key in ["time", "visual_content", "action", "dialogue_or_audio", "integrated_summary"]:
                 if key in incoming:
                     row[key] = fill_text(incoming.get(key), "无")
-    if isinstance(edited.get("rows"), list) and edited.get("rows"):
+            rebuilt_rows.append(row)
+        rows = rebuilt_rows
+    if isinstance(edited.get("rows"), list):
         edited["rows"] = rows
-    elif isinstance(edited.get("synthesized_segments"), list) and edited.get("synthesized_segments"):
+    elif isinstance(edited.get("synthesized_segments"), list):
         edited["synthesized_segments"] = rows
     return edited
 
@@ -6610,6 +6620,16 @@ def studio_html() -> str:
       font-weight: 800;
       color: #FF8200;
     }}
+    .editor-row-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .editor-row-remove {{
+      flex-shrink: 0;
+    }}
     .review-shell {{
       margin-bottom: 14px;
       border: 1px solid rgba(255,130,0,.16);
@@ -7810,8 +7830,11 @@ def studio_html() -> str:
         </div>
       `).join("");
       const rowBlocks = rows.map((row, idx) => `
-        <div class="editor-row-card" data-row-index="${{idx}}">
-          <div class="editor-row-title">脚本行 ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
+        <div class="editor-row-card" data-row-index="${{idx}}" data-row-original-index="${{idx}}">
+          <div class="editor-row-head">
+            <div class="editor-row-title">脚本行 ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
+            <button class="action-link action-link-danger editor-row-remove" type="button" data-delete-row>删除这一段</button>
+          </div>
           <div class="editor-grid">
             <div class="editor-field">
               <div class="editor-label">时间</div>
@@ -7939,6 +7962,7 @@ def studio_html() -> str:
       }});
       const rows = Array.from(root.querySelectorAll("[data-row-index]")).map((rowCard) => {{
         return {{
+          original_index: Number(rowCard.getAttribute("data-row-original-index") || "0"),
           time: rowCard.querySelector('[data-row-field="time"]')?.value || "",
           visual_content: rowCard.querySelector('[data-row-field="visual_content"]')?.value || "",
           action: rowCard.querySelector('[data-row-field="action"]')?.value || "",
@@ -7960,6 +7984,19 @@ def studio_html() -> str:
       const root = document.querySelector(`[data-review-item="${{itemId}}"]`);
       if (!root) return "";
       return root.querySelector('[data-review-feedback]')?.value || "";
+    }}
+
+    function refreshEditorRowLabels(container) {{
+      const root = container?.closest?.("[data-editor-item]") || container;
+      if (!root) return;
+      Array.from(root.querySelectorAll("[data-row-index]")).forEach((rowCard, idx) => {{
+        rowCard.setAttribute("data-row-index", String(idx));
+        const titleNode = rowCard.querySelector(".editor-row-title");
+        const timeValue = rowCard.querySelector('[data-row-field="time"]')?.value || "";
+        if (titleNode) {{
+          titleNode.textContent = `脚本行 ${{idx + 1}}${{timeValue ? ` · ${{timeValue}}` : ""}}`;
+        }}
+      }});
     }}
 
     async function persistItemEdits(itemId, mode, button) {{
@@ -8840,6 +8877,16 @@ def studio_html() -> str:
       const saveBtn = event.target.closest("[data-save-edits]");
       if (saveBtn) {{
         persistItemEdits(saveBtn.getAttribute("data-save-edits"), "save", saveBtn);
+        return;
+      }}
+      const deleteRowBtn = event.target.closest("[data-delete-row]");
+      if (deleteRowBtn) {{
+        const rowCard = deleteRowBtn.closest("[data-row-index]");
+        if (rowCard) {{
+          const editorRoot = rowCard.closest("[data-editor-item]");
+          rowCard.remove();
+          refreshEditorRowLabels(editorRoot);
+        }}
         return;
       }}
       const reviewBtn = event.target.closest("[data-run-review]");
