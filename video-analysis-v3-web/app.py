@@ -3976,6 +3976,8 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "index": item.get("index"),
         "video_url": item.get("video_url"),
         "status": item.get("status"),
+        "updated_at": item.get("updated_at"),
+        "completed_at": item.get("completed_at"),
         "stage": item.get("stage") or "",
         "stage_message": item.get("stage_message") or "",
         "html_url": item.get("html_url") or "",
@@ -7403,6 +7405,15 @@ def studio_html() -> str:
       }});
     }}
 
+    function versionedResultUrl(url, item) {{
+      const rawUrl = String(url || "").trim();
+      if (!rawUrl) return "";
+      const version = String(item?.updated_at || item?.review_message || item?.review_stage || "").trim();
+      if (!version) return rawUrl;
+      const separator = rawUrl.includes("?") ? "&" : "?";
+      return `${{rawUrl}}${{separator}}v=${{encodeURIComponent(version)}}`;
+    }}
+
     function setStatus(html, ready = false) {{
       if (html === lastStatusMarkup && ready === lastStatusReady) return;
       preserveDetailIframes();
@@ -8125,8 +8136,9 @@ def studio_html() -> str:
         (item.zh_docx_url || item.pt_docx_url) ? `<button class="action-link" type="button" data-open-export-modal="${{escapeHtml(item.zh_docx_url || "")}}" data-open-export-modal-pt="${{escapeHtml(item.pt_docx_url || "")}}">导出脚本</button>` : "",
         toggleButton,
       ].join("");
-      const previewSlot = item.html_url
-        ? `<div class="item-preview-slot" data-preview-item-id="${{item.id}}" data-preview-url="${{item.html_url}}"></div>`
+      const previewUrl = versionedResultUrl(item.html_url, item);
+      const previewSlot = previewUrl
+        ? `<div class="item-preview-slot" data-preview-item-id="${{item.id}}" data-preview-url="${{escapeHtml(previewUrl)}}"></div>`
         : "";
       const error = item.error ? `<code>${{escapeHtml(item.error)}}</code>` : "";
       return `
@@ -9501,6 +9513,9 @@ class AppHandler(BaseHTTPRequestHandler):
         raw = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         if path.suffix == ".docx":
             self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
         self.send_header("Content-Length", str(len(raw)))
@@ -9524,6 +9539,9 @@ class AppHandler(BaseHTTPRequestHandler):
             content_type = "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         if path.suffix == ".docx":
             self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
         self.send_header("Content-Length", str(path.stat().st_size))
