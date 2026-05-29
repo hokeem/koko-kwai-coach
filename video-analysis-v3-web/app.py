@@ -35,6 +35,7 @@ MAX_CONCURRENT_ANALYSES = max(1, int(os.environ.get("VIDEO_ANALYSIS_MAX_CONCURRE
 RUNNING_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_RUNNING_STALE_SEC", "900"))
 REVIEW_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_REVIEW_STALE_SEC", "900"))
 PROCESSLESS_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_PROCESSLESS_STALE_SEC", "180"))
+RESTORE_PENDING_MAX_AGE_SEC = int(os.environ.get("VIDEO_ANALYSIS_RESTORE_PENDING_MAX_AGE_SEC", "1800"))
 WATCHDOG_INTERVAL_SEC = int(os.environ.get("VIDEO_ANALYSIS_WATCHDOG_INTERVAL_SEC", "15"))
 SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTION_DAYS", "3"))
 SOURCE_VIDEO_EXTENDED_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_EXTENDED_RETENTION_DAYS", "30"))
@@ -773,7 +774,9 @@ def stop_all_tasks() -> dict[str, int]:
 
 def restore_pending_jobs_to_queue() -> None:
     pending_job_ids: list[str] = []
+    cleared_stale = 0
     changed = False
+    now_dt = datetime.now(timezone.utc)
     with job_lock:
         for job_id, job in jobs.items():
             items = job.get("items") or []
@@ -789,6 +792,19 @@ def restore_pending_jobs_to_queue() -> None:
                     continue
                 if status == "failed":
                     failed_count += 1
+                    continue
+                updated_at = parse_iso_datetime(item.get("updated_at") or item.get("created_at") or job.get("updated_at") or job.get("created_at"))
+                age_sec = (now_dt - updated_at).total_seconds() if updated_at else RESTORE_PENDING_MAX_AGE_SEC + 1
+                if age_sec > RESTORE_PENDING_MAX_AGE_SEC:
+                    item["status"] = "failed"
+                    item["stage"] = "failed"
+                    item["stage_message"] = "Cleared stale queued task during service startup."
+                    item["error"] = "旧任务在服务重启前已长时间停留在队列/运行状态，已自动清理。"
+                    item["completed_at"] = now_iso()
+                    item["updated_at"] = now_iso()
+                    failed_count += 1
+                    cleared_stale += 1
+                    changed = True
                     continue
                 pending = True
                 if status != "queued":
@@ -816,6 +832,13 @@ def restore_pending_jobs_to_queue() -> None:
                     job["stage"] = "failed"
                     job["stage_message"] = "All batch items failed."
                     changed = True
+        if cleared_stale:
+            log_runtime_warning(
+                "stale_pending_jobs_cleared",
+                "Cleared stale analysis tasks instead of restoring them to the queue.",
+                cleared_items=cleared_stale,
+                max_age_sec=RESTORE_PENDING_MAX_AGE_SEC,
+            )
         if changed:
             try:
                 save_jobs()
