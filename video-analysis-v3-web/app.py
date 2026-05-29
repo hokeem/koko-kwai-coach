@@ -808,13 +808,22 @@ def restore_pending_filter_jobs_to_queue() -> None:
 
 def job_worker_loop() -> None:
     while True:
-        with queue_condition:
-            while not job_queue:
-                queue_condition.wait()
-            job_id = job_queue.popleft()
-            queued_job_ids.discard(job_id)
-        with analysis_slots:
-            run_job_batch(job_id)
+        try:
+            with queue_condition:
+                while not job_queue:
+                    queue_condition.wait()
+                job_id = job_queue.popleft()
+                queued_job_ids.discard(job_id)
+            with job_lock:
+                job_exists = job_id in jobs
+            if not job_exists:
+                log_runtime_warning("analysis_worker_skipped_missing_job", "Skipped queued analysis job because it no longer exists.", job_id=job_id)
+                continue
+            with analysis_slots:
+                run_job_batch(job_id)
+        except Exception as exc:
+            log_runtime_warning("analysis_worker_loop_error", "Analysis worker recovered after an unexpected error.", error=str(exc))
+            time.sleep(1)
 
 
 def start_job_workers() -> None:
@@ -4293,12 +4302,21 @@ def run_filter_job(job_id: str) -> None:
 
 def filter_worker_loop() -> None:
     while True:
-        with filter_queue_condition:
-            while not filter_queue:
-                filter_queue_condition.wait()
-            job_id = filter_queue.popleft()
-            queued_filter_job_ids.discard(job_id)
-        run_filter_job(job_id)
+        try:
+            with filter_queue_condition:
+                while not filter_queue:
+                    filter_queue_condition.wait()
+                job_id = filter_queue.popleft()
+                queued_filter_job_ids.discard(job_id)
+            with filter_jobs_lock:
+                job_exists = job_id in filter_jobs
+            if not job_exists:
+                log_runtime_warning("filter_worker_skipped_missing_job", "Skipped queued filter job because it no longer exists.", job_id=job_id)
+                continue
+            run_filter_job(job_id)
+        except Exception as exc:
+            log_runtime_warning("filter_worker_loop_error", "Filter worker recovered after an unexpected error.", error=str(exc))
+            time.sleep(1)
 
 
 def start_filter_workers() -> None:
