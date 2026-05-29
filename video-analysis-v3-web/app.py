@@ -44,6 +44,12 @@ MAX_CONCURRENT_FILTERS = max(1, int(os.environ.get("VIDEO_FILTER_MAX_CONCURRENT_
 FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "0")).strip().lower() in {"1", "true", "yes", "on"}
 DELETE_SOURCE_VIDEO_AFTER_ANALYSIS = str(os.environ.get("VIDEO_ANALYSIS_DELETE_SOURCE_AFTER_SUCCESS", "1")).strip().lower() in {"1", "true", "yes", "on"}
 SYNC_LIBRARY_ON_STARTUP = str(os.environ.get("VIDEO_ANALYSIS_SYNC_LIBRARY_ON_STARTUP", "0")).strip().lower() in {"1", "true", "yes", "on"}
+GEMINI_TRANSIENT_RETRY_ATTEMPTS = max(1, int(os.environ.get("VIDEO_ANALYSIS_TRANSIENT_RETRY_ATTEMPTS", "3")))
+GEMINI_TRANSIENT_RETRY_DELAYS = [
+    max(1, int(value))
+    for value in re.split(r"[, ]+", os.environ.get("VIDEO_ANALYSIS_TRANSIENT_RETRY_DELAYS", "45,120").strip())
+    if value.strip().isdigit()
+] or [45, 120]
 
 
 def stage_timeout(name: str, default: int) -> int:
@@ -2608,14 +2614,51 @@ def should_try_next_model(error_text: str) -> bool:
     )
 
 
+def should_retry_transient_pipeline(error_text: str) -> bool:
+    hay = (error_text or "").upper()
+    return any(
+        token in hay
+        for token in [
+            "HTTP 429",
+            "HTTP 503",
+            "RESOURCE_EXHAUSTED",
+            "UNAVAILABLE",
+            "HIGH DEMAND",
+            "RATE_LIMIT",
+            "RATE LIMIT",
+            "QUOTA",
+            "OVERLOADED",
+            "SERVER ERROR",
+            "REMOTE END CLOSED CONNECTION WITHOUT RESPONSE",
+            "CONNECTION RESET",
+            "BROKEN PIPE",
+        ]
+    )
+
+
+def gemini_retry_delay(attempt_index: int) -> int:
+    if attempt_index <= 0:
+        return 0
+    return GEMINI_TRANSIENT_RETRY_DELAYS[min(attempt_index - 1, len(GEMINI_TRANSIENT_RETRY_DELAYS) - 1)]
+
+
 def friendly_error(error_text: str) -> str:
     text = (error_text or "").strip()
     if not text:
         return "分析失败，未返回具体错误。"
     if "no space left on device" in text.lower() or "enospc" in text.lower():
         return "服务器存储空间不足，暂时无法创建新任务。请先清理历史结果或扩容后重试。"
-    if "HTTP 503" in text or "UNAVAILABLE" in text or "HIGH DEMAND" in text.upper():
-        return "Gemini 当前负载较高，已自动尝试回退模型，但这次仍未成功。请稍后重试。"
+    upper = text.upper()
+    if (
+        "HTTP 429" in text
+        or "HTTP 503" in text
+        or "UNAVAILABLE" in text
+        or "HIGH DEMAND" in upper
+        or "RESOURCE_EXHAUSTED" in upper
+        or "RATE_LIMIT" in upper
+        or "RATE LIMIT" in upper
+    ):
+        return "Gemini 当前负载较高，系统已自动换模型并延迟重试，但这次仍未成功。请稍后重试。"
     if "FAILED_PRECONDITION" in text and "User location is not supported" in text:
         return "当前运行环境所在地区不支持这个 Gemini 接口。"
     if "timed out" in text.lower():
@@ -5197,6 +5240,7 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                         item_index,
                         status="completed",
                         error="",
+                        raw_error="",
                         completed_at=now_iso(),
                         html_url=f"/results/{item['id']}/script_table.html",
                         zh_html_url=f"/results/{item['id']}/script_table.html",
@@ -5241,6 +5285,7 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
         item_index,
         status="failed",
         error=friendly_error(last_error),
+        raw_error=last_error,
         completed_at=now_iso(),
         tried_models=tried,
         stage="failed",
@@ -5253,7 +5298,49 @@ def run_job_batch(job_id: str) -> None:
         update_job(job_id, status="running", started_at=now_iso(), stage="queued", stage_message="Batch task started.")
         items = jobs[job_id]["items"]
         for idx, item in enumerate(items):
-            execute_single_pipeline(job_id, idx, item)
+            retry_attempt = 0
+            while True:
+                execute_single_pipeline(job_id, idx, item)
+                current_item = jobs[job_id]["items"][idx]
+                transient_error = current_item.get("raw_error") or current_item.get("error") or ""
+                if (
+                    current_item.get("status") == "failed"
+                    and should_retry_transient_pipeline(transient_error)
+                    and retry_attempt < GEMINI_TRANSIENT_RETRY_ATTEMPTS - 1
+                ):
+                    retry_attempt += 1
+                    delay = gemini_retry_delay(retry_attempt)
+                    update_job_item(
+                        job_id,
+                        idx,
+                        status="queued",
+                        error="",
+                        stage="queued",
+                        stage_message=f"Gemini busy. Auto retry {retry_attempt + 1}/{GEMINI_TRANSIENT_RETRY_ATTEMPTS} in {delay}s.",
+                        transient_retry_count=retry_attempt,
+                    )
+                    waited = 0
+                    while waited < delay:
+                        if is_item_cancelled(current_item["id"]):
+                            update_job_item(
+                                job_id,
+                                idx,
+                                status="failed",
+                                error="任务已手动停止。",
+                                raw_error="任务已手动停止。",
+                                completed_at=now_iso(),
+                                stage="failed",
+                                stage_message="Stopped manually.",
+                            )
+                            break
+                        sleep_for = min(5, delay - waited)
+                        time.sleep(sleep_for)
+                        waited += sleep_for
+                    if jobs[job_id]["items"][idx].get("status") == "failed":
+                        break
+                    item = jobs[job_id]["items"][idx]
+                    continue
+                break
         final_items = jobs[job_id]["items"]
         completed = sum(1 for item in final_items if item.get("status") == "completed")
         failed = sum(1 for item in final_items if item.get("status") == "failed")
