@@ -2083,6 +2083,33 @@ HEAVY_REVIEW_FAILURE_LAYERS = {
     "entity_mapping",
 }
 
+REVIEW_MODE_PARTIAL = "partial"
+REVIEW_MODE_FULL = "full"
+REVIEW_SCRIPT_KEYS = [
+    "title",
+    "route",
+    "audio_information_score",
+    "source_url",
+    "whole_video_summary",
+    "core_viral_points",
+    "replaceable_parts",
+    "rows",
+    "mechanism",
+]
+REVIEW_CORE_CHANGE_KEYS = [
+    "whole_video_summary",
+    "core_viral_points",
+    "rows",
+    "mechanism",
+]
+
+
+def normalize_review_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"full", "complete", "完全错误", "完全重做"}:
+        return REVIEW_MODE_FULL
+    return REVIEW_MODE_PARTIAL
+
 
 def should_run_review_video_recheck(review_plan: dict[str, Any]) -> tuple[bool, str]:
     if not bool(review_plan.get("needs_video_recheck")):
@@ -2091,6 +2118,31 @@ def should_run_review_video_recheck(review_plan: dict[str, Any]) -> tuple[bool, 
     if layer in HEAVY_REVIEW_FAILURE_LAYERS:
         return True, f"Heavy review triggered for {layer}."
     return False, f"Skipping video recheck for lighter failure layer: {layer or 'unknown'}."
+
+
+def extract_review_script_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    for key in ["corrected_script", "script", "script_table", "result_json"]:
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            extracted = extract_review_script_payload(nested)
+            if extracted:
+                return extracted
+    if any(key in payload for key in REVIEW_SCRIPT_KEYS):
+        return payload
+    return {}
+
+
+def stable_json_fingerprint(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def review_script_changed(before: dict[str, Any], after: dict[str, Any], keys: list[str]) -> bool:
+    for key in keys:
+        if stable_json_fingerprint((before or {}).get(key)) != stable_json_fingerprint((after or {}).get(key)):
+            return True
+    return False
 
 
 REVIEW_PLAN_PROMPT = """你是一个短视频分析复盘诊断器。
@@ -2235,6 +2287,30 @@ REVIEW_REFINE_PROMPT = """你是一个“复盘重做”脚本整理器。
     ]
   }
 }
+"""
+
+
+PARTIAL_REVIEW_REFINE_PROMPT = REVIEW_REFINE_PROMPT + """
+
+本次模式：部分错误。
+
+人类反馈指出的是“当前脚本大体方向可用，但漏掉/误判了一个关键点”。你必须以 current_script 为基础做全局修订：
+- 重点修正人类指出的核心错误点，并让这个纠偏贯穿 title、whole_video_summary、core_viral_points、rows、mechanism
+- 允许保留旧脚本里仍然正确的时间段、图片引用、分镜顺序和视觉字段
+- 不要只改标题，不要只改概述，不要返回局部补丁
+- 输出必须是完整 v2 script_table.json 同格式对象
+"""
+
+
+FULL_REVIEW_REFINE_PROMPT = REVIEW_REFINE_PROMPT + """
+
+本次模式：完全错误。
+
+人类反馈指出的是“当前故事主轴或核心理解整体错误”。你必须把 review_video_recheck 当作新的高优先级证据来重建脚本：
+- title、whole_video_summary、core_viral_points、rows、mechanism 都要围绕新的故事主轴重新整理
+- 可以保留 confirmed 的时间段和图片引用，但不要沿用旧故事主轴
+- 如果回看证据不充分，要明确采用更保守的剧情表达，不要把不确定内容写死
+- 输出必须是完整 v2 script_table.json 同格式对象
 """
 
 
@@ -4108,6 +4184,7 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "review_stage": item.get("review_stage") or "",
         "review_message": item.get("review_message") or "",
         "review_feedback": item.get("review_feedback") or "",
+        "review_mode": normalize_review_mode(item.get("review_mode")),
         "reviewed": bool(item.get("reviewed")),
         "edited": bool(item.get("edited")),
     }
@@ -4442,7 +4519,7 @@ def update_job_item(job_id: str, item_index: int, **changes: Any) -> None:
         save_jobs()
 
 
-def start_review_job(item_id: str, feedback: str) -> tuple[bool, str]:
+def start_review_job(item_id: str, feedback: str, review_mode: str = REVIEW_MODE_PARTIAL) -> tuple[bool, str]:
     context = find_item_context(item_id)
     if not context:
         return False, "Script item not found."
@@ -4452,6 +4529,7 @@ def start_review_job(item_id: str, feedback: str) -> tuple[bool, str]:
     feedback_text = str(feedback or "").strip()
     if not feedback_text:
         return False, "Please describe what the analysis got wrong."
+    mode = normalize_review_mode(review_mode)
     update_job_item(
         parent_job_id,
         item_index,
@@ -4459,11 +4537,12 @@ def start_review_job(item_id: str, feedback: str) -> tuple[bool, str]:
         review_stage="queued",
         review_message="Queued for review. Waiting for an available analysis slot.",
         review_feedback=feedback_text,
+        review_mode=mode,
         reviewed=False,
     )
     threading.Thread(
         target=run_review_with_slot,
-        args=(parent_job_id, item_index, item_id, feedback_text),
+        args=(parent_job_id, item_index, item_id, feedback_text, mode),
         daemon=True,
     ).start()
     return True, parent_job_id
@@ -4560,6 +4639,7 @@ def find_item_context(item_id: str) -> tuple[str, int, dict[str, Any]] | None:
                     "review_status": job.get("review_status") or "",
                     "review_message": job.get("review_message") or "",
                     "review_feedback": job.get("review_feedback") or "",
+                    "review_mode": normalize_review_mode(job.get("review_mode")),
                     "reviewed": bool(job.get("reviewed")),
                     "edited": bool(job.get("edited")),
                     "original_result_json": json.loads(json.dumps(job.get("original_result_json") or {}, ensure_ascii=False)),
@@ -4786,7 +4866,8 @@ def set_item_display_language(item_id: str, language: str) -> dict[str, Any]:
     return public_item_view(item_ref)
 
 
-def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, feedback: str) -> None:
+def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, feedback: str, review_mode: str = REVIEW_MODE_PARTIAL) -> None:
+    mode = normalize_review_mode(review_mode)
     clear_item_cancelled(item_id)
     if not GOOGLE_API_KEY:
         update_job_item(parent_job_id, item_index, review_status="failed", review_message="Missing GOOGLE_API_KEY for review.")
@@ -4826,11 +4907,13 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
             review_stage="plan",
             review_message="Reviewing your feedback.",
             review_feedback=feedback,
+            review_mode=mode,
             original_result_json=original_script,
         )
 
         review_request = {
             "feedback": feedback,
+            "review_mode": mode,
             "video_url": jobs[parent_job_id]["items"][item_index].get("video_url") or "",
             "original_script": original_script,
             "current_script": current_script,
@@ -4845,20 +4928,38 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
             raise RuntimeError("任务已手动停止。")
 
         update_job_item(parent_job_id, item_index, review_stage="plan", review_message="Comparing your feedback against the prior analysis.")
-        review_plan, review_plan_raw, _ = run_text_json_prompt_with_fallback(
-            review_request,
-            GOOGLE_API_KEY,
-            unique_models(*MODEL_CANDIDATES),
-            REVIEW_PLAN_PROMPT,
-            "review plan",
-        )
+        if mode == REVIEW_MODE_PARTIAL:
+            review_plan = {
+                "problem_summary": feedback,
+                "likely_failure_layer": "final_refine",
+                "needs_video_recheck": False,
+                "needs_structural_rewrite": True,
+                "reasoning": "Partial review mode revises the current script directly from human feedback.",
+                "focus_windows": [],
+                "focus_entities": [],
+                "correction_goal": feedback,
+                "confidence": "medium",
+            }
+            review_plan_raw = {"skipped": True, "mode": mode, "reason": "partial review uses direct script revision"}
+        else:
+            review_plan, review_plan_raw, _ = run_text_json_prompt_with_fallback(
+                review_request,
+                GOOGLE_API_KEY,
+                unique_models(*MODEL_CANDIDATES),
+                REVIEW_PLAN_PROMPT,
+                "review plan",
+            )
         review_plan_path.write_text(json.dumps(review_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         review_plan_raw_path.write_text(json.dumps(review_plan_raw, ensure_ascii=False, indent=2), encoding="utf-8")
         if is_item_cancelled(item_id):
             raise RuntimeError("任务已手动停止。")
 
         review_video = {}
-        should_recheck, recheck_reason = should_run_review_video_recheck(review_plan)
+        should_recheck, recheck_reason = (False, "Partial review mode updates the script without video recheck.")
+        if mode == REVIEW_MODE_FULL:
+            should_recheck, recheck_reason = (True, "Full review mode requires video recheck.")
+            if not source_video.exists():
+                raise RuntimeError("完全错误需要重新回看原视频，但当前源视频已被清理；请重新提交这个视频链接后再做完全重做。")
         if should_recheck and source_video.exists():
             update_job_item(parent_job_id, item_index, review_stage="recheck", review_message="Rechecking the video with your correction in mind.")
             prompt = REVIEW_VIDEO_PROMPT + "\n\nHuman feedback:\n" + feedback + "\n\nReview plan:\n" + json.dumps(review_plan, ensure_ascii=False)
@@ -4883,6 +4984,7 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
         update_job_item(parent_job_id, item_index, review_stage="rebuild", review_message="Rebuilding the script from the reviewed evidence.")
         refine_payload = {
             "feedback": feedback,
+            "review_mode": mode,
             "review_plan": review_plan,
             "review_video_recheck": review_video,
             "original_script": original_script,
@@ -4896,17 +4998,24 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
             refine_payload,
             GOOGLE_API_KEY,
             unique_models(*MODEL_CANDIDATES),
-            REVIEW_REFINE_PROMPT,
+            FULL_REVIEW_REFINE_PROMPT if mode == REVIEW_MODE_FULL else PARTIAL_REVIEW_REFINE_PROMPT,
             "review refine",
         )
         review_refine_raw_path.write_text(json.dumps(corrected_raw, ensure_ascii=False, indent=2), encoding="utf-8")
         if is_item_cancelled(item_id):
             raise RuntimeError("任务已手动停止。")
 
-        merged_script = json.loads(json.dumps(original_script, ensure_ascii=False))
-        for key in ["title", "route", "audio_information_score", "source_url", "whole_video_summary", "core_viral_points", "replaceable_parts", "rows", "mechanism"]:
-            if corrected_script.get(key):
-                merged_script[key] = corrected_script.get(key)
+        corrected_payload = extract_review_script_payload(corrected_script)
+        if not corrected_payload:
+            raise RuntimeError("复盘重做没有返回可用的完整脚本 JSON。")
+        merged_script = json.loads(json.dumps(current_script, ensure_ascii=False))
+        for key in REVIEW_SCRIPT_KEYS:
+            if corrected_payload.get(key):
+                merged_script[key] = corrected_payload.get(key)
+        if not review_script_changed(current_script, merged_script, REVIEW_SCRIPT_KEYS):
+            raise RuntimeError("复盘重做没有生成任何脚本变更，请补充更具体的错误点。")
+        if not review_script_changed(current_script, merged_script, REVIEW_CORE_CHANGE_KEYS):
+            raise RuntimeError("复盘重做只产生了标题或轻微变化，没有改动概述、核心爆点、分镜或机制。")
         merged_script = enforce_chinese_dialogue_translation(
             merged_script,
             GOOGLE_API_KEY,
@@ -4928,6 +5037,7 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
             review_message="Reviewed version is ready.",
             reviewed=True,
             review_feedback=feedback,
+            review_mode=mode,
         )
         def _record_error_case() -> None:
             try:
@@ -4953,12 +5063,12 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
         ).start()
         return updated_item
     except Exception as exc:
-        update_job_item(parent_job_id, item_index, review_status="failed", review_stage="failed", review_message=friendly_error(str(exc)), review_feedback=feedback)
+        update_job_item(parent_job_id, item_index, review_status="failed", review_stage="failed", review_message=friendly_error(str(exc)), review_feedback=feedback, review_mode=mode)
 
 
-def run_review_with_slot(parent_job_id: str, item_index: int, item_id: str, feedback: str) -> None:
+def run_review_with_slot(parent_job_id: str, item_index: int, item_id: str, feedback: str, review_mode: str = REVIEW_MODE_PARTIAL) -> None:
     with analysis_slots:
-        run_review_reanalysis(parent_job_id, item_index, item_id, feedback)
+        run_review_reanalysis(parent_job_id, item_index, item_id, feedback, review_mode)
 
 
 def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str, Any]) -> None:
@@ -5206,6 +5316,7 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
                 "review_stage": "",
                 "review_message": "",
                 "review_feedback": "",
+                "review_mode": REVIEW_MODE_PARTIAL,
                 "reviewed": False,
                 "edited": False,
             }
@@ -6831,6 +6942,34 @@ def studio_html() -> str:
       color: #FF8200;
       opacity: .92;
     }}
+    .review-mode-toggle {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }}
+    .review-mode-option {{
+      min-height: 44px;
+      border: 1px solid rgba(255,130,0,.18);
+      border-radius: 999px;
+      background: rgba(255,255,255,.76);
+      color: #FF8200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+    }}
+    .review-mode-option input {{
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }}
+    .review-mode-option:has(input:checked) {{
+      background: rgba(255,130,0,.14);
+      border-color: rgba(255,130,0,.34);
+      box-shadow: inset 0 0 0 1px rgba(255,130,0,.12);
+    }}
     .item-sections {{
       display: flex;
       flex-direction: column;
@@ -8029,6 +8168,7 @@ def studio_html() -> str:
       const stage = normalizedText(item.review_stage || "", "");
       const message = normalizedText(item.review_message || "", "");
       const feedback = normalizedText(item.review_feedback || "", "");
+      const reviewMode = normalizedText(item.review_mode || "partial", "partial");
       const editedBadge = item.edited ? `<span class="batch-chip">Manual edits exist</span>` : "";
       const reviewedBadge = item.reviewed ? `<span class="batch-chip">Reviewed version active</span>` : "";
       const reviewState = status ? `<div class="review-note">${{escapeHtml(status)}}${{message ? ` · ${{escapeHtml(message)}}` : ""}}</div>` : "";
@@ -8040,11 +8180,21 @@ def studio_html() -> str:
           </summary>
           <div class="review-shell" data-review-item="${{item.id}}">
             <div class="review-note">直接用自然语言告诉 Koko 这条脚本哪里理解错了。系统会拿你的反馈和原始分析结果做对照，必要时只复核关键片段，然后重新生成脚本。</div>
+            <div class="review-mode-toggle" role="radiogroup" aria-label="复盘模式">
+              <label class="review-mode-option">
+                <input type="radio" name="review-mode-${{item.id}}" value="partial" ${{reviewMode !== "full" ? "checked" : ""}}>
+                <span>部分错误</span>
+              </label>
+              <label class="review-mode-option">
+                <input type="radio" name="review-mode-${{item.id}}" value="full" ${{reviewMode === "full" ? "checked" : ""}}>
+                <span>完全错误</span>
+              </label>
+            </div>
             ${{editedBadge.replace("Manual edits exist", "已有人工修改")}}
             ${{reviewedBadge.replace("Reviewed version active", "当前是复盘版本")}}
             ${{reviewProgress}}
             ${{reviewState}}
-            <textarea class="editor-textarea" data-review-feedback placeholder="例如：真正的核心是丈夫吹嘘自己人脉广，但连续打电话都没人来帮忙，当前故事主轴理解错了。">${{escapeHtml(feedback)}}</textarea>
+            <textarea class="editor-textarea" data-review-feedback placeholder="部分错误：漏掉煤气没关。完全错误：故事主轴不是情侣吵架，而是丈夫撒谎被拆穿。">${{escapeHtml(feedback)}}</textarea>
             <div class="link-row">
               <button class="action-link" type="button" data-run-review="${{item.id}}">${{status === "running" ? "复盘中..." : "复盘重做"}}</button>
             </div>
@@ -8119,6 +8269,12 @@ def studio_html() -> str:
       const root = document.querySelector(`[data-review-item="${{itemId}}"]`);
       if (!root) return "";
       return root.querySelector('[data-review-feedback]')?.value || "";
+    }}
+
+    function collectReviewMode(itemId) {{
+      const root = document.querySelector(`[data-review-item="${{itemId}}"]`);
+      if (!root) return "partial";
+      return root.querySelector('input[name="review-mode-' + itemId + '"]:checked')?.value || "partial";
     }}
 
     function refreshEditorRowLabels(container) {{
@@ -8221,6 +8377,7 @@ def studio_html() -> str:
 
     async function runReview(itemId, button) {{
       const feedback = collectReviewFeedback(itemId).trim();
+      const mode = collectReviewMode(itemId);
       if (!feedback) {{
         showToast("请先填写反馈", "先告诉 Koko 哪里错了，再开始复盘重做。");
         return;
@@ -8232,7 +8389,7 @@ def studio_html() -> str:
         const response = await fetch(`/api/items/${{itemId}}/review`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ feedback }}),
+          body: JSON.stringify({{ feedback, mode }}),
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Review failed");
@@ -9883,7 +10040,7 @@ class AppHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self.send_json({"error": "Invalid JSON body."}, status=400)
                 return
-            ok, result = start_review_job(item_id, payload.get("feedback") or "")
+            ok, result = start_review_job(item_id, payload.get("feedback") or "", payload.get("mode") or payload.get("review_mode") or "")
             if not ok:
                 self.send_json({"error": result}, status=400)
                 return
