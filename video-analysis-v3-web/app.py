@@ -2433,6 +2433,8 @@ def friendly_error(error_text: str) -> str:
     text = (error_text or "").strip()
     if not text:
         return "分析失败，未返回具体错误。"
+    if "no space left on device" in text.lower() or "enospc" in text.lower():
+        return "服务器存储空间不足，暂时无法创建新任务。请先清理历史结果或扩容后重试。"
     if "HTTP 503" in text or "UNAVAILABLE" in text or "HIGH DEMAND" in text.upper():
         return "Gemini 当前负载较高，已自动尝试回退模型，但这次仍未成功。请稍后重试。"
     if "FAILED_PRECONDITION" in text and "User location is not supported" in text:
@@ -7536,6 +7538,9 @@ def studio_html() -> str:
       try {{
         return raw ? JSON.parse(raw) : {{}};
       }} catch (error) {{
+        if (response && response.status >= 500) {{
+          throw new Error(`服务暂时不可用（HTTP ${{response.status}}），请稍后重试。`);
+        }}
         const preview = String(raw || "").slice(0, 180).trim();
         throw new Error(preview ? `服务返回了非 JSON 内容：${{preview}}` : "服务返回了空响应。");
       }}
@@ -9812,7 +9817,13 @@ class AppHandler(BaseHTTPRequestHandler):
             if not kwai_urls:
                 self.send_json({"error": "请至少提供一个可识别的 Kwai 视频链接。"}, status=400)
                 return
-            job = create_filter_job(kwai_urls, source_label="studio-filter")
+            try:
+                job = create_filter_job(kwai_urls, source_label="studio-filter")
+            except Exception as exc:
+                log_runtime_warning("filter_job_create_failed", "Failed to create filter job.", error=str(exc))
+                status = 507 if is_no_space_error(exc) else 500
+                self.send_json({"error": friendly_error(str(exc))}, status=status)
+                return
             self.send_json(job, status=202)
             return
         try:
@@ -9831,7 +9842,13 @@ class AppHandler(BaseHTTPRequestHandler):
         if not AUTO_ANALYZE.exists():
             self.send_json({"error": f"Missing pipeline entrypoint: {AUTO_ANALYZE}"}, status=500)
             return
-        job = create_job(video_urls)
+        try:
+            job = create_job(video_urls)
+        except Exception as exc:
+            log_runtime_warning("analysis_job_create_failed", "Failed to create analysis job.", error=str(exc))
+            status = 507 if is_no_space_error(exc) else 500
+            self.send_json({"error": friendly_error(str(exc))}, status=status)
+            return
         self.send_json(job, status=202)
 
     def do_DELETE(self) -> None:
