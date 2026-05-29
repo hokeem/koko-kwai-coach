@@ -663,6 +663,8 @@ def is_retryable_model_error(text: str) -> bool:
         token in hay
         for token in [
             "HTTP 503",
+            "HTTP 500",
+            "INTERNAL",
             "UNAVAILABLE",
             "HIGH DEMAND",
             "RESOURCE_EXHAUSTED",

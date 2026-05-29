@@ -2599,8 +2599,10 @@ def should_try_next_model(error_text: str) -> bool:
         token in hay
         for token in [
             "HTTP 400",
+            "HTTP 500",
             "FAILED_PRECONDITION",
             "HTTP 503",
+            "INTERNAL",
             "UNAVAILABLE",
             "RESOURCE_EXHAUSTED",
             "TIMED OUT",
@@ -2620,8 +2622,10 @@ def should_retry_transient_pipeline(error_text: str) -> bool:
         token in hay
         for token in [
             "HTTP 429",
+            "HTTP 500",
             "HTTP 503",
             "RESOURCE_EXHAUSTED",
+            "INTERNAL",
             "UNAVAILABLE",
             "HIGH DEMAND",
             "RATE_LIMIT",
@@ -2651,8 +2655,10 @@ def friendly_error(error_text: str) -> str:
     upper = text.upper()
     if (
         "HTTP 429" in text
+        or "HTTP 500" in text
         or "HTTP 503" in text
         or "UNAVAILABLE" in text
+        or "INTERNAL" in upper
         or "HIGH DEMAND" in upper
         or "RESOURCE_EXHAUSTED" in upper
         or "RATE_LIMIT" in upper

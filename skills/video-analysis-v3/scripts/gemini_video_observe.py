@@ -120,7 +120,19 @@ def retry_call(label: str, fn, attempts: int = 3, sleep_sec: int = 2):
             last_error = exc
             text = str(exc)
             retryable = isinstance(exc, RETRYABLE_NETWORK_ERRORS) or any(
-                token in text for token in ["timed out", "EOF occurred", "Temporary failure", "Connection reset"]
+                token in text
+                for token in [
+                    "HTTP 500",
+                    "Internal error",
+                    "INTERNAL",
+                    "HTTP 503",
+                    "UNAVAILABLE",
+                    "RESOURCE_EXHAUSTED",
+                    "timed out",
+                    "EOF occurred",
+                    "Temporary failure",
+                    "Connection reset",
+                ]
             )
             if not retryable or attempt == attempts:
                 break
