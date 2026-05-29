@@ -41,6 +41,8 @@ SOURCE_VIDEO_EXTENDED_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "14"))
 MAX_CONCURRENT_FILTERS = max(1, int(os.environ.get("VIDEO_FILTER_MAX_CONCURRENT_JOBS", "1")))
 FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "0")).strip().lower() in {"1", "true", "yes", "on"}
+DELETE_SOURCE_VIDEO_AFTER_ANALYSIS = str(os.environ.get("VIDEO_ANALYSIS_DELETE_SOURCE_AFTER_SUCCESS", "1")).strip().lower() in {"1", "true", "yes", "on"}
+SYNC_LIBRARY_ON_STARTUP = str(os.environ.get("VIDEO_ANALYSIS_SYNC_LIBRARY_ON_STARTUP", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def stage_timeout(name: str, default: int) -> int:
@@ -362,6 +364,44 @@ def cleanup_old_results(*, now_dt: datetime | None = None) -> dict[str, int]:
     return summary
 
 
+def emergency_cleanup_result_artifacts() -> dict[str, int]:
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    metadata = collect_cleanup_metadata()
+    cleaned_source = 0
+    cleaned_raw = 0
+    skipped_running = 0
+    for output_dir in RESULTS_ROOT.iterdir():
+        if not output_dir.is_dir():
+            continue
+        info = metadata.get(output_dir.name) or {}
+        if str(info.get("status") or "").strip() in {"queued", "running"}:
+            skipped_running += 1
+            continue
+        source_path = output_dir / SOURCE_VIDEO_NAME
+        if source_path.exists():
+            try:
+                source_path.unlink()
+                cleaned_source += 1
+            except Exception as exc:
+                log_runtime_warning("emergency_cleanup_source_failed", "Could not remove source video during emergency cleanup.", path=str(source_path), error=str(exc))
+        for name in RAW_ARTIFACT_NAMES:
+            raw_path = output_dir / name
+            if not raw_path.exists():
+                continue
+            try:
+                raw_path.unlink()
+                cleaned_raw += 1
+            except Exception as exc:
+                log_runtime_warning("emergency_cleanup_raw_failed", "Could not remove raw artifact during emergency cleanup.", path=str(raw_path), error=str(exc))
+    summary = {
+        "cleaned_source_videos": cleaned_source,
+        "cleaned_raw_artifacts": cleaned_raw,
+        "skipped_running_dirs": skipped_running,
+    }
+    log_runtime_warning("emergency_cleanup_results_complete", "Finished emergency cleanup after disk pressure.", **summary)
+    return summary
+
+
 def load_jobs() -> None:
     global jobs
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -369,22 +409,35 @@ def load_jobs() -> None:
     jobs = read_json_file(JOBS_FILE, default={})
     if not isinstance(jobs, dict):
         jobs = {}
-    backfill_completed_jobs()
+    try:
+        emergency_cleanup_result_artifacts()
+    except Exception as exc:
+        log_runtime_warning("emergency_cleanup_results_skipped", "Emergency result cleanup failed during startup.", error=str(exc))
+    try:
+        backfill_completed_jobs()
+    except Exception as exc:
+        if is_no_space_error(exc):
+            log_runtime_warning("backfill_jobs_skipped", "Skipped completed job backfill because the persistent disk is full.", path=str(JOBS_FILE), error=str(exc))
+        else:
+            raise
     try:
         cleanup_old_results()
     except Exception as exc:
         log_runtime_warning("cleanup_results_skipped", "Automatic result cleanup failed during startup.", error=str(exc))
-    try:
-        sync_library_from_jobs()
-    except Exception as exc:
-        if is_no_space_error(exc):
-            log_runtime_warning(
-                "library_sync_skipped",
-                "Skipped script library sync during startup because the persistent disk is full.",
-                path=str(LIBRARY_FILE),
-            )
-        else:
-            raise
+    if SYNC_LIBRARY_ON_STARTUP:
+        try:
+            sync_library_from_jobs()
+        except Exception as exc:
+            if is_no_space_error(exc):
+                log_runtime_warning(
+                    "library_sync_skipped",
+                    "Skipped script library sync during startup because the persistent disk is full.",
+                    path=str(LIBRARY_FILE),
+                )
+            else:
+                raise
+    else:
+        log_runtime_info("library_sync_startup_skipped", "Skipped script library sync during startup.")
 
 
 def save_jobs() -> None:
@@ -764,7 +817,16 @@ def restore_pending_jobs_to_queue() -> None:
                     job["stage_message"] = "All batch items failed."
                     changed = True
         if changed:
-            save_jobs()
+            try:
+                save_jobs()
+            except Exception as exc:
+                if not is_no_space_error(exc):
+                    raise
+                log_runtime_warning(
+                    "restore_pending_jobs_save_skipped",
+                    "Skipped saving restored analysis jobs because the persistent disk is full.",
+                    error=str(exc),
+                )
     for job_id in pending_job_ids:
         enqueue_job(job_id)
 
@@ -797,7 +859,16 @@ def restore_pending_filter_jobs_to_queue() -> None:
                 pending_job_ids.append(job_id)
                 changed = True
         if changed:
-            save_filter_jobs()
+            try:
+                save_filter_jobs()
+            except Exception as exc:
+                if not is_no_space_error(exc):
+                    raise
+                log_runtime_warning(
+                    "restore_pending_filter_jobs_save_skipped",
+                    "Skipped saving restored filter jobs because the persistent disk is full.",
+                    error=str(exc),
+                )
     for job_id in pending_job_ids:
         with filter_queue_condition:
             if job_id not in queued_filter_job_ids:
@@ -4971,6 +5042,13 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                     script_json = read_json(output_dir / "script_table.json") or read_json(output_dir / "analysis_result.json") or result_json or {}
                     docx_path = write_script_docx(output_dir, script_json, item["video_url"])
                     docx_url = f"/results/{item['id']}/{docx_path.name}" if docx_path and docx_path.exists() else ""
+                    if DELETE_SOURCE_VIDEO_AFTER_ANALYSIS:
+                        source_path = output_dir / SOURCE_VIDEO_NAME
+                        if source_path.exists():
+                            try:
+                                source_path.unlink()
+                            except Exception as exc:
+                                log_runtime_warning("source_video_delete_failed", "Could not remove source video after successful analysis.", path=str(source_path), error=str(exc))
                     # Final pipeline completion must not block on an extra LLM
                     # classification round, otherwise the UI can sit at 90%
                     # long after the script files are already written.
