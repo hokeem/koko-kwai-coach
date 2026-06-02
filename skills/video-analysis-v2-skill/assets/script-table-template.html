@@ -12,6 +12,11 @@
     h2{margin:0 0 12px;font-size:22px}
     .meta{color:#666;font-size:14px;line-height:1.7}
     .summary{font-size:17px;line-height:1.9}
+    .video-review-layout{display:grid;grid-template-columns:minmax(260px,520px) 1fr;gap:18px;align-items:start}
+    .video-card video{width:100%;max-height:420px;border-radius:12px;background:#111;display:block}
+    .video-side{display:flex;flex-direction:column;gap:12px;min-width:0}
+    .video-hint{font-size:14px;line-height:1.8;color:#4b5563}
+    .video-current{display:inline-flex;align-items:center;width:max-content;max-width:100%;border:1px solid #fed7aa;background:#fff7ed;color:#c2410c;border-radius:999px;padding:8px 12px;font-size:14px;font-weight:700}
     .insight-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:4px}
     .insight{border:1px solid #e5e7eb;border-radius:10px;padding:12px 14px;background:#fbfdff}
     .insight b{display:block;margin-bottom:4px;color:#111827}
@@ -25,22 +30,76 @@
     th:nth-child(3),td:nth-child(3){width:34%}
     th:nth-child(4),td:nth-child(4){width:18%}
     th:nth-child(5),td:nth-child(5){width:26%}
+    tr.active-row{background:#fff7ed}
+    tr.active-row td{border-color:#fdba74}
+    .time-jump{appearance:none;border:0;background:transparent;color:#2563eb;font:inherit;font-weight:700;line-height:1.6;text-align:left;padding:0;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+    .time-jump:hover{color:#ea580c}
+    .time-jump:focus-visible{outline:2px solid #fb923c;outline-offset:3px;border-radius:4px}
     .frames{display:flex;gap:8px;margin-top:10px}
     .frame{flex:1}
     .frame img{width:100%;border-radius:8px;border:1px solid #e5e7eb;display:block}
     .cap{font-size:12px;color:#666;margin-top:4px;text-align:center}
     ul{margin:8px 0 0 20px;padding:0;line-height:1.8}
     .small{font-size:12px;color:#666}
+    @media (max-width: 760px){
+      body{padding:14px}
+      .card{border-radius:12px;padding:16px}
+      .video-review-layout{grid-template-columns:1fr}
+      table{table-layout:auto}
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     {{ title_card }}
     {{ summary_card }}
+    {{ video_card }}
     {{ core_viral_points_card }}
     {{ replaceable_parts_card }}
     {{ table_card }}
     {{ mechanism_card }}
   </div>
+  <script>
+    (() => {
+      const video = document.getElementById("source-video");
+      if (!video) return;
+
+      const current = document.getElementById("video-current");
+      const rows = Array.from(document.querySelectorAll("tbody tr[data-start]"));
+      const buttons = Array.from(document.querySelectorAll("[data-seek]"));
+
+      function formatClock(value) {
+        const total = Math.max(0, Math.floor(Number(value) || 0));
+        const minutes = String(Math.floor(total / 60)).padStart(2, "0");
+        const seconds = String(total % 60).padStart(2, "0");
+        return `${minutes}:${seconds}`;
+      }
+
+      function setActive(seconds) {
+        rows.forEach((row) => {
+          const start = Number(row.dataset.start || 0);
+          const end = Number(row.dataset.end || start + 1);
+          row.classList.toggle("active-row", seconds >= start && seconds < Math.max(end, start + 0.75));
+        });
+        if (current) {
+          const label = current.dataset.label || "当前";
+          current.textContent = `${label} ${formatClock(seconds)}`;
+        }
+      }
+
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const seek = Math.max(0, Number(button.dataset.seek || 0));
+          video.currentTime = seek;
+          video.scrollIntoView({ behavior: "smooth", block: "center" });
+          setActive(seek);
+          video.play().catch(() => {});
+        });
+      });
+
+      video.addEventListener("timeupdate", () => setActive(video.currentTime || 0));
+      video.addEventListener("loadedmetadata", () => setActive(video.currentTime || 0));
+    })();
+  </script>
 </body>
 </html>

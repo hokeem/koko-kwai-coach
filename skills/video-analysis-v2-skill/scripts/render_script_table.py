@@ -7,6 +7,7 @@ import argparse
 import base64
 import html
 import json
+import re
 from pathlib import Path
 
 
@@ -23,6 +24,9 @@ LOCALE_COPY = {
         "replaceable_title": "可替换部分",
         "table_title": "脚本表",
         "mechanism_title": "包袱机制",
+        "video_preview_title": "视频预览",
+        "video_preview_hint": "点击脚本表的时间，可以跳到对应视频片段。",
+        "video_preview_current": "当前",
         "video_link_col": "视频链接",
         "time_col": "时间",
         "visual_col": "画面内容",
@@ -42,6 +46,9 @@ LOCALE_COPY = {
         "replaceable_title": "Partes substituíveis",
         "table_title": "Tabela do roteiro",
         "mechanism_title": "Mecanismo da piada",
+        "video_preview_title": "Prévia do vídeo",
+        "video_preview_hint": "Clique no tempo da tabela para pular para o trecho correspondente.",
+        "video_preview_current": "Atual",
         "video_link_col": "Link do vídeo",
         "time_col": "Tempo",
         "visual_col": "Conteúdo visual",
@@ -54,9 +61,48 @@ LOCALE_COPY = {
     },
 }
 
+CLOCK_TIME_PATTERN = re.compile(r"(?P<minute>\d{1,2}):(?P<second>\d{2})")
+SECOND_RANGE_PATTERN = re.compile(
+    r"(?P<start>\d+(?:\.\d+)?)\s*[-–—~至到]\s*(?P<end>\d+(?:\.\d+)?)\s*(?:s|秒)",
+    re.IGNORECASE,
+)
+SECOND_PATTERN = re.compile(r"(?P<second>\d+(?:\.\d+)?)\s*(?:s|秒)", re.IGNORECASE)
+
 
 def esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
+
+
+def parse_time_seconds(value: object) -> tuple[float | None, float | None]:
+    text = "" if value is None else str(value)
+    clock_matches = list(CLOCK_TIME_PATTERN.finditer(text))
+    if clock_matches:
+        seconds = [int(match.group("minute")) * 60 + int(match.group("second")) for match in clock_matches[:2]]
+        start = float(seconds[0])
+        end = float(seconds[1]) if len(seconds) > 1 and seconds[1] > start else None
+        return (start, end)
+
+    range_match = SECOND_RANGE_PATTERN.search(text)
+    if range_match:
+        start = float(range_match.group("start"))
+        end = float(range_match.group("end"))
+        return (start, end if end > start else None)
+
+    second_match = SECOND_PATTERN.search(text)
+    if second_match:
+        return (float(second_match.group("second")), None)
+
+    return (None, None)
+
+
+def render_time_cell(value: object, has_video: bool) -> str:
+    label = esc(value)
+    if not has_video:
+        return label
+    start, _end = parse_time_seconds(value)
+    if start is None:
+        return label
+    return f'<button class="time-jump" type="button" data-seek="{start:g}">{label}</button>'
 
 
 def as_data_uri(path: str | None, base_dir: Path) -> str | None:
@@ -92,21 +138,46 @@ def render_frames(row: dict, base_dir: Path, locale: str) -> str:
 def render_rows(data: dict, base_dir: Path, locale: str) -> str:
     rows = []
     source_url = data.get("source_url", "")
+    has_video = (base_dir / "source.mp4").exists()
     for row in data.get("rows", []):
         row_url = row.get("source_url") or source_url
+        start, end = parse_time_seconds(row.get("time", ""))
+        row_attrs = ""
+        if start is not None:
+            row_attrs += f' data-start="{start:g}"'
+            row_attrs += f' data-end="{(end if end is not None else start + 1):g}"'
         visual = esc(row.get("visual_content", "")).replace("\n", "<br>")
         visual += render_frames(row, base_dir, locale)
         dialogue = esc(row.get("dialogue_or_audio", "")).replace("\n", "<br>")
         rows.append(
-            "<tr>"
+            f"<tr{row_attrs}>"
             f'<td><a href="{esc(row_url)}">{esc(LOCALE_COPY.get(locale, LOCALE_COPY["zh"])["video_link_col"])}</a></td>'
-            f"<td>{esc(row.get('time', ''))}</td>"
+            f"<td>{render_time_cell(row.get('time', ''), has_video)}</td>"
             f"<td>{visual}</td>"
             f"<td>{esc(row.get('action', '')).replace(chr(10), '<br>')}</td>"
             f"<td>{dialogue}</td>"
             "</tr>"
         )
     return "\n".join(rows)
+
+
+def render_video_card(base_dir: Path, locale: str) -> str:
+    if not (base_dir / "source.mp4").exists():
+        return ""
+    copy = LOCALE_COPY.get(locale, LOCALE_COPY["zh"])
+    return (
+        '<div class="card video-card" id="video-preview">'
+        f"<h2>{esc(copy['video_preview_title'])}</h2>"
+        '<div class="video-review-layout">'
+        '<video id="source-video" controls preload="metadata" src="source.mp4"></video>'
+        '<div class="video-side">'
+        f'<div class="video-hint">{esc(copy["video_preview_hint"])}</div>'
+        f'<div class="video-current" id="video-current" data-label="{esc(copy["video_preview_current"])}">'
+        f'{esc(copy["video_preview_current"])} 00:00</div>'
+        "</div>"
+        "</div>"
+        "</div>"
+    )
 
 
 def render_mechanism(data: dict, locale: str) -> str:
@@ -180,6 +251,7 @@ def render(data: dict, base_dir: Path, locale: str = "zh") -> str:
         template.replace("{{ title }}", esc(title))
         .replace("{{ title_card }}", title_card)
         .replace("{{ summary_card }}", summary_card)
+        .replace("{{ video_card }}", render_video_card(base_dir, locale))
         .replace("{{ core_viral_points_card }}", render_insight_card(copy["core_points_title"], data.get("core_viral_points"), locale))
         .replace("{{ replaceable_parts_card }}", render_insight_card(copy["replaceable_title"], data.get("replaceable_parts"), locale))
         .replace("{{ table_card }}", table_card)
