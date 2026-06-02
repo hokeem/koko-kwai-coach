@@ -9510,9 +9510,36 @@ class AppHandler(BaseHTTPRequestHandler):
             content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         else:
             content_type = "application/octet-stream"
+        if path.suffix == ".mp4":
+            file_size = path.stat().st_size
+            range_header = self.headers.get("Range") or ""
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+            if match:
+                start_text, end_text = match.groups()
+                start = int(start_text) if start_text else 0
+                end = int(end_text) if end_text else file_size - 1
+                start = max(0, min(start, file_size - 1))
+                end = max(start, min(end, file_size - 1))
+                length = end - start + 1
+                with path.open("rb") as handle:
+                    handle.seek(start)
+                    raw = handle.read(length)
+                self.send_response(206)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
         raw = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        if path.suffix == ".mp4":
+            self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
@@ -9544,6 +9571,8 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Expires", "0")
         if path.suffix == ".docx":
             self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        if path.suffix == ".mp4":
+            self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(path.stat().st_size))
         self.end_headers()
 
