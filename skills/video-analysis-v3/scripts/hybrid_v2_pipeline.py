@@ -500,16 +500,14 @@ TRANSLATE_DIALOGUE_PROMPT = """你是一个严格的对白翻译器。
 PRIMARY_FALLBACK_MODELS = [
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-2.5-pro",
     "gemini-3-flash-preview",
 ]
 
 SUPPLEMENT_FALLBACK_MODELS = [
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-2.5-pro",
     "gemini-3-flash-preview",
 ]
 
@@ -668,9 +666,11 @@ def is_retryable_model_error(text: str) -> bool:
         for token in [
             "HTTP 503",
             "HTTP 500",
+            "HTTP 404",
             "HTTP 400",
             "INTERNAL",
             "INVALID_ARGUMENT",
+            "NOT_FOUND",
             "UNAVAILABLE",
             "UNSUPPORTED",
             "MODEL_NOT_FOUND",

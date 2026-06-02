@@ -90,10 +90,11 @@ HERO_WORDMARK = ASSETS_ROOT / "kwai-wordmark.svg"
 def parse_model_candidates(*groups: str) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
+    retired = {"gemini-2.0-flash", "gemini-2.0-flash-lite"}
     for group in groups:
         for name in re.split(r"[,;\s]+", str(group or "")):
             value = name.strip()
-            if not value or value in seen:
+            if not value or value in seen or value in retired:
                 continue
             seen.add(value)
             ordered.append(value)
@@ -103,8 +104,7 @@ def parse_model_candidates(*groups: str) -> list[str]:
 STABLE_VIDEO_MODELS = [
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-2.5-pro",
     "gemini-3-flash-preview",
 ]
 MODEL_CANDIDATES = parse_model_candidates(
