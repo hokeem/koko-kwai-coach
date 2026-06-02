@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -77,6 +78,24 @@ def fetch_with_urllib(url: str, referer: str, timeout: int) -> tuple[bytes, str]
     return data, charset
 
 
+def post_json_with_urllib(url: str, payload: dict, referer: str, timeout: int) -> dict:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "User-Agent": UA,
+            "Referer": referer,
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8", "ignore")
+    return json.loads(body)
+
+
 def fetch_with_curl(url: str, referer: str, timeout: int) -> bytes:
     if not shutil.which("curl"):
         raise RuntimeError("curl not found")
@@ -137,6 +156,88 @@ def direct_mp4_urls(page: str) -> list[str]:
         if u not in urls:
             urls.append(u)
     return urls
+
+
+def extract_kuaishou_photo_id(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    if not any(domain in host for domain in ("gifshow.com", "kuaishou.com")):
+        return None
+    patterns = (
+        r"/fw/photo/([^/?#]+)",
+        r"/short-video/([^/?#]+)",
+        r"/fw/long-video/([^/?#]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, parsed.path)
+        if match:
+            return urllib.parse.unquote(match.group(1))
+    return None
+
+
+def iter_kuaishou_video_urls(photo: dict) -> list[dict]:
+    candidates = []
+
+    def add(url: str | None, height: int = 0, bitrate: int = 0, source: str = "") -> None:
+        if not url or ".mp4" not in url:
+            return
+        candidates.append({"url": url, "height": height or 0, "bitrate": bitrate or 0, "source": source})
+
+    manifest = photo.get("manifest") or {}
+    for adaptation in manifest.get("adaptationSet") or []:
+        for rep in adaptation.get("representation") or []:
+            height = int(rep.get("height") or 0)
+            bitrate = int(rep.get("avgBitrate") or rep.get("maxBitrate") or 0)
+            add(rep.get("url"), height, bitrate, "manifest.url")
+            for backup in rep.get("backupUrl") or []:
+                add(backup, height, bitrate, "manifest.backupUrl")
+
+    for key in ("photoUrl", "photoH265Url", "croppedPhotoUrl", "croppedPhotoH265Url"):
+        add(photo.get(key), int(photo.get("height") or 0), 0, key)
+
+    seen = set()
+    unique = []
+    for item in candidates:
+        if item["url"] in seen:
+            continue
+        seen.add(item["url"])
+        unique.append(item)
+    return sorted(unique, key=lambda item: (item["height"], item["bitrate"]), reverse=True)
+
+
+def try_kuaishou_h5(url: str, source: Path, meta: dict) -> bool:
+    photo_id = extract_kuaishou_photo_id(url)
+    if not photo_id:
+        return False
+
+    endpoint = "https://m.gifshow.com/rest/wd/ugH5App/photo/simple/info"
+    data = post_json_with_urllib(endpoint, {"photoId": photo_id}, url, 30)
+    result = data.get("result")
+    if result != 1:
+        message = data.get("error_msg") or data.get("error") or f"result={result}"
+        raise SystemExit(f"Kuaishou H5 detail failed: {message}")
+
+    photo = data.get("photo") or {}
+    urls = iter_kuaishou_video_urls(photo)
+    if not urls:
+        raise SystemExit("Kuaishou H5 detail returned no downloadable mp4 URL")
+
+    best = urls[0]
+    size = download_url(best["url"], source, url)
+    meta.update({
+        "local_video": str(source),
+        "route": "kuaishou-h5",
+        "video_url": best["url"],
+        "downloaded_bytes": size,
+        "photo_id": photo_id,
+        "title": photo.get("caption") or photo.get("photoId") or photo_id,
+        "author": photo.get("userName"),
+        "cover_url": ((photo.get("coverUrls") or [{}])[0] or {}).get("url"),
+        "source_height": best.get("height"),
+        "source_bitrate": best.get("bitrate"),
+        "source_url_type": best.get("source"),
+    })
+    return True
 
 
 def download_url(url: str, dest: Path, referer: str, timeout: int = 120, attempts: int = 3) -> int:
@@ -212,7 +313,9 @@ def main() -> int:
             shutil.copyfile(src, source)
         meta.update({"local_video": str(source), "title": src.name, "route": "local-file"})
     else:
-        if try_ytdlp(inp, out):
+        if try_kuaishou_h5(inp, source, meta):
+            pass
+        elif try_ytdlp(inp, out):
             meta.update({"local_video": str(source), "route": "yt-dlp"})
         else:
             page = fetch_html(inp, out)
