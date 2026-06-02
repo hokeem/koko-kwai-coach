@@ -85,11 +85,32 @@ ERROR_CASE_PASSWORD = "kwai666"
 ERROR_CASE_AUTH_COOKIE = "koko_error_case_auth"
 ASSETS_ROOT = BASE / "assets"
 HERO_WORDMARK = ASSETS_ROOT / "kwai-wordmark.svg"
-MODEL_CANDIDATES = [
-    os.environ.get("VIDEO_ANALYSIS_MODEL", "gemini-2.5-flash-lite"),
+
+
+def parse_model_candidates(*groups: str) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for name in re.split(r"[,;\s]+", str(group or "")):
+            value = name.strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
+STABLE_VIDEO_MODELS = [
+    "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
     "gemini-3-flash-preview",
 ]
+MODEL_CANDIDATES = parse_model_candidates(
+    ",".join(STABLE_VIDEO_MODELS),
+    os.environ.get("VIDEO_ANALYSIS_MODEL", ""),
+)
 BEIJING_TZ = timezone(timedelta(hours=8))
 SOURCE_VIDEO_NAME = "source.mp4"
 RAW_ARTIFACT_NAMES = {
@@ -147,8 +168,8 @@ try:
         unique_models,
     )
 except Exception:
-    PRIMARY_FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-flash-preview"]
-    SUPPLEMENT_FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3-flash-preview"]
+    PRIMARY_FALLBACK_MODELS = STABLE_VIDEO_MODELS[:]
+    SUPPLEMENT_FALLBACK_MODELS = STABLE_VIDEO_MODELS[:]
     def enforce_chinese_dialogue_translation(script_json: dict, key: str, models: list[str]) -> dict:
         return script_json
     run_text_json_prompt_with_fallback = None
