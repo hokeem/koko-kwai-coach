@@ -2290,6 +2290,61 @@ def append_library_entry(entry: dict[str, Any]) -> bool:
         return save_library_entries(entries[:500])
 
 
+def library_preview_image_url(entry_id: str, script_json: dict[str, Any] | None = None, output_dir: Path | None = None) -> str:
+    if not entry_id:
+        return ""
+    output_dir = output_dir or (RESULTS_ROOT / entry_id)
+    script_json = script_json or read_json(output_dir / "script_table.json") or read_json(output_dir / "analysis_result.json") or {}
+    for row in script_json.get("rows") or []:
+        for key in ("start_frame", "end_frame"):
+            value = str(row.get(key) or "").strip()
+            if not value:
+                continue
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                candidate = output_dir / candidate
+            try:
+                candidate = candidate.resolve()
+                base = output_dir.resolve()
+            except FileNotFoundError:
+                continue
+            if candidate.exists() and candidate.is_file() and (candidate == base or base in candidate.parents):
+                rel = candidate.relative_to(base).as_posix()
+                return f"/results/{entry_id}/{rel}"
+    return ""
+
+
+def hydrate_library_entry_preview(entry: dict[str, Any]) -> dict[str, Any]:
+    if entry.get("preview_image_url"):
+        return entry
+    entry_id = str(entry.get("entry_id") or "").strip()
+    if not entry_id:
+        return entry
+    preview_url = library_preview_image_url(entry_id)
+    if preview_url:
+        entry["preview_image_url"] = preview_url
+    return entry
+
+
+def delete_library_entries(entry_ids: list[str]) -> dict[str, Any]:
+    valid_ids = []
+    seen = set()
+    for entry_id in entry_ids:
+        entry_id = str(entry_id or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{32}", entry_id) or entry_id in seen:
+            continue
+        valid_ids.append(entry_id)
+        seen.add(entry_id)
+    deleted = []
+    missing = []
+    for entry_id in valid_ids:
+        if delete_library_entry(entry_id):
+            deleted.append(entry_id)
+        else:
+            missing.append(entry_id)
+    return {"deleted": deleted, "missing": missing}
+
+
 def delete_library_entry(entry_id: str) -> bool:
     removed = False
     with job_lock:
@@ -2584,6 +2639,7 @@ def sync_library_from_jobs() -> None:
                     "report_url": job.get("report_url") or f"/results/{parent_job_id}/product_report.html",
                     "evidence_url": job.get("evidence_url") or f"/results/{parent_job_id}/evidence_bundle.json",
                     "docx_url": docx_url,
+                    "preview_image_url": library_preview_image_url(parent_job_id, script_json, output_dir),
                 }
                 append_library_entry(entry)
                 existing_entries[parent_job_id] = entry
@@ -4385,6 +4441,7 @@ def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: 
         "pt_docx_url": item.get("pt_docx_url") or "",
         "zh_html_url": item.get("zh_html_url") or item.get("html_url") or "",
         "pt_html_url": item.get("pt_html_url") or "",
+        "preview_image_url": library_preview_image_url(item["id"], script, output_dir),
         "source": "edited" if item.get("edited") else "ai",
         "saved_at": item.get("saved_to_library_at") or now_iso(),
     }
@@ -8940,6 +8997,14 @@ def studio_html() -> str:
 
 def library_html() -> str:
     entries = load_library_entries()
+    changed_entries = False
+    for entry in entries:
+        before = entry.get("preview_image_url") or ""
+        hydrate_library_entry_preview(entry)
+        if (entry.get("preview_image_url") or "") != before:
+            changed_entries = True
+    if changed_entries:
+        save_library_entries(entries)
     counts = Counter(entry.get("content_type") or DEFAULT_CONTENT_TYPE for entry in entries)
     ordered_counts = [(label, counts.get(label, 0)) for label in LIBRARY_FILTER_LABELS]
     filter_options = "".join(
@@ -8956,14 +9021,17 @@ def library_html() -> str:
     ) or "<span class='batch-chip'>No scripts yet</span>"
     cards = []
     for entry in entries:
-        source_video_url = f"/results/{entry.get('entry_id')}/source.mp4"
-        source_video_exists = (RESULTS_ROOT / str(entry.get("entry_id") or "") / SOURCE_VIDEO_NAME).exists()
+        entry_id = str(entry.get("entry_id") or "")
+        preview_image_url = str(entry.get("preview_image_url") or "").strip()
+        source_video_url = f"/results/{entry_id}/source.mp4"
+        source_video_exists = (RESULTS_ROOT / entry_id / SOURCE_VIDEO_NAME).exists()
         created_at = format_beijing_time(entry.get("created_at") or "")
         content_type = entry.get("content_type") or DEFAULT_CONTENT_TYPE
         content_type_source = entry.get("content_type_source") or "auto"
         manual_badge = "<span class='library-time' data-manual-badge='true'>Manual</span>" if content_type_source == "manual" else "<span class='library-time' data-manual-badge='true' hidden>Manual</span>"
         cards.append(
-            f"<article class='library-card' data-content-type='{html_escape(content_type)}'>"
+            f"<article class='library-card' data-entry-id='{html_escape(entry_id)}' data-content-type='{html_escape(content_type)}'>"
+            "<label class='library-select'><input type='checkbox' data-library-select><span>选择</span></label>"
             "<div class='library-card-top'>"
             f"<button class='batch-chip batch-chip-button' type='button' data-edit-content-type='{html_escape(entry.get('entry_id') or '')}' data-current-content-type='{html_escape(content_type)}'>{html_escape(content_type)}</button>"
             f"<span class='library-time' data-created-at>{html_escape(created_at or 'Unknown time')}</span>"
@@ -8971,9 +9039,13 @@ def library_html() -> str:
             f"{manual_badge}"
             f"<a class='video-origin-link' href='{html_escape(entry.get('video_url') or '')}' target='_blank' rel='noreferrer'>{html_escape(entry.get('video_url') or '')}</a>"
             + (
-                f"<div class='video-frame-wrap'><video class='video-frame' data-first-frame muted playsinline preload='metadata' src='{html_escape(source_video_url)}'></video></div>"
-                if source_video_exists
-                else "<div class='video-frame-wrap video-frame-empty'><div class='video-frame-empty-copy'>原视频已自动清理</div></div>"
+                f"<div class='video-frame-wrap'><img class='video-frame' src='{html_escape(preview_image_url)}' alt='' loading='lazy'></div>"
+                if preview_image_url
+                else (
+                    f"<div class='video-frame-wrap'><video class='video-frame' data-first-frame muted playsinline preload='metadata' src='{html_escape(source_video_url)}'></video></div>"
+                    if source_video_exists
+                    else "<div class='video-frame-wrap video-frame-empty'><div class='video-frame-empty-copy'>首图暂不可用</div></div>"
+                )
             )
             + "<div class='library-copy'>"
             f"<h3>{html_escape(entry.get('title') or 'Untitled Script')}</h3>"
@@ -9040,6 +9112,7 @@ def library_html() -> str:
     }}
     .library-stats {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; }}
     .library-toolbar {{ display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap; margin-top:42px; margin-bottom:14px; }}
+    .bulk-actions {{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }}
     .filter-label {{ display:flex; flex-direction:column; gap:8px; font-size:13px; font-weight:700; }}
     .filter-select {{
       min-width:220px; border:1px solid rgba(255,130,0,.18); border-radius:16px; padding:12px 14px;
@@ -9049,6 +9122,7 @@ def library_html() -> str:
     }}
     .library-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:24px; margin-top:20px; }}
     .library-card {{
+      position: relative;
       border:1px solid rgba(255,130,0,.16); border-radius:24px; background:rgba(255,255,255,.56);
       padding:22px; display:flex; flex-direction:column; gap:18px;
       box-shadow: 0 18px 42px rgba(249,115,0,.10);
@@ -9056,6 +9130,11 @@ def library_html() -> str:
       -webkit-backdrop-filter: blur(18px);
     }}
     .library-card-top {{ display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }}
+    .library-select {{ display:none; align-items:center; gap:8px; width:max-content; border-radius:999px; padding:8px 12px; color:#FF8200; background:rgba(255,255,255,.72); border:1px solid rgba(255,130,0,.18); font-size:12px; font-weight:800; cursor:pointer; }}
+    .library-select input {{ accent-color:#FF8200; }}
+    body.bulk-mode .library-select {{ display:inline-flex; }}
+    body.bulk-mode .library-card {{ outline:1px dashed rgba(255,130,0,.32); }}
+    .library-card.selected {{ background:rgba(255,244,232,.82); border-color:rgba(255,130,0,.42); }}
     .library-time {{ font-size:12px; font-weight:700; color:#FF8200; opacity:.88; }}
     .video-origin-link {{ color:#FF8200; text-decoration:none; font-size:13px; line-height:1.55; word-break:break-all; }}
     .video-frame-wrap {{
@@ -9122,6 +9201,11 @@ def library_html() -> str:
         </div>
       </div>
       <div class="library-toolbar">
+        <div class="bulk-actions">
+          <button class="action-link" id="bulk-mode-toggle" type="button">批量删除</button>
+          <button class="action-link action-link-danger" id="bulk-delete-approve" type="button" hidden disabled>删除选中 0</button>
+          <button class="action-link" id="bulk-cancel" type="button" hidden>取消</button>
+        </div>
         <label class="filter-label">
           <span>Filter by template</span>
           <select id="content-filter" class="filter-select">
@@ -9183,6 +9267,9 @@ def library_html() -> str:
     const contentTypeSelect = document.getElementById("content-type-select");
     const contentTypeCancel = document.getElementById("content-type-cancel");
     const contentTypeSave = document.getElementById("content-type-save");
+    const bulkModeToggle = document.getElementById("bulk-mode-toggle");
+    const bulkDeleteApprove = document.getElementById("bulk-delete-approve");
+    const bulkCancel = document.getElementById("bulk-cancel");
     const libraryFilterLabels = {json.dumps(LIBRARY_FILTER_LABELS, ensure_ascii=False)};
     let pendingDeleteButton = null;
     let pendingExportChoice = null;
@@ -9296,6 +9383,36 @@ def library_html() -> str:
       }}
     }}
 
+    function selectedLibraryIds() {{
+      return Array.from(document.querySelectorAll("[data-library-select]:checked"))
+        .map((input) => input.closest(".library-card")?.getAttribute("data-entry-id") || "")
+        .filter(Boolean);
+    }}
+
+    function updateBulkControls() {{
+      const bulkMode = document.body.classList.contains("bulk-mode");
+      const selectedCount = selectedLibraryIds().length;
+      if (bulkModeToggle) bulkModeToggle.hidden = bulkMode;
+      if (bulkDeleteApprove) {{
+        bulkDeleteApprove.hidden = !bulkMode;
+        bulkDeleteApprove.disabled = selectedCount === 0;
+        bulkDeleteApprove.textContent = `删除选中 ${{selectedCount}}`;
+      }}
+      if (bulkCancel) bulkCancel.hidden = !bulkMode;
+      document.querySelectorAll(".library-card").forEach((card) => {{
+        const checkbox = card.querySelector("[data-library-select]");
+        card.classList.toggle("selected", Boolean(checkbox && checkbox.checked));
+      }});
+    }}
+
+    function setBulkMode(enabled) {{
+      document.body.classList.toggle("bulk-mode", enabled);
+      if (!enabled) {{
+        document.querySelectorAll("[data-library-select]").forEach((input) => {{ input.checked = false; }});
+      }}
+      updateBulkControls();
+    }}
+
     function applyLibraryFilter() {{
       const value = contentFilter ? contentFilter.value : "";
       document.querySelectorAll(".library-card").forEach((card) => {{
@@ -9307,6 +9424,44 @@ def library_html() -> str:
     if (contentFilter) {{
       contentFilter.addEventListener("change", applyLibraryFilter);
     }}
+
+    if (bulkModeToggle) {{
+      bulkModeToggle.addEventListener("click", () => setBulkMode(true));
+    }}
+
+    if (bulkCancel) {{
+      bulkCancel.addEventListener("click", () => setBulkMode(false));
+    }}
+
+    if (bulkDeleteApprove) {{
+      bulkDeleteApprove.addEventListener("click", async () => {{
+        const entryIds = selectedLibraryIds();
+        if (!entryIds.length) return;
+        if (!window.confirm(`确定删除选中的 ${{entryIds.length}} 条脚本吗？这个操作会删除脚本库记录和对应结果文件。`)) return;
+        const originalText = bulkDeleteApprove.textContent;
+        bulkDeleteApprove.textContent = "删除中...";
+        bulkDeleteApprove.disabled = true;
+        try {{
+          const response = await fetch("/api/library/batch-delete", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ entry_ids: entryIds }}),
+          }});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Batch delete failed");
+          window.location.reload();
+        }} catch (error) {{
+          alert("批量删除失败，请重试。");
+          bulkDeleteApprove.textContent = originalText;
+          bulkDeleteApprove.disabled = false;
+        }}
+      }});
+    }}
+
+    document.querySelectorAll("[data-library-select]").forEach((input) => {{
+      input.addEventListener("change", updateBulkControls);
+    }});
+    updateBulkControls();
 
     document.querySelectorAll("video[data-first-frame]").forEach((video) => {{
       const setFirstFrame = () => {{
@@ -9360,6 +9515,7 @@ def library_html() -> str:
         closeDeleteConfirm();
         closeExportChoice();
         closeContentTypeOverlay();
+        setBulkMode(false);
       }}
     }});
 
@@ -9421,6 +9577,11 @@ def library_html() -> str:
     }}
 
     document.addEventListener("click", async (event) => {{
+      const selectLabel = event.target.closest(".library-select");
+      if (selectLabel) {{
+        setTimeout(updateBulkControls, 0);
+        return;
+      }}
       const previewBtn = event.target.closest("[data-open-preview]");
       if (previewBtn) {{
         const url = previewBtn.getAttribute("data-open-preview");
@@ -9504,6 +9665,10 @@ class AppHandler(BaseHTTPRequestHandler):
             content_type = "video/mp4"
         elif path.suffix == ".png":
             content_type = "image/png"
+        elif path.suffix.lower() in {".jpg", ".jpeg"}:
+            content_type = "image/jpeg"
+        elif path.suffix.lower() == ".webp":
+            content_type = "image/webp"
         elif path.suffix == ".svg":
             content_type = "image/svg+xml; charset=utf-8"
         elif path.suffix == ".docx":
@@ -9558,6 +9723,10 @@ class AppHandler(BaseHTTPRequestHandler):
             content_type = "video/mp4"
         elif path.suffix == ".png":
             content_type = "image/png"
+        elif path.suffix.lower() in {".jpg", ".jpeg"}:
+            content_type = "image/jpeg"
+        elif path.suffix.lower() == ".webp":
+            content_type = "image/webp"
         elif path.suffix == ".svg":
             content_type = "image/svg+xml; charset=utf-8"
         elif path.suffix == ".docx":
@@ -9793,6 +9962,19 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": result}, status=400)
                 return
             self.send_json({"ok": True, "job_id": result, "item_id": item_id}, status=202)
+            return
+        if parsed.path == "/api/library/batch-delete":
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            raw_ids = payload.get("entry_ids")
+            if not isinstance(raw_ids, list):
+                self.send_json({"error": "entry_ids must be a list."}, status=400)
+                return
+            result = delete_library_entries([str(entry_id or "") for entry_id in raw_ids])
+            self.send_json({"ok": True, **result})
             return
         library_type_match = re.fullmatch(r"/api/library/([0-9a-f]{32})/content-type", parsed.path)
         if library_type_match:
