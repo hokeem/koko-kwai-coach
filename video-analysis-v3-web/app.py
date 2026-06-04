@@ -1461,6 +1461,53 @@ def detect_faces_combined(image: Any, *, dnn_confidence: float = 0.3, min_face_s
     return dedupe_face_boxes(boxes)
 
 
+def ffmpeg_input_options(referer: str = "https://www.kwai.com/") -> list[str]:
+    headers = (
+        "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36\r\n"
+        f"Referer: {referer}\r\n"
+    )
+    return [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        "5",
+        "-headers",
+        headers,
+    ]
+
+
+def clean_ffmpeg_error(stderr: str, stdout: str = "") -> str:
+    text = (stderr or stdout or "").strip()
+    if not text:
+        return "ffmpeg failed without error output"
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    ignored_prefixes = (
+        "ffmpeg version ",
+        "built with ",
+        "configuration:",
+        "libav",
+        "libsw",
+        "libpostproc",
+    )
+    useful = [
+        line
+        for line in lines
+        if not line.startswith(ignored_prefixes)
+        and not re.fullmatch(r"[A-Za-z0-9_]+ +\d+\.\s*\d+\.\d+.*", line)
+    ]
+    cleaned = "\n".join(useful or lines[-8:])
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > 900:
+        cleaned = cleaned[:900].rstrip() + "..."
+    return cleaned or "ffmpeg failed"
+
+
 def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir: Path) -> list[Path]:
     if not content_url:
         return []
@@ -1474,11 +1521,13 @@ def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir:
     timestamps = [0.2, max(duration * 0.5, 0.4), max(duration - 0.4, 0.6)]
     names = ["start.jpg", "middle.jpg", "end.jpg"]
     frames: list[Path] = []
+    last_error = ""
     for ts, name in zip(timestamps, names):
         out_path = out_dir / name
         cmd = [
             ffmpeg_bin,
             "-y",
+            *ffmpeg_input_options(),
             "-ss",
             f"{max(ts, 0):.2f}",
             "-i",
@@ -1492,6 +1541,10 @@ def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
             frames.append(out_path)
+        elif result.returncode != 0:
+            last_error = clean_ffmpeg_error(result.stderr, result.stdout)
+    if not frames and last_error:
+        raise RuntimeError(f"关键帧抽取失败：{last_error}")
     return frames
 
 
@@ -1606,6 +1659,7 @@ def extract_remote_audio(content_url: str, cache_dir: Path) -> Path:
     cmd = [
         ffmpeg_bin,
         "-y",
+        *ffmpeg_input_options(),
         "-i",
         content_url,
         "-vn",
@@ -1619,7 +1673,7 @@ def extract_remote_audio(content_url: str, cache_dir: Path) -> Path:
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=240)
     if result.returncode != 0 or not out_path.exists() or out_path.stat().st_size <= 0:
-        raise RuntimeError((result.stderr or result.stdout or "audio extraction failed").strip())
+        raise RuntimeError(f"完整音频提取失败：{clean_ffmpeg_error(result.stderr, result.stdout)}")
     max_bytes = max(1, FILTER_AUDIO_MAX_MB) * 1024 * 1024
     if out_path.stat().st_size > max_bytes:
         raise RuntimeError(f"audio file too large for filter transcription: {out_path.stat().st_size} bytes")
