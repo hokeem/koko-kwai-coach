@@ -1485,7 +1485,7 @@ def ffmpeg_input_options(referer: str = "https://www.kwai.com/") -> list[str]:
 def clean_ffmpeg_error(stderr: str, stdout: str = "") -> str:
     text = (stderr or stdout or "").strip()
     if not text:
-        return "ffmpeg failed without error output"
+        return "ffmpeg exited without error output"
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     ignored_prefixes = (
         "ffmpeg version ",
@@ -1508,15 +1508,24 @@ def clean_ffmpeg_error(stderr: str, stdout: str = "") -> str:
     return cleaned or "ffmpeg failed"
 
 
-def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir: Path) -> list[Path]:
-    if not content_url:
-        return []
-    try:
-        import imageio_ffmpeg  # type: ignore
-    except Exception as exc:
-        raise RuntimeError(f"imageio_ffmpeg unavailable: {exc}") from exc
-    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
-    out_dir.mkdir(parents=True, exist_ok=True)
+def ensure_filter_source_video(content_url: str, cache_dir: Path) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    source_path = cache_dir / "source.mp4"
+    if source_path.exists() and source_path.stat().st_size > 0:
+        return source_path
+    download_url_to_file(content_url, source_path)
+    if not source_path.exists() or source_path.stat().st_size <= 0:
+        raise RuntimeError("临时源视频下载失败。")
+    return source_path
+
+
+def ffmpeg_input_args(source: str, *, remote: bool) -> list[str]:
+    if remote:
+        return [*ffmpeg_input_options(), "-i", source]
+    return ["-i", source]
+
+
+def extract_keyframes_from_source(ffmpeg_bin: str, source: str, duration_seconds: float, out_dir: Path, *, remote: bool) -> list[Path]:
     duration = duration_seconds if duration_seconds > 1 else 8.0
     timestamps = [0.2, max(duration * 0.5, 0.4), max(duration - 0.4, 0.6)]
     names = ["start.jpg", "middle.jpg", "end.jpg"]
@@ -1527,11 +1536,9 @@ def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir:
         cmd = [
             ffmpeg_bin,
             "-y",
-            *ffmpeg_input_options(),
             "-ss",
             f"{max(ts, 0):.2f}",
-            "-i",
-            content_url,
+            *ffmpeg_input_args(source, remote=remote),
             "-frames:v",
             "1",
             "-vf",
@@ -1546,6 +1553,25 @@ def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir:
     if not frames and last_error:
         raise RuntimeError(f"关键帧抽取失败：{last_error}")
     return frames
+
+
+def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir: Path) -> list[Path]:
+    if not content_url:
+        return []
+    try:
+        import imageio_ffmpeg  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"imageio_ffmpeg unavailable: {exc}") from exc
+    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return extract_keyframes_from_source(ffmpeg_bin, content_url, duration_seconds, out_dir, remote=True)
+    except Exception as remote_exc:
+        source_path = ensure_filter_source_video(content_url, out_dir)
+        try:
+            return extract_keyframes_from_source(ffmpeg_bin, str(source_path), duration_seconds, out_dir, remote=False)
+        except Exception as local_exc:
+            raise RuntimeError(f"{remote_exc}；临时下载后仍失败：{local_exc}") from local_exc
 
 
 def mime_type_for_path(path: Path) -> str:
@@ -1646,22 +1672,11 @@ def is_retryable_filter_error(text: str) -> bool:
     return any(token in hay for token in ["HTTP 503", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "TIMED OUT", "JSON", "EOF", "CONNECTION RESET"])
 
 
-def extract_remote_audio(content_url: str, cache_dir: Path) -> Path:
-    if not content_url:
-        raise RuntimeError("content url missing")
-    try:
-        import imageio_ffmpeg  # type: ignore
-    except Exception as exc:
-        raise RuntimeError(f"imageio_ffmpeg unavailable: {exc}") from exc
-    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    out_path = cache_dir / "full_audio.mp3"
+def extract_audio_from_source(ffmpeg_bin: str, source: str, out_path: Path, *, remote: bool) -> Path:
     cmd = [
         ffmpeg_bin,
         "-y",
-        *ffmpeg_input_options(),
-        "-i",
-        content_url,
+        *ffmpeg_input_args(source, remote=remote),
         "-vn",
         "-ac",
         "1",
@@ -1674,9 +1689,36 @@ def extract_remote_audio(content_url: str, cache_dir: Path) -> Path:
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=240)
     if result.returncode != 0 or not out_path.exists() or out_path.stat().st_size <= 0:
         raise RuntimeError(f"完整音频提取失败：{clean_ffmpeg_error(result.stderr, result.stdout)}")
+    return out_path
+
+
+def extract_remote_audio(content_url: str, cache_dir: Path) -> Path:
+    if not content_url:
+        raise RuntimeError("content url missing")
+    try:
+        import imageio_ffmpeg  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"imageio_ffmpeg unavailable: {exc}") from exc
+    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out_path = cache_dir / "full_audio.mp3"
+    try:
+        extract_audio_from_source(ffmpeg_bin, content_url, out_path, remote=True)
+    except Exception as remote_exc:
+        source_path = ensure_filter_source_video(content_url, cache_dir)
+        try:
+            extract_audio_from_source(ffmpeg_bin, str(source_path), out_path, remote=False)
+        except Exception as local_exc:
+            raise RuntimeError(f"{remote_exc}；临时下载后仍失败：{local_exc}") from local_exc
     max_bytes = max(1, FILTER_AUDIO_MAX_MB) * 1024 * 1024
     if out_path.stat().st_size > max_bytes:
         raise RuntimeError(f"audio file too large for filter transcription: {out_path.stat().st_size} bytes")
+    try:
+        source_path = cache_dir / "source.mp4"
+        if source_path.exists():
+            source_path.unlink()
+    except Exception:
+        pass
     return out_path
 
 
