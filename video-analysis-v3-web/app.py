@@ -1796,14 +1796,30 @@ def count_thumbnail_faces(thumbnail_url: str, cache_dir: Path) -> dict[str, Any]
 
 
 def detect_gender_presence_from_frames(content_url: str, duration_text: object, cache_dir: Path) -> dict[str, Any]:
-    if cv2 is None:
-        return {"available": False, "reason": "cv2 unavailable", "bucket": "low", "signals": [], "score_boost": 0}
     if not content_url:
         return {"available": False, "reason": "content url missing", "bucket": "low", "signals": [], "score_boost": 0}
     duration_seconds = parse_duration_seconds(duration_text)
     frames = extract_remote_keyframes(content_url, duration_seconds, cache_dir)
     if not frames:
         return {"available": False, "reason": "frames unavailable", "bucket": "low", "signals": [], "score_boost": 0}
+    if cv2 is None:
+        return {
+            "available": False,
+            "reason": "cv2 unavailable; keyframes extracted without face detection",
+            "bucket": "low",
+            "signals": ["已抽取开头、中间、结尾三张关键帧，但当前环境无法做人脸/性别检测。"],
+            "score_boost": 0,
+            "frame_count": len(frames),
+            "inspected_frames": 0,
+            "face_total": 0,
+            "male_count": 0,
+            "female_count": 0,
+            "pair_frames": 0,
+            "has_both": False,
+            "max_faces_single_frame": 0,
+            "frame_summaries": [{"name": path.name, "face_count": 0, "male_count": 0, "female_count": 0, "is_pair_frame": False} for path in frames],
+            "frame_paths": [str(path) for path in frames],
+        }
     gender_net = ensure_gender_net()
     male_count = 0
     female_count = 0
