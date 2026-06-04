@@ -1,3 +1,4 @@
 # Web app runtime dependency.
 python-docx==1.1.2
 yt-dlp==2025.4.30
+imageio-ffmpeg==0.5.1
