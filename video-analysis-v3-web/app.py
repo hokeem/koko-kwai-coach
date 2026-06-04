@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Public-facing web UI for video-analysis-v3."""
 from __future__ import annotations
 
@@ -41,7 +42,11 @@ SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTIO
 SOURCE_VIDEO_EXTENDED_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_EXTENDED_RETENTION_DAYS", "30"))
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "14"))
 MAX_CONCURRENT_FILTERS = max(1, int(os.environ.get("VIDEO_FILTER_MAX_CONCURRENT_JOBS", "1")))
-FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "0")).strip().lower() in {"1", "true", "yes", "on"}
+FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "1")).strip().lower() in {"1", "true", "yes", "on"}
+FILTER_DURATION_MIN_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MIN_SEC", "30"))
+FILTER_DURATION_MAX_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MAX_SEC", "120"))
+FILTER_AUDIO_MAX_MB = int(os.environ.get("VIDEO_FILTER_AUDIO_MAX_MB", "18"))
+MAX_CONCURRENT_TRANSLATIONS = max(1, int(os.environ.get("VIDEO_TRANSLATION_MAX_CONCURRENT_JOBS", "1")))
 DELETE_SOURCE_VIDEO_AFTER_ANALYSIS = str(os.environ.get("VIDEO_ANALYSIS_DELETE_SOURCE_AFTER_SUCCESS", "1")).strip().lower() in {"1", "true", "yes", "on"}
 SYNC_LIBRARY_ON_STARTUP = str(os.environ.get("VIDEO_ANALYSIS_SYNC_LIBRARY_ON_STARTUP", "0")).strip().lower() in {"1", "true", "yes", "on"}
 GEMINI_TRANSIENT_RETRY_ATTEMPTS = max(1, int(os.environ.get("VIDEO_ANALYSIS_TRANSIENT_RETRY_ATTEMPTS", "3")))
@@ -72,15 +77,45 @@ REPO_ROOT = BASE.parent
 SKILL_ROOT = REPO_ROOT / "skills" / "video-analysis-v3"
 V2_SKILL_ROOT = REPO_ROOT / "skills" / "video-analysis-v2-skill"
 AUTO_ANALYZE = SKILL_ROOT / "scripts" / "hybrid_v2_pipeline.py"
+TRANSCREATE_VIDEO = SKILL_ROOT / "scripts" / "transcreate_video.py"
 DATA_ROOT = Path(os.environ.get("VIDEO_ANALYSIS_WEB_DATA_DIR", str(BASE / "data"))).expanduser()
 JOBS_FILE = DATA_ROOT / "jobs.json"
+TRANSLATION_JOBS_FILE = DATA_ROOT / "translation_jobs.json"
 RESULTS_ROOT = DATA_ROOT / "results"
 LIBRARY_FILE = DATA_ROOT / "script_library.json"
 ERROR_CASE_LIBRARY_FILE = DATA_ROOT / "error_case_library.json"
+CREATOR_ONLINE_LIBRARY_FILE = DATA_ROOT / "creator_online_library.json"
+CREATOR_THUMBNAIL_CACHE_FILE = DATA_ROOT / "creator_thumbnail_cache.json"
+CREATOR_SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
+CREATOR_SYNC_META_FILE = DATA_ROOT / "creator_sync_meta.json"
+CREATOR_LIBRARY_SOURCE_URL = os.environ.get("CREATOR_LIBRARY_SOURCE_URL", "https://koko-kwai-coach.onrender.com/api/library")
+CREATOR_LIBRARY_SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
 FILTER_JOBS_FILE = DATA_ROOT / "filter_jobs.json"
 FILTER_CACHE_ROOT = DATA_ROOT / "filter_cache"
 VISION_MODELS_DIR = DATA_ROOT / "vision_models"
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env_file(REPO_ROOT / ".env.local")
+load_env_file(BASE / ".env.local")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "1")).strip().lower() in {"1", "true", "yes", "on"}
+FILTER_DURATION_MIN_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MIN_SEC", str(FILTER_DURATION_MIN_SEC)))
+FILTER_DURATION_MAX_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MAX_SEC", str(FILTER_DURATION_MAX_SEC)))
+FILTER_AUDIO_MAX_MB = int(os.environ.get("VIDEO_FILTER_AUDIO_MAX_MB", str(FILTER_AUDIO_MAX_MB)))
 ERROR_CASE_PASSWORD = "kwai666"
 ERROR_CASE_AUTH_COOKIE = "koko_error_case_auth"
 ASSETS_ROOT = BASE / "assets"
@@ -144,6 +179,11 @@ filter_jobs: dict[str, dict[str, Any]] = {}
 filter_queue: deque[str] = deque()
 queued_filter_job_ids: set[str] = set()
 filter_queue_condition = threading.Condition()
+translation_jobs_lock = threading.Lock()
+translation_jobs: dict[str, dict[str, Any]] = {}
+translation_queue: deque[str] = deque()
+queued_translation_job_ids: set[str] = set()
+translation_queue_condition = threading.Condition()
 
 if (SKILL_ROOT / "scripts").exists():
     sys.path.insert(0, str(SKILL_ROOT / "scripts"))
@@ -258,6 +298,10 @@ def write_text_atomic(path: Path, content: str) -> None:
 
 def write_json_atomic(path: Path, payload: Any) -> None:
     write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def env_flag(name: str, default: str = "0") -> bool:
+    return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_no_space_error(exc: Exception) -> bool:
@@ -482,6 +526,19 @@ def load_filter_jobs() -> None:
 
 def save_filter_jobs() -> None:
     write_json_atomic(FILTER_JOBS_FILE, filter_jobs)
+
+
+def load_translation_jobs() -> None:
+    global translation_jobs
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    translation_jobs = read_json_file(TRANSLATION_JOBS_FILE, default={})
+    if not isinstance(translation_jobs, dict):
+        translation_jobs = {}
+
+
+def save_translation_jobs() -> None:
+    write_json_atomic(TRANSLATION_JOBS_FILE, translation_jobs)
 
 
 def enqueue_job(job_id: str) -> None:
@@ -925,6 +982,31 @@ def restore_pending_filter_jobs_to_queue() -> None:
                 queued_filter_job_ids.add(job_id)
                 filter_queue.append(job_id)
                 filter_queue_condition.notify()
+
+
+def restore_pending_translation_jobs_to_queue() -> None:
+    pending_job_ids: list[str] = []
+    changed = False
+    with translation_jobs_lock:
+        for job_id, job in translation_jobs.items():
+            status = str(job.get("status") or "").strip()
+            if status in {"completed", "failed"}:
+                continue
+            if status != "queued":
+                job["status"] = "queued"
+                job["stage"] = "queued"
+                job["stage_message"] = "Queued after service restart."
+                job["updated_at"] = now_iso()
+                changed = True
+            pending_job_ids.append(job_id)
+        if changed:
+            save_translation_jobs()
+    for job_id in pending_job_ids:
+        with translation_queue_condition:
+            if job_id not in queued_translation_job_ids:
+                queued_translation_job_ids.add(job_id)
+                translation_queue.append(job_id)
+                translation_queue_condition.notify()
 
 
 def job_worker_loop() -> None:
@@ -1413,6 +1495,193 @@ def extract_remote_keyframes(content_url: str, duration_seconds: float, out_dir:
     return frames
 
 
+def mime_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
+    if suffix == ".mp3":
+        return "audio/mpeg"
+    if suffix == ".wav":
+        return "audio/wav"
+    if suffix in {".m4a", ".mp4"}:
+        return "audio/mp4"
+    return "application/octet-stream"
+
+
+def extract_text_from_gemini_response(raw: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for candidate in raw.get("candidates") or []:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            text = str(part.get("text") or "").strip()
+            if text:
+                parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def parse_json_object_from_text(text: str) -> dict[str, Any]:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"```$", "", cleaned).strip()
+    try:
+        value = json.loads(cleaned)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if not match:
+        return {}
+    value = json.loads(match.group(0))
+    return value if isinstance(value, dict) else {}
+
+
+def run_gemini_file_json_prompt(files: list[Path], payload: dict[str, Any], prompt: str, label: str) -> tuple[dict[str, Any], dict[str, Any], str]:
+    if not GOOGLE_API_KEY:
+        raise RuntimeError(f"{label} requires GOOGLE_API_KEY")
+    models = unique_models(os.environ.get("VIDEO_FILTER_MODEL", "gemini-2.5-flash-lite"), *PRIMARY_FALLBACK_MODELS)
+    last_error: Exception | None = None
+    for model in models:
+        try:
+            parts: list[dict[str, Any]] = []
+            for path in files:
+                if not path.exists() or path.stat().st_size <= 0:
+                    continue
+                parts.append(
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type_for_path(path),
+                            "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+                        }
+                    }
+                )
+            parts.extend(
+                [
+                    {"text": prompt},
+                    {"text": json.dumps(payload, ensure_ascii=False)},
+                ]
+            )
+            body = {
+                "contents": [{"parts": parts}],
+            }
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json", "x-goog-api-key": GOOGLE_API_KEY},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=240) as response:
+                    raw = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")
+                raise RuntimeError(f"Gemini filter HTTP {exc.code}: {detail}") from exc
+            text = extract_text_from_gemini_response(raw)
+            return parse_json_object_from_text(text), raw, model
+        except Exception as exc:
+            last_error = exc
+            if not is_retryable_filter_error(str(exc)):
+                break
+    raise RuntimeError(f"{label} failed across models {models}: {last_error}") from last_error
+
+
+def is_retryable_filter_error(text: str) -> bool:
+    hay = str(text or "").upper()
+    return any(token in hay for token in ["HTTP 503", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "TIMED OUT", "JSON", "EOF", "CONNECTION RESET"])
+
+
+def extract_remote_audio(content_url: str, cache_dir: Path) -> Path:
+    if not content_url:
+        raise RuntimeError("content url missing")
+    try:
+        import imageio_ffmpeg  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"imageio_ffmpeg unavailable: {exc}") from exc
+    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out_path = cache_dir / "full_audio.mp3"
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        content_url,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "48k",
+        str(out_path),
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=240)
+    if result.returncode != 0 or not out_path.exists() or out_path.stat().st_size <= 0:
+        raise RuntimeError((result.stderr or result.stdout or "audio extraction failed").strip())
+    max_bytes = max(1, FILTER_AUDIO_MAX_MB) * 1024 * 1024
+    if out_path.stat().st_size > max_bytes:
+        raise RuntimeError(f"audio file too large for filter transcription: {out_path.stat().st_size} bytes")
+    return out_path
+
+
+def transcribe_filter_audio(metadata: dict[str, Any], cache_dir: Path) -> dict[str, Any]:
+    page_transcript = str(metadata.get("transcript") or "").strip()
+    if page_transcript:
+        return {
+            "available": True,
+            "source": "page_transcript",
+            "full_transcript": page_transcript,
+            "language": "",
+            "dialogue_summary": page_transcript[:500],
+            "speaker_hints": [],
+            "audio_form": "page transcript",
+            "confidence": "medium",
+            "audio_path": "",
+            "error": "",
+        }
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("GOOGLE_API_KEY missing; cannot transcribe remote audio.")
+    audio_path = extract_remote_audio(str(metadata.get("content_url") or "").strip(), cache_dir)
+    prompt = """
+你是 Koko 的筛选前置音频转写器。请完整理解这段短视频音频，优先输出人物对白、旁白和能帮助判断剧情的信息。
+
+严格返回 JSON：
+{
+  "full_transcript": "完整音频转写；听不清处标注[听不清]；不同说话人可用人物A/人物B/旁白",
+  "language": "主要语言",
+  "dialogue_summary": "一句话总结音频发生了什么",
+  "speaker_hints": ["最多6条：说话人数量、关系、角色线索"],
+  "audio_form": "dialogue/monologue/voiceover/BGM_only/mixed/unknown",
+  "confidence": "high/medium/low"
+}
+不要编造听不到的台词；如果只有音乐或环境音，也要明确说明。
+""".strip()
+    payload = {
+        "source_url": metadata.get("source_url") or "",
+        "title": metadata.get("title") or "",
+        "duration": metadata.get("duration") or "",
+    }
+    result, _, model = run_gemini_file_json_prompt([audio_path], payload, prompt, "filter audio transcription")
+    transcript = str(result.get("full_transcript") or "").strip()
+    if not transcript:
+        raise RuntimeError("filter audio transcription returned empty transcript")
+    return {
+        "available": True,
+        "source": "gemini_audio",
+        "full_transcript": transcript,
+        "language": str(result.get("language") or "").strip(),
+        "dialogue_summary": str(result.get("dialogue_summary") or "").strip(),
+        "speaker_hints": [str(item or "").strip() for item in (result.get("speaker_hints") or []) if str(item or "").strip()][:6],
+        "audio_form": str(result.get("audio_form") or "unknown").strip(),
+        "confidence": str(result.get("confidence") or "medium").strip().lower(),
+        "model_used": model,
+        "audio_path": str(audio_path),
+        "error": "",
+    }
+
+
 def count_thumbnail_faces(thumbnail_url: str, cache_dir: Path) -> dict[str, Any]:
     if cv2 is None or not thumbnail_url:
         return {"available": False, "face_count": 0}
@@ -1725,6 +1994,204 @@ def classify_couple_candidate(metadata: dict[str, Any], heuristic: dict[str, Any
         "confidence": confidence,
         "reason": reason,
         "signals": signals or (heuristic.get("reasons") or [])[:4],
+        "used_llm": True,
+    }
+
+
+def filter_check(passed: bool, reason: str, *, confidence: str = "high", evidence: list[str] | None = None, **extra: Any) -> dict[str, Any]:
+    payload = {
+        "passed": bool(passed),
+        "confidence": confidence if confidence in {"high", "medium", "low"} else "medium",
+        "reason": str(reason or "").strip(),
+        "evidence": [str(item or "").strip() for item in (evidence or []) if str(item or "").strip()][:6],
+    }
+    payload.update(extra)
+    return payload
+
+
+def build_filter_evidence_bundle(metadata: dict[str, Any], audio: dict[str, Any], visual: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = parse_duration_seconds(metadata.get("duration"))
+    frame_paths = [str(path or "").strip() for path in (visual.get("frame_paths") or []) if str(path or "").strip()]
+    bundle = {
+        "metadata": {
+            "source_url": metadata.get("source_url") or "",
+            "title": metadata.get("title") or "",
+            "description": metadata.get("description") or "",
+            "creator_name": metadata.get("creator_name") or "",
+            "creator_handle": metadata.get("creator_handle") or "",
+            "creator_description": metadata.get("creator_description") or "",
+            "duration": metadata.get("duration") or "",
+            "duration_seconds": duration_seconds,
+            "thumbnail_url": metadata.get("thumbnail_url") or "",
+            "content_url_available": bool(metadata.get("content_url")),
+            "genre": metadata.get("genre") or [],
+        },
+        "audio": {
+            "available": bool(audio.get("available")),
+            "source": audio.get("source") or "",
+            "full_transcript": audio.get("full_transcript") or "",
+            "language": audio.get("language") or "",
+            "dialogue_summary": audio.get("dialogue_summary") or "",
+            "speaker_hints": audio.get("speaker_hints") or [],
+            "audio_form": audio.get("audio_form") or "unknown",
+            "confidence": audio.get("confidence") or "low",
+            "error": audio.get("error") or "",
+        },
+        "frames": {
+            "frame_paths": frame_paths,
+            "frame_count": int(visual.get("frame_count") or len(frame_paths) or 0),
+            "inspected_frames": int(visual.get("inspected_frames") or 0),
+            "frame_summaries": visual.get("frame_summaries") or [],
+            "face_total": int(visual.get("face_total") or 0),
+            "max_faces_single_frame": int(visual.get("max_faces_single_frame") or 0),
+            "male_count": int(visual.get("male_count") or 0),
+            "female_count": int(visual.get("female_count") or 0),
+            "pair_frames": int(visual.get("pair_frames") or 0),
+            "has_both": bool(visual.get("has_both")),
+            "thumbnail_faces": visual.get("thumbnail_faces") or {},
+            "signals": visual.get("signals") or [],
+            "error": visual.get("reason") or "",
+        },
+    }
+    return bundle
+
+
+def duration_gate_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = parse_duration_seconds(metadata.get("duration"))
+    if duration_seconds <= 0:
+        return filter_check(
+            False,
+            "未能从页面公开信息确认视频时长。",
+            confidence="low",
+            duration_seconds=duration_seconds,
+            min_seconds=FILTER_DURATION_MIN_SEC,
+            max_seconds=FILTER_DURATION_MAX_SEC,
+        )
+    passed = FILTER_DURATION_MIN_SEC <= duration_seconds <= FILTER_DURATION_MAX_SEC
+    reason = (
+        f"视频时长 {duration_seconds:.0f}s，在 {FILTER_DURATION_MIN_SEC}-{FILTER_DURATION_MAX_SEC}s 范围内。"
+        if passed
+        else f"视频时长 {duration_seconds:.0f}s，不在 {FILTER_DURATION_MIN_SEC}-{FILTER_DURATION_MAX_SEC}s 范围内。"
+    )
+    return filter_check(
+        passed,
+        reason,
+        confidence="high",
+        duration_seconds=duration_seconds,
+        min_seconds=FILTER_DURATION_MIN_SEC,
+        max_seconds=FILTER_DURATION_MAX_SEC,
+    )
+
+
+def normalize_llm_filter_check(raw: Any, fallback_reason: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return filter_check(False, fallback_reason, confidence="low")
+    passed = bool(raw.get("passed"))
+    confidence = str(raw.get("confidence") or "medium").strip().lower()
+    reason = str(raw.get("reason") or fallback_reason).strip()
+    evidence = raw.get("evidence") if isinstance(raw.get("evidence"), list) else []
+    return filter_check(passed, reason, confidence=confidence, evidence=evidence)
+
+
+def fallback_story_filter_decision(evidence_bundle: dict[str, Any], duration_check: dict[str, Any]) -> dict[str, Any]:
+    frames = evidence_bundle.get("frames") or {}
+    audio = evidence_bundle.get("audio") or {}
+    transcript = str(audio.get("full_transcript") or "").strip()
+    speaker_hints = audio.get("speaker_hints") or []
+    max_faces = int(frames.get("max_faces_single_frame") or 0)
+    pair_frames = int(frames.get("pair_frames") or 0)
+    multi_passed = max_faces >= 2 or pair_frames >= 1 or len(speaker_hints) >= 2
+    story_terms = ["误会", "冲突", "反转", "争吵", "发现", "被骗", "解释", "结局", "plot", "conflict", "twist"]
+    story_passed = len(transcript) >= 80 and any(term.lower() in transcript.lower() for term in story_terms)
+    multi_check = filter_check(
+        multi_passed,
+        "基于关键帧人脸数和音频说话人线索做本地兜底判断。" if multi_passed else "缺少两个以上可区分人物/角色的稳定证据。",
+        confidence="low",
+        evidence=[*speaker_hints, *[str(item) for item in (frames.get("signals") or [])]][:6],
+    )
+    story_check = filter_check(
+        story_passed,
+        "转写里出现基本剧情推进线索。" if story_passed else "缺少可稳定判断剧情结构的模型结果。",
+        confidence="low",
+        evidence=[],
+    )
+    final_passed = bool(duration_check.get("passed") and multi_check.get("passed") and story_check.get("passed"))
+    return {
+        "duration_check": duration_check,
+        "multi_character_check": multi_check,
+        "story_check": story_check,
+        "final_result": "passed" if final_passed else "rejected",
+        "bucket": "high" if final_passed else "low",
+        "confidence": "low",
+        "reason": "三轮规则均通过。" if final_passed else "三轮规则未全部通过。",
+        "signals": [
+            f"时长：{'通过' if duration_check.get('passed') else '不通过'}",
+            f"多人物：{'通过' if multi_check.get('passed') else '不通过'}",
+            f"剧情：{'通过' if story_check.get('passed') else '不通过'}",
+        ],
+        "used_llm": False,
+    }
+
+
+def classify_story_candidate(evidence_bundle: dict[str, Any]) -> dict[str, Any]:
+    metadata = evidence_bundle.get("metadata") or {}
+    duration_check = duration_gate_from_metadata({"duration": metadata.get("duration") or ""})
+    if not FILTER_USE_LLM or not GOOGLE_API_KEY:
+        raise RuntimeError("LLM筛选未启用或 GOOGLE_API_KEY 缺失，不能完成多人物和剧情判断。")
+    frame_paths = [Path(path) for path in ((evidence_bundle.get("frames") or {}).get("frame_paths") or []) if str(path or "").strip()]
+    prompt = f"""
+你是 Koko 的视频筛选器。你会收到一个 Kwai 外部链接整理出的证据包，以及三张关键帧图片（开头、中间、结尾）。
+
+筛选目标：判断这条视频是否值得进入后续视频拆解。必须按三轮分别判断：
+1. 时长是否在 {FILTER_DURATION_MIN_SEC}-{FILTER_DURATION_MAX_SEC} 秒内。
+2. 整个视频是否出现两个以上可区分的人物/角色。夫妻、兄弟、朋友、一人分饰多角、电话对端、旁白与画面角色都可以算，但必须有证据。
+3. 整个视频是否拥有剧情：至少有起因/目标、冲突或误会、推进、结果/反转/包袱之一；纯展示、跳舞、无情节口播、单句段子不算。
+
+请基于完整音频转写、页面公开信息和三张关键帧判断。不要编造看不到/听不到的内容。
+
+严格返回 JSON：
+{{
+  "duration_check": {{"passed": true, "confidence": "high/medium/low", "reason": "一句话", "evidence": ["证据"]}},
+  "multi_character_check": {{"passed": true, "confidence": "high/medium/low", "reason": "一句话", "evidence": ["证据"]}},
+  "story_check": {{"passed": true, "confidence": "high/medium/low", "reason": "一句话", "evidence": ["证据"]}},
+  "overall_confidence": "high/medium/low",
+  "reason": "最终一句话解释"
+}}
+""".strip()
+    payload = {
+        "metadata": metadata,
+        "audio": evidence_bundle.get("audio") or {},
+        "frames": {
+            key: value
+            for key, value in (evidence_bundle.get("frames") or {}).items()
+            if key != "frame_paths"
+        },
+        "hard_duration_check": duration_check,
+    }
+    result, _, model = run_gemini_file_json_prompt(frame_paths[:3], payload, prompt, "story candidate classification")
+    multi_check = normalize_llm_filter_check(result.get("multi_character_check"), "未能稳定判断是否有两个以上可区分人物/角色。")
+    story_check = normalize_llm_filter_check(result.get("story_check"), "未能稳定判断是否有剧情结构。")
+    llm_duration = normalize_llm_filter_check(result.get("duration_check"), duration_check.get("reason") or "")
+    duration_check["llm_reason"] = llm_duration.get("reason") or ""
+    duration_check["llm_passed"] = bool(llm_duration.get("passed"))
+    final_passed = bool(duration_check.get("passed") and multi_check.get("passed") and story_check.get("passed"))
+    confidence = str(result.get("overall_confidence") or "medium").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+    return {
+        "duration_check": duration_check,
+        "multi_character_check": multi_check,
+        "story_check": story_check,
+        "final_result": "passed" if final_passed else "rejected",
+        "bucket": "high" if final_passed else "low",
+        "confidence": confidence,
+        "reason": str(result.get("reason") or ("三轮规则均通过。" if final_passed else "三轮规则未全部通过。")).strip(),
+        "signals": [
+            f"时长：{'通过' if duration_check.get('passed') else '不通过'}",
+            f"多人物：{'通过' if multi_check.get('passed') else '不通过'}",
+            f"剧情：{'通过' if story_check.get('passed') else '不通过'}",
+        ],
+        "model_used": model,
         "used_llm": True,
     }
 
@@ -4371,6 +4838,9 @@ def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
 def public_filter_item_view(item: dict[str, Any]) -> dict[str, Any]:
     visual = item.get("visual") or {}
     thumbnail_faces = visual.get("thumbnail_faces") or {}
+    audio = item.get("audio") or {}
+    checks = item.get("checks") or {}
+    evidence_bundle = item.get("evidence_bundle") or {}
     return {
         "id": str(item.get("id") or "").strip(),
         "index": int(item.get("index") or 0),
@@ -4386,6 +4856,33 @@ def public_filter_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "score": item.get("score") or 0,
         "thumbnail_url": item.get("thumbnail_url") or "",
         "metadata": item.get("metadata") or {},
+        "evidence_url": item.get("evidence_url") or "",
+        "audio": {
+            "available": bool(audio.get("available")),
+            "source": audio.get("source") or "",
+            "language": audio.get("language") or "",
+            "dialogue_summary": audio.get("dialogue_summary") or "",
+            "speaker_hints": audio.get("speaker_hints") or [],
+            "audio_form": audio.get("audio_form") or "",
+            "confidence": audio.get("confidence") or "",
+            "full_transcript": audio.get("full_transcript") or "",
+            "error": audio.get("error") or "",
+        },
+        "checks": {
+            "duration_check": checks.get("duration_check") or {},
+            "multi_character_check": checks.get("multi_character_check") or {},
+            "story_check": checks.get("story_check") or {},
+            "final_result": checks.get("final_result") or "",
+        },
+        "evidence_bundle": {
+            "metadata": evidence_bundle.get("metadata") or {},
+            "audio": {
+                key: value
+                for key, value in (evidence_bundle.get("audio") or {}).items()
+                if key != "full_transcript"
+            },
+            "frames": evidence_bundle.get("frames") or {},
+        },
         "visual": {
             "available": bool(visual.get("available")),
             "frame_count": int(visual.get("frame_count") or 0),
@@ -4423,6 +4920,27 @@ def public_filter_job_view(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def public_translation_job_view(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(job.get("id") or "").strip(),
+        "video_url": job.get("video_url") or "",
+        "status": job.get("status") or "",
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "completed_at": job.get("completed_at") or "",
+        "stage": job.get("stage") or "",
+        "stage_message": job.get("stage_message") or "",
+        "language": job.get("language") or "pt-BR",
+        "subject_summary": job.get("subject_summary") or "",
+        "original_audio_summary": job.get("original_audio_summary") or "",
+        "portuguese_voiceover": job.get("portuguese_voiceover") or "",
+        "translated_video_url": job.get("translated_video_url") or "",
+        "audio_url": job.get("audio_url") or "",
+        "metadata": job.get("metadata") or {},
+        "error": job.get("error") or "",
+    }
+
+
 def create_filter_job(video_urls: list[str], *, source_label: str = "") -> dict[str, Any]:
     job_id = uuid4().hex
     items: list[dict[str, Any]] = []
@@ -4445,6 +4963,10 @@ def create_filter_job(video_urls: list[str], *, source_label: str = "") -> dict[
                 "score": 0,
                 "thumbnail_url": "",
                 "metadata": {},
+                "audio": {},
+                "visual": {},
+                "evidence_bundle": {},
+                "checks": {},
                 "error": "",
             }
         )
@@ -4468,6 +4990,116 @@ def create_filter_job(video_urls: list[str], *, source_label: str = "") -> dict[
             filter_queue.append(job_id)
             filter_queue_condition.notify()
     return public_filter_job_view(job)
+
+
+def create_translation_job(video_url: str, *, language: str = "pt-BR") -> dict[str, Any]:
+    job_id = uuid4().hex
+    job = {
+        "id": job_id,
+        "video_url": video_url,
+        "status": "queued",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "completed_at": "",
+        "stage": "queued",
+        "stage_message": "Queued.",
+        "language": language or "pt-BR",
+        "subject_summary": "",
+        "original_audio_summary": "",
+        "portuguese_voiceover": "",
+        "translated_video_url": "",
+        "audio_url": "",
+        "metadata": {},
+        "error": "",
+    }
+    with translation_jobs_lock:
+        translation_jobs[job_id] = job
+        save_translation_jobs()
+    with translation_queue_condition:
+        if job_id not in queued_translation_job_ids:
+            queued_translation_job_ids.add(job_id)
+            translation_queue.append(job_id)
+            translation_queue_condition.notify()
+    return public_translation_job_view(job)
+
+
+def update_translation_job(job_id: str, **changes: Any) -> None:
+    with translation_jobs_lock:
+        job = translation_jobs.get(job_id)
+        if not job:
+            return
+        job.update(changes)
+        job["updated_at"] = now_iso()
+        save_translation_jobs()
+
+
+def run_translation_job(job_id: str) -> None:
+    with translation_jobs_lock:
+        job = dict(translation_jobs.get(job_id) or {})
+    if not job:
+        return
+    output_dir = RESULTS_ROOT / job_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    update_translation_job(job_id, status="running", stage="download", stage_message="正在下载源视频。", error="")
+    try:
+        if not TRANSCREATE_VIDEO.exists():
+            raise RuntimeError(f"Missing transcreation entrypoint: {TRANSCREATE_VIDEO}")
+        command = [
+            sys.executable,
+            str(TRANSCREATE_VIDEO),
+            str(job.get("video_url") or "").strip(),
+            "--out",
+            str(output_dir),
+            "--language",
+            str(job.get("language") or "pt-BR"),
+        ]
+        proc = subprocess.run(command, text=True, capture_output=True, timeout=PIPELINE_TIMEOUT_SEC)
+        result_path = output_dir / "translation_result.json"
+        result = read_json_file(result_path, default={}) if result_path.exists() else {}
+        if proc.returncode != 0 or not result.get("ok"):
+            error = str(result.get("error") or proc.stderr or proc.stdout or "Translation job failed.").strip()
+            raise RuntimeError(error)
+        translated_path = output_dir / "translated_pt.mp4"
+        audio_path = output_dir / "portuguese_voiceover.aiff"
+        update_translation_job(
+            job_id,
+            status="completed",
+            completed_at=now_iso(),
+            stage="completed",
+            stage_message="转译视频已生成。",
+            subject_summary=result.get("subject_summary") or "",
+            original_audio_summary=result.get("original_audio_summary") or "",
+            portuguese_voiceover=result.get("portuguese_voiceover") or "",
+            translated_video_url=f"/results/{job_id}/{translated_path.name}" if translated_path.exists() else "",
+            audio_url=f"/results/{job_id}/{audio_path.name}" if audio_path.exists() else "",
+            metadata=result.get("metadata") or {},
+            error="",
+        )
+    except Exception as exc:
+        update_translation_job(
+            job_id,
+            status="failed",
+            completed_at=now_iso(),
+            stage="failed",
+            stage_message="转译失败。",
+            error=friendly_error(str(exc)),
+        )
+
+
+def translation_worker_loop() -> None:
+    while True:
+        with translation_queue_condition:
+            while not translation_queue:
+                translation_queue_condition.wait()
+            job_id = translation_queue.popleft()
+            queued_translation_job_ids.discard(job_id)
+        run_translation_job(job_id)
+
+
+def start_translation_workers() -> None:
+    for index in range(MAX_CONCURRENT_TRANSLATIONS):
+        thread = threading.Thread(target=translation_worker_loop, name=f"koko-translation-worker-{index+1}", daemon=True)
+        thread.start()
 
 
 def update_filter_job(job_id: str, **changes: Any) -> None:
@@ -4506,7 +5138,7 @@ def finalize_filter_job(job_id: str) -> None:
             job["status"] = "completed"
             job["stage"] = "completed"
             job["stage_message"] = f"Completed {len(items)}/{len(items)} items."
-            job["message"] = f"已筛出 {matched} 条通过“双人一男一女主场景”规则的视频。"
+            job["message"] = f"已筛出 {matched} 条同时通过时长、多人物和剧情三轮规则的视频。"
         elif any(status == "running" for status in statuses):
             job["status"] = "running"
         elif any(status == "queued" for status in statuses):
@@ -4528,16 +5160,30 @@ def run_filter_job(job_id: str) -> None:
     any_completed = False
     for index, item in enumerate(items):
         update_filter_item(job_id, index, status="running", stage="metadata", stage_message="正在抓取页面公开信息。")
+        metadata: dict[str, Any] = {}
+        audio: dict[str, Any] = {}
+        visual: dict[str, Any] = {}
+        evidence_bundle: dict[str, Any] = {}
         try:
             metadata = fetch_kwai_light_metadata(str(item.get("video_url") or "").strip())
             cache_dir = FILTER_CACHE_ROOT / job_id / str(item.get("id") or f"item-{index}")
             update_filter_item(
                 job_id,
                 index,
-                stage="frames",
-                stage_message="正在抽取关键帧。",
+                stage="audio",
+                stage_message="正在提取完整音频信息。",
                 metadata=metadata,
                 thumbnail_url=metadata.get("thumbnail_url") or "",
+            )
+            audio = transcribe_filter_audio(metadata, cache_dir)
+            update_filter_item(
+                job_id,
+                index,
+                stage="frames",
+                stage_message="正在抽取开头、中间、结尾三张关键帧。",
+                metadata=metadata,
+                thumbnail_url=metadata.get("thumbnail_url") or "",
+                audio=audio,
             )
             try:
                 visual = detect_gender_presence_from_frames(
@@ -4554,18 +5200,21 @@ def run_filter_job(job_id: str) -> None:
                     "score_boost": 0,
                 }
             visual["thumbnail_faces"] = count_thumbnail_faces(str(metadata.get("thumbnail_url") or "").strip(), cache_dir)
-            heuristic = score_couple_candidate(metadata, visual)
+            evidence_bundle = build_filter_evidence_bundle(metadata, audio, visual)
+            write_json_atomic(cache_dir / "evidence_bundle.json", evidence_bundle)
             update_filter_item(
                 job_id,
                 index,
                 stage="classify",
-                stage_message="正在判断是否属于夫妻类型。",
+                stage_message="正在进行时长、多人物和剧情三轮筛选。",
                 metadata=metadata,
                 thumbnail_url=metadata.get("thumbnail_url") or "",
-                score=heuristic.get("score") or 0,
+                audio=audio,
                 visual=visual,
+                evidence_bundle=evidence_bundle,
             )
-            decision = classify_couple_candidate(metadata, heuristic, visual)
+            decision = classify_story_candidate(evidence_bundle)
+            write_json_atomic(cache_dir / "filter_decision.json", decision)
             update_filter_item(
                 job_id,
                 index,
@@ -4578,11 +5227,30 @@ def run_filter_job(job_id: str) -> None:
                 signals=decision.get("signals") or [],
                 metadata=metadata,
                 thumbnail_url=metadata.get("thumbnail_url") or "",
-                score=heuristic.get("score") or 0,
+                score=3 if decision.get("bucket") == "high" else 0,
+                audio=audio,
                 visual=visual,
+                evidence_bundle=evidence_bundle,
+                evidence_url=str(cache_dir / "evidence_bundle.json"),
+                checks={
+                    "duration_check": decision.get("duration_check") or {},
+                    "multi_character_check": decision.get("multi_character_check") or {},
+                    "story_check": decision.get("story_check") or {},
+                    "final_result": decision.get("final_result") or "",
+                },
             )
             any_completed = True
         except Exception as exc:
+            failure_updates: dict[str, Any] = {}
+            if metadata:
+                failure_updates["metadata"] = metadata
+                failure_updates["thumbnail_url"] = metadata.get("thumbnail_url") or ""
+            if audio:
+                failure_updates["audio"] = audio
+            if visual:
+                failure_updates["visual"] = visual
+            if evidence_bundle:
+                failure_updates["evidence_bundle"] = evidence_bundle
             update_filter_item(
                 job_id,
                 index,
@@ -4590,7 +5258,8 @@ def run_filter_job(job_id: str) -> None:
                 stage="failed",
                 stage_message="筛选失败。",
                 error=friendly_error(str(exc)),
-                reason="页面公开信息抓取或判断失败。",
+                reason="筛选流程没有成功完成，不能判定为通过或不通过。",
+                **failure_updates,
             )
     finalize_filter_job(job_id)
     if not any_completed:
@@ -7025,6 +7694,33 @@ def studio_html() -> str:
       font-weight: 800;
       color: #FF8200;
     }}
+    .editor-row-title-wrap {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }}
+    .timeline-jump {{
+      border: 1px solid rgba(255,130,0,.18);
+      border-radius: 999px;
+      background: rgba(255,255,255,.86);
+      color: #FF8200;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1;
+      padding: 7px 10px;
+    }}
+    .timeline-jump:disabled {{
+      cursor: not-allowed;
+      opacity: .45;
+    }}
+    .editor-row-card.video-active {{
+      border-color: rgba(255,130,0,.42);
+      background: rgba(255,248,238,.92);
+      box-shadow: 0 10px 24px rgba(249,115,0,.08);
+    }}
     .editor-row-head {{
       display: flex;
       align-items: center;
@@ -7146,6 +7842,54 @@ def studio_html() -> str:
       flex-direction: column;
       gap: 14px;
       margin-bottom: 14px;
+    }}
+    .video-review-strip {{
+      border: 1px solid rgba(255,130,0,.16);
+      border-radius: 16px;
+      background: rgba(255,255,255,.78);
+      padding: 12px;
+      display: grid;
+      grid-template-columns: minmax(132px, 220px) minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+    }}
+    .video-review-strip video {{
+      width: 100%;
+      max-height: 220px;
+      aspect-ratio: 9 / 16;
+      object-fit: contain;
+      border-radius: 12px;
+      background: #111;
+      display: block;
+    }}
+    .video-review-meta {{
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }}
+    .video-review-title {{
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--ink);
+    }}
+    .video-review-copy {{
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--muted);
+    }}
+    .video-review-now {{
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      max-width: 100%;
+      border: 1px solid rgba(255,130,0,.14);
+      border-radius: 999px;
+      background: rgba(255,248,238,.86);
+      color: #FF8200;
+      font-size: 12px;
+      font-weight: 800;
+      padding: 7px 10px;
     }}
     .item-actions-shell {{
       border: 1px solid rgba(255,130,0,.16);
@@ -7576,6 +8320,12 @@ def studio_html() -> str:
         display: none;
       }}
       .queue-list {{ grid-template-columns: 1fr; }}
+      .video-review-strip {{
+        grid-template-columns: 1fr;
+      }}
+      .video-review-strip video {{
+        width: min(220px, 100%);
+      }}
     }}
   </style>
 </head>
@@ -7589,6 +8339,7 @@ def studio_html() -> str:
         <a class="studio-tab-link" href="/" data-nav-kind="home"><span class="studio-tab-icon">⌂</span><span>返回落地页</span></a>
         <a class="studio-tab-link active" href="#filter-panel" data-panel-target="filter-panel"><span class="studio-tab-icon">⌕</span><span>视频筛选</span></a>
         <a class="studio-tab-link" href="#split-panel" data-panel-target="split-panel"><span class="studio-tab-icon">▤</span><span>视频拆解</span></a>
+        <a class="studio-tab-link" href="#translate-panel" data-panel-target="translate-panel"><span class="studio-tab-icon">◉</span><span>葡语转译</span></a>
         <a class="studio-tab-link" href="#stats-panel" data-panel-target="stats-panel"><span class="studio-tab-icon">▥</span><span>数据看板</span></a>
         <a class="studio-tab-link" href="/library"><span class="studio-tab-icon">☰</span><span>脚本库</span></a>
       </nav>
@@ -7620,14 +8371,14 @@ def studio_html() -> str:
                 <span class="filter-upload-hint">支持上传 Excel、CSV、TSV、TXT。系统会自动抽取其中的链接。</span>
               </div>
               <div class="actions">
-                <button id="filter-submit-btn">开始筛选夫妻类型</button>
+                <button id="filter-submit-btn">开始筛选剧情候选</button>
               </div>
             </div>
           </div>
           <div id="filter-status-box" class="status-box">
             <div class="status-empty">
               <div class="status-empty-title">筛选器已就绪。</div>
-              <div class="status-empty-copy">贴入一批链接或上传表格后，Koko 会优先用页面公开信息做轻量判断，并输出可能属于夫妻类型的视频。</div>
+              <div class="status-empty-copy">贴入一批链接或上传表格后，Koko 会提取完整音频信息和三张关键帧，再输出通过三轮规则的视频。</div>
             </div>
           </div>
         </div>
@@ -7658,6 +8409,35 @@ def studio_html() -> str:
             <div class="status-empty">
               <div class="status-empty-title">已就绪。</div>
               <div class="status-empty-copy">输入一个或多个视频链接后，系统会在这里实时显示拆解进度。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="translate-panel" class="studio-panel">
+        <div class="studio-card">
+          <div class="studio-card-head">
+            <div>
+              <h2>葡语转译</h2>
+              <p>输入单条视频链接后，Koko 会尝试下载源视频、识别主体和原音频含义，去掉原声并合成 pt-BR 葡语音轨。</p>
+            </div>
+          </div>
+          <div class="composer-block">
+            <div class="composer">
+              <div class="composer-head">
+                <div></div>
+              </div>
+              <label for="translation-url">视频链接</label>
+              <textarea id="translation-url" placeholder="https://www.gifshow.com/fw/photo/3xqupwscjsz7wm2"></textarea>
+              <div class="actions">
+                <button id="translation-submit-btn">生成葡语版视频</button>
+              </div>
+            </div>
+          </div>
+          <div id="translation-status-box" class="status-box">
+            <div class="status-empty">
+              <div class="status-empty-title">转译器已就绪。</div>
+              <div class="status-empty-copy">需要公开视频可下载、GOOGLE_API_KEY 可用，以及 ffmpeg 或 imageio-ffmpeg 支持视频合成。</div>
             </div>
           </div>
         </div>
@@ -7697,6 +8477,9 @@ def studio_html() -> str:
     const filterFileInput = document.getElementById("filter-file-input");
     const filterSubmitBtn = document.getElementById("filter-submit-btn");
     const filterStatusBox = document.getElementById("filter-status-box");
+    const translationInput = document.getElementById("translation-url");
+    const translationSubmitBtn = document.getElementById("translation-submit-btn");
+    const translationStatusBox = document.getElementById("translation-status-box");
     const videoInput = document.getElementById("video-url");
     const submitBtn = document.getElementById("submit-btn");
     const stopAllBtn = document.getElementById("stop-all-btn");
@@ -7742,12 +8525,15 @@ def studio_html() -> str:
     const FILTER_IDLE_HTML = `
       <div class="status-empty">
         <div class="status-empty-title">筛选器已就绪。</div>
-        <div class="status-empty-copy">贴入一批链接或上传表格后，Koko 会优先用页面公开信息做轻量判断，并输出可能属于夫妻类型的视频。</div>
+        <div class="status-empty-copy">贴入一批链接或上传表格后，Koko 会提取完整音频信息和三张关键帧，再输出通过三轮规则的视频。</div>
       </div>
     `;
     let activeFilterJobId = "";
     let filterPollTimer = null;
     const ACTIVE_FILTER_JOB_STORAGE_KEY = "koko_active_filter_job_id";
+    let activeTranslationJobId = "";
+    let translationPollTimer = null;
+    const ACTIVE_TRANSLATION_JOB_STORAGE_KEY = "koko_active_translation_job_id";
 
     function setStudioPanel(panelId) {{
       const target = String(panelId || "filter-panel").trim() || "filter-panel";
@@ -7864,6 +8650,74 @@ def studio_html() -> str:
       if (!filterStatusBox) return;
       filterStatusBox.className = ready ? "status-box visible ready" : "status-box visible";
       filterStatusBox.innerHTML = html;
+    }}
+
+    function setTranslationStatus(html, ready = false) {{
+      if (!translationStatusBox) return;
+      translationStatusBox.className = ready ? "status-box visible ready" : "status-box visible";
+      translationStatusBox.innerHTML = html;
+    }}
+
+    function persistActiveTranslationJobId(jobId) {{
+      const value = String(jobId || "").trim();
+      try {{
+        if (!value) window.localStorage.removeItem(ACTIVE_TRANSLATION_JOB_STORAGE_KEY);
+        else window.localStorage.setItem(ACTIVE_TRANSLATION_JOB_STORAGE_KEY, value);
+      }} catch (error) {{
+        // Ignore storage failures.
+      }}
+    }}
+
+    function scheduleTranslationPoll(jobId, delay = 1800) {{
+      if (translationPollTimer) clearTimeout(translationPollTimer);
+      translationPollTimer = setTimeout(() => pollTranslationJob(jobId), delay);
+    }}
+
+    function renderTranslationJob(data) {{
+      const status = String(data.status || "queued");
+      const stage = String(data.stage || status || "queued");
+      const message = data.stage_message || (status === "completed" ? "转译视频已生成。" : status === "failed" ? "转译失败。" : "正在处理。");
+      const subject = data.subject_summary ? `<div class="summary-box"><strong>主体识别</strong><br>${{escapeHtml(data.subject_summary)}}</div>` : "";
+      const audio = data.original_audio_summary ? `<div class="summary-box"><strong>原音频理解</strong><br>${{escapeHtml(data.original_audio_summary)}}</div>` : "";
+      const voiceover = data.portuguese_voiceover ? `<div class="summary-box"><strong>葡语文案</strong><br>${{escapeHtml(data.portuguese_voiceover)}}</div>` : "";
+      const links = data.translated_video_url ? `
+        <div class="artifact-row">
+          <a class="artifact-link" href="${{escapeHtml(data.translated_video_url)}}" target="_blank" rel="noreferrer">打开葡语视频</a>
+          ${{data.audio_url ? `<a class="artifact-link" href="${{escapeHtml(data.audio_url)}}" target="_blank" rel="noreferrer">打开葡语音轨</a>` : ""}}
+        </div>
+      ` : "";
+      const error = data.error ? `<div class="queue-error">${{escapeHtml(data.error)}}</div>` : "";
+      return `
+        <section class="batch-shell">
+          <div class="batch-top">
+            <div>
+              <div class="batch-title">葡语转译任务</div>
+              <div class="batch-subtitle">${{escapeHtml(data.video_url || "")}}</div>
+            </div>
+            <span class="status ${{status === "completed" ? "status-completed" : status === "failed" ? "status-failed" : status === "running" ? "status-running" : "status-queued"}}">${{escapeHtml(status === "completed" ? "已完成" : status === "failed" ? "失败" : status === "running" ? "处理中" : "排队中")}}</span>
+          </div>
+          ${{progressMarkup(stage, message, data.id, data)}}
+          ${{subject}}${{audio}}${{voiceover}}${{links}}${{error}}
+        </section>
+      `;
+    }}
+
+    async function pollTranslationJob(jobId) {{
+      if (!jobId) return;
+      try {{
+        const res = await fetch(`/api/translation-jobs/${{jobId}}?_=${{Date.now()}}`);
+        const data = await readJsonSafely(res);
+        if (!res.ok) throw new Error(data.error || "转译任务查询失败");
+        setTranslationStatus(renderTranslationJob(data), data.status === "completed");
+        if (data.status === "completed" || data.status === "failed") {{
+          persistActiveTranslationJobId("");
+          activeTranslationJobId = "";
+          return;
+        }}
+        scheduleTranslationPoll(jobId);
+      }} catch (error) {{
+        setTranslationStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+      }}
     }}
 
     function setFilterIdleState() {{
@@ -8161,7 +9015,9 @@ def studio_html() -> str:
 
     function filterStageLabel(stage) {{
       if (stage === "metadata") return "读取页面信息";
-      if (stage === "classify") return "判断夫妻候选";
+      if (stage === "audio") return "提取完整音频";
+      if (stage === "frames") return "抽取三张关键帧";
+      if (stage === "classify") return "三轮筛选判断";
       if (stage === "completed") return "筛选完成";
       if (stage === "failed") return "筛选失败";
       return "等待筛选";
@@ -8251,6 +9107,54 @@ def studio_html() -> str:
       return text || fallback;
     }}
 
+    function parseTimelineSeconds(value) {{
+      const raw = String(value || "").trim();
+      if (!raw) return null;
+      const match = raw.match(/(\\d{{1,2}}(?::\\d{{1,2}}){{0,2}}(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)\\s*(?:-|–|—|~|至|到)?\\s*(\\d{{1,2}}(?::\\d{{1,2}}){{0,2}}(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)?/);
+      if (!match) return null;
+      const toSeconds = (part) => {{
+        const text = String(part || "").trim().replace(/[秒sS]$/g, "");
+        if (!text) return null;
+        if (text.includes(":")) {{
+          const nums = text.split(":").map((piece) => Number(piece));
+          if (nums.some((num) => Number.isNaN(num))) return null;
+          return nums.reduce((acc, num) => acc * 60 + num, 0);
+        }}
+        const num = Number(text);
+        return Number.isNaN(num) ? null : num;
+      }};
+      const start = toSeconds(match[1]);
+      const end = toSeconds(match[2]);
+      if (start === null) return null;
+      return {{
+        start,
+        end: end !== null && end >= start ? end : start + 1,
+      }};
+    }}
+
+    function formatClock(seconds) {{
+      const safe = Math.max(0, Number(seconds) || 0);
+      const total = Math.floor(safe);
+      const mins = Math.floor(total / 60);
+      const secs = total % 60;
+      return `${{String(mins).padStart(2, "0")}}:${{String(secs).padStart(2, "0")}}`;
+    }}
+
+    function buildVideoReviewMarkup(item) {{
+      if (item.status !== "completed") return "";
+      const sourceUrl = item.artifacts?.["source.mp4"] || `/results/${{item.id}}/source.mp4`;
+      return `
+        <div class="video-review-strip" data-video-review="${{item.id}}">
+          <video controls preload="metadata" src="${{escapeHtml(sourceUrl)}}" data-review-video="${{item.id}}"></video>
+          <div class="video-review-meta">
+            <div class="video-review-title">视频复核</div>
+            <div class="video-review-copy">点击脚本行旁边的“跳到”，播放器会定位到对应时间；播放时当前脚本行会自动高亮。</div>
+            <div class="video-review-now" data-video-now="${{item.id}}">当前 00:00</div>
+          </div>
+        </div>
+      `;
+    }}
+
     function buildEditorMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const script = item.result_json || {{}};
@@ -8274,10 +9178,17 @@ def studio_html() -> str:
           </div>
         </div>
       `).join("");
-      const rowBlocks = rows.map((row, idx) => `
-        <div class="editor-row-card" data-row-index="${{idx}}" data-row-original-index="${{idx}}">
+      const rowBlocks = rows.map((row, idx) => {{
+        const range = parseTimelineSeconds(row.time);
+        const timeAttrs = range ? ` data-row-start="${{range.start}}" data-row-end="${{range.end}}"` : "";
+        const jumpButton = range ? `<button class="timeline-jump" type="button" data-jump-video="${{item.id}}" data-jump-time="${{range.start}}">跳到 ${{formatClock(range.start)}}</button>` : "";
+        return `
+        <div class="editor-row-card" data-row-index="${{idx}}" data-row-original-index="${{idx}}"${{timeAttrs}}>
           <div class="editor-row-head">
-            <div class="editor-row-title">脚本行 ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
+            <div class="editor-row-title-wrap">
+              <div class="editor-row-title">脚本行 ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
+              ${{jumpButton}}
+            </div>
             <button class="action-link action-link-danger editor-row-remove" type="button" data-delete-row>删除这一段</button>
           </div>
           <div class="editor-grid">
@@ -8303,7 +9214,8 @@ def studio_html() -> str:
             </div>
           </div>
         </div>
-      `).join("");
+      `;
+      }}).join("");
       return `
         <details class="editor-disclosure">
           <summary class="editor-summary">
@@ -8458,7 +9370,57 @@ def studio_html() -> str:
         if (titleNode) {{
           titleNode.textContent = `脚本行 ${{idx + 1}}${{timeValue ? ` · ${{timeValue}}` : ""}}`;
         }}
+        const range = parseTimelineSeconds(timeValue);
+        const jumpBtn = rowCard.querySelector("[data-jump-video]");
+        if (range) {{
+          rowCard.setAttribute("data-row-start", String(range.start));
+          rowCard.setAttribute("data-row-end", String(range.end));
+          if (jumpBtn) {{
+            jumpBtn.setAttribute("data-jump-time", String(range.start));
+            jumpBtn.textContent = `跳到 ${{formatClock(range.start)}}`;
+            jumpBtn.disabled = false;
+          }}
+        }} else {{
+          rowCard.removeAttribute("data-row-start");
+          rowCard.removeAttribute("data-row-end");
+          if (jumpBtn) jumpBtn.disabled = true;
+        }}
       }});
+    }}
+
+    function seekReviewVideo(itemId, seconds) {{
+      const detail = document.querySelector(`.item-card[data-item-id="${{itemId}}"]`);
+      if (detail instanceof HTMLDetailsElement) detail.open = true;
+      const video = document.querySelector(`video[data-review-video="${{itemId}}"]`);
+      if (!(video instanceof HTMLVideoElement)) {{
+        showToast("视频未就绪", "这个结果暂时没有可播放的源视频。");
+        return;
+      }}
+      const target = Math.max(0, Number(seconds) || 0);
+      video.currentTime = target;
+      video.scrollIntoView({{ behavior: "smooth", block: "nearest" }});
+      video.play().catch(() => {{
+        // Some browsers require a second user action before autoplay.
+      }});
+      highlightRowsForVideo(itemId, target);
+    }}
+
+    function highlightRowsForVideo(itemId, currentTime) {{
+      const detail = document.querySelector(`.item-card[data-item-id="${{itemId}}"]`);
+      if (!detail) return;
+      let active = null;
+      detail.querySelectorAll(".editor-row-card[data-row-start]").forEach((row) => {{
+        const start = Number(row.getAttribute("data-row-start") || "0");
+        const end = Number(row.getAttribute("data-row-end") || start + 1);
+        const matched = currentTime >= start && currentTime < Math.max(end, start + 0.75);
+        row.classList.toggle("video-active", matched);
+        if (matched && !active) active = row;
+      }});
+      const now = detail.querySelector(`[data-video-now="${{itemId}}"]`);
+      if (now) {{
+        const label = active?.querySelector(".editor-row-title")?.textContent || "";
+        now.textContent = label ? `当前 ${{formatClock(currentTime)}} · ${{label}}` : `当前 ${{formatClock(currentTime)}}`;
+      }}
     }}
 
     async function persistItemEdits(itemId, mode, button) {{
@@ -8581,6 +9543,7 @@ def studio_html() -> str:
       const title = escapeHtml(item.title || `视频 ${{idx + 1}}`);
       const editor = buildEditorMarkup(item);
       const review = buildReviewMarkup(item);
+      const videoReview = buildVideoReviewMarkup(item);
       const toggleButton = item.display_language === "pt"
         ? `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="zh">切回中文</button>`
         : `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="pt">转换成葡语</button>`;
@@ -8601,6 +9564,7 @@ def studio_html() -> str:
           </summary>
           <div class="item-body">
             <div class="item-sections">
+              ${{videoReview}}
               ${{review}}
               ${{editor}}
               <div class="item-actions-shell"><div class="link-row">${{links}}</div></div>
@@ -9007,7 +9971,7 @@ def studio_html() -> str:
               <div class="queue-url"><span class="queue-link-icon">🔗</span>${{escapeHtml(url)}}</div>
             </li>
           `).join("")
-        : `<li><div class="queue-stage">当前还没有通过“双人一男一女主场景”规则的链接。</div></li>`;
+        : `<li><div class="queue-stage">当前还没有同时通过时长、多人物和剧情三轮规则的链接。</div></li>`;
       const itemCards = items.map((item, index) => {{
         const title = item.display_name || parseVideoDisplayName(item.video_url || "", index);
         const bucket = String(item.bucket || "").trim();
@@ -9017,11 +9981,18 @@ def studio_html() -> str:
         const stageMessage = String(item.stage_message || "").trim();
         const signals = Array.isArray(item.signals) ? item.signals : [];
         const visual = item.visual && typeof item.visual === "object" ? item.visual : {{}};
+        const audio = item.audio && typeof item.audio === "object" ? item.audio : {{}};
+        const checks = item.checks && typeof item.checks === "object" ? item.checks : {{}};
         const meta = [];
         if (item.confidence) meta.push(`置信度：${{escapeHtml(item.confidence)}}`);
+        const audioStats = [];
+        if (audio.source) audioStats.push(`音频：${{escapeHtml(audio.source)}}`);
+        if (audio.audio_form) audioStats.push(`形式：${{escapeHtml(audio.audio_form)}}`);
+        if (audio.language) audioStats.push(`语言：${{escapeHtml(audio.language)}}`);
+        const audioSummary = String(audio.dialogue_summary || "").trim();
         const frameStats = [];
         if (typeof visual.inspected_frames === "number" && visual.inspected_frames) frameStats.push(`抽帧：${{escapeHtml(String(visual.inspected_frames))}}`);
-        if (typeof visual.pair_frames === "number") frameStats.push(`双人一男一女帧：${{escapeHtml(String(visual.pair_frames))}}`);
+        if (typeof visual.pair_frames === "number") frameStats.push(`男女同框帧：${{escapeHtml(String(visual.pair_frames))}}`);
         if (typeof visual.max_faces_single_frame === "number" && visual.max_faces_single_frame) frameStats.push(`单帧最多人脸：${{escapeHtml(String(visual.max_faces_single_frame))}}`);
         if (typeof visual.male_count === "number" || typeof visual.female_count === "number") {{
           frameStats.push(`男脸：${{escapeHtml(String(visual.male_count || 0))}} · 女脸：${{escapeHtml(String(visual.female_count || 0))}}`);
@@ -9030,6 +10001,19 @@ def studio_html() -> str:
           ? visual.thumbnail_faces.face_count
           : 0;
         if (thumbnailFaceCount) frameStats.push(`封面人脸：${{escapeHtml(String(thumbnailFaceCount))}}`);
+        const checkRow = (label, check) => {{
+          const passed = Boolean(check?.passed);
+          const className = passed ? "completed" : "waiting";
+          const reasonText = String(check?.reason || "").trim();
+          return `<span class="progress-meta-chip ${{className}}">${{escapeHtml(label)}}：${{passed ? "通过" : "不通过"}}${{reasonText ? ` · ${{escapeHtml(reasonText)}}` : ""}}</span>`;
+        }};
+        const checksMarkup = `
+          <div class="progress-meta">
+            ${{checkRow("时长", checks.duration_check || {{}})}}
+            ${{checkRow("多人物", checks.multi_character_check || {{}})}}
+            ${{checkRow("剧情", checks.story_check || {{}})}}
+          </div>
+        `;
         const signalMarkup = signals.length ? `<div class="progress-meta">${{signals.map((signal) => `<span class="progress-meta-chip">${{escapeHtml(signal)}}</span>`).join("")}}</div>` : "";
         return `
           <article class="queue-card ${{status === "completed" && bucket === "high" ? "current" : ""}}">
@@ -9042,7 +10026,10 @@ def studio_html() -> str:
             ${{thumb ? `<div class="queue-url"><span class="queue-link-icon">🖼️</span>${{escapeHtml(thumb)}}</div>` : ""}}
             <div class="queue-stage">${{escapeHtml(stageMessage || filterStageLabel(item.stage))}}</div>
             ${{meta.length ? `<div class="queue-stage">${{meta.join(" · ")}}</div>` : ""}}
+            ${{audioStats.length ? `<div class="queue-stage">${{audioStats.join(" · ")}}</div>` : ""}}
+            ${{audioSummary ? `<div class="queue-stage">音频摘要：${{escapeHtml(audioSummary)}}</div>` : ""}}
             ${{frameStats.length ? `<div class="queue-stage">${{frameStats.join(" · ")}}</div>` : ""}}
+            ${{checksMarkup}}
             ${{reason ? `<div class="queue-stage">${{escapeHtml(reason)}}</div>` : ""}}
             ${{signalMarkup}}
             ${{item.error ? `<div class="queue-error">${{escapeHtml(item.error)}}</div>` : ""}}
@@ -9056,27 +10043,27 @@ def studio_html() -> str:
           <section class="batch-overview">
             <div class="overview-header">
               <div>
-                <h3>双人男女主场景筛选结果</h3>
-                <p>${{escapeHtml(data?.message || "Koko 正在按关键帧中的“双人一男一女主场景”规则做轻量筛选。")}}</p>
+                <h3>剧情候选三轮筛选结果</h3>
+                <p>${{escapeHtml(data?.message || "Koko 正在基于完整音频信息和开头/中间/结尾三张关键帧做三轮筛选。")}}</p>
               </div>
             </div>
             <div class="overview-stats">
               <div class="overview-stat"><span>输入链接</span><strong>${{Number(data?.input_count || items.length || 0)}}</strong></div>
-              <div class="overview-stat"><span>通过规则</span><strong>${{Number(data?.matched_count || matchedLinks.length || 0)}}</strong></div>
+              <div class="overview-stat"><span>三轮通过</span><strong>${{Number(data?.matched_count || matchedLinks.length || 0)}}</strong></div>
               <div class="overview-stat"><span>当前阶段</span><strong>${{escapeHtml(filterStageLabel(data?.stage || "queued"))}}</strong></div>
             </div>
           </section>
           <section class="queue-shell">
             <div class="queue-header">
               <h3>通过链接</h3>
-              <p>这里只保留通过“双人一男一女主场景”规则的链接，便于后续送去视频拆解。</p>
+              <p>这里只保留同时通过时长、多人物和剧情三轮规则的链接，便于后续送去视频拆解。</p>
             </div>
             <ul class="queue-list">${{matchedMarkup}}</ul>
           </section>
           <section class="queue-shell">
             <div class="queue-header">
               <h3>逐条筛选明细</h3>
-              <p>基于公开页面信息和远程 3 帧做人脸与性别识别，不下载整条视频。</p>
+              <p>基于页面公开信息、完整音频转写和开头/中间/结尾三张关键帧判断。</p>
             </div>
             <div class="queue-list">${{itemCards}}</div>
           </section>
@@ -9105,7 +10092,7 @@ def studio_html() -> str:
           return;
         }}
         if (data.status === "completed") {{
-          showToast("筛选完成", `已筛出 ${{Number(data.matched_count || 0)}} 条通过“双人一男一女主场景”规则的视频。`);
+          showToast("筛选完成", `已筛出 ${{Number(data.matched_count || 0)}} 条同时通过三轮规则的视频。`);
           return;
         }}
       }} catch (error) {{
@@ -9155,7 +10142,7 @@ def studio_html() -> str:
         }}
         filterSubmitBtn.disabled = true;
         setStudioPanel("filter-panel");
-        setFilterStatus(`<span class="status status-running">准备筛选</span><br><br><div class="status-empty"><div class="status-empty-title">Koko 正在解析输入。</div><div class="status-empty-copy">先识别文本和表格里的所有链接，再进入夫妻类型轻量筛选。</div></div>`);
+        setFilterStatus(`<span class="status status-running">准备筛选</span><br><br><div class="status-empty"><div class="status-empty-title">Koko 正在解析输入。</div><div class="status-empty-copy">先识别文本和表格里的所有链接，再提取音频与关键帧做三轮筛选。</div></div>`);
         try {{
           let upload = null;
           if (file) {{
@@ -9186,6 +10173,37 @@ def studio_html() -> str:
           setFilterStatus(`<span class="status status-failed">筛选失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
         }} finally {{
           filterSubmitBtn.disabled = false;
+        }}
+      }});
+    }}
+
+    if (translationSubmitBtn) {{
+      translationSubmitBtn.addEventListener("click", async () => {{
+        const urls = extractUrlsFromText(translationInput?.value || "");
+        const videoUrl = urls[0] || String(translationInput?.value || "").trim();
+        if (!videoUrl) {{
+          setTranslationStatus(`<span class="status status-failed">缺少输入</span><br><br><code>请先粘贴一个视频链接。</code>`);
+          return;
+        }}
+        translationSubmitBtn.disabled = true;
+        setTranslationStatus("正在创建转译任务...");
+        try {{
+          const res = await fetch("/api/translation-jobs", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ video_url: videoUrl, language: "pt-BR" }})
+          }});
+          const data = await readJsonSafely(res);
+          if (!res.ok) throw new Error(data.error || "转译任务创建失败");
+          activeTranslationJobId = data.id;
+          persistActiveTranslationJobId(data.id);
+          setStudioPanel("translate-panel");
+          setTranslationStatus(renderTranslationJob(data));
+          pollTranslationJob(data.id);
+        }} catch (error) {{
+          setTranslationStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        }} finally {{
+          translationSubmitBtn.disabled = false;
         }}
       }});
     }}
@@ -9300,10 +10318,23 @@ def studio_html() -> str:
       ensureDetailIframes(detail.parentElement || detail);
     }}, true);
 
+    document.addEventListener("timeupdate", (event) => {{
+      const video = event.target;
+      if (!(video instanceof HTMLVideoElement)) return;
+      const itemId = video.getAttribute("data-review-video") || "";
+      if (!itemId) return;
+      highlightRowsForVideo(itemId, video.currentTime || 0);
+    }}, true);
+
     document.addEventListener("click", (event) => {{
       const copyBtn = event.target.closest("[data-copy-text]");
       if (copyBtn) {{
         copyText(copyBtn.getAttribute("data-copy-text") || "", "任务 ID 已复制");
+        return;
+      }}
+      const jumpBtn = event.target.closest("[data-jump-video]");
+      if (jumpBtn) {{
+        seekReviewVideo(jumpBtn.getAttribute("data-jump-video") || "", jumpBtn.getAttribute("data-jump-time") || "0");
         return;
       }}
       const expandBtn = event.target.closest("[data-item-expand]");
@@ -10025,6 +11056,716 @@ def library_html() -> str:
 </html>"""
 
 
+CREATOR_QUESTIONS = [
+    {
+        "id": "people",
+        "pt": "Quantas pessoas aparecem normalmente?",
+        "zh": "你们通常几个人拍？",
+        "options": [
+            {
+                "id": "solo",
+                "pt": "Só eu",
+                "zh": "我一个人拍",
+                "types": ["骗子", "偷奸耍滑", "整蛊"],
+                "keywords": ["假装", "吐槽", "反应", "秘密", "发现", "装病", "偷懒", "耍小聪明"],
+            },
+            {
+                "id": "duo",
+                "pt": "Duas pessoas",
+                "zh": "两个人拍",
+                "types": ["夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "整蛊", "骗子", "赖账"],
+                "keywords": ["夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "朋友", "同事", "顾客", "老板"],
+            },
+            {
+                "id": "group",
+                "pt": "Três ou mais",
+                "zh": "三个人以上",
+                "types": ["夫妻欺骗", "夫妻算计", "骗子", "整蛊", "撬墙角"],
+                "keywords": ["妈妈", "爸爸", "儿子", "女儿", "家庭", "亲戚", "朋友", "同事", "围观", "多人", "误会"],
+            },
+            {
+                "id": "flex",
+                "pt": "Varia bastante",
+                "zh": "不固定",
+                "types": [],
+                "keywords": ["热门", "低成本", "反转", "误会", "发现", "简单", "日常"],
+            },
+        ],
+    },
+    {
+        "id": "scene",
+        "pt": "Qual cena parece mais com seu conteúdo?",
+        "zh": "你最常拍哪种关系/场景？",
+        "options": [
+            {
+                "id": "couple",
+                "pt": "Casal / namorados",
+                "zh": "夫妻/情侣",
+                "types": ["夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "夫妻黄段子", "夫妻好色", "夫妻出轨", "夫妻整蛊"],
+                "keywords": ["夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "女友", "男友", "吃醋", "约会"],
+            },
+            {
+                "id": "friends",
+                "pt": "Amigos ou colegas",
+                "zh": "朋友/同事",
+                "types": ["整蛊", "骗子", "偷奸耍滑", "撬墙角"],
+                "keywords": ["朋友", "同事", "兄弟", "闺蜜", "套路", "恶作剧", "陷阱", "误会"],
+            },
+            {
+                "id": "family",
+                "pt": "Família / filhos",
+                "zh": "家庭/亲子",
+                "types": ["夫妻欺骗", "夫妻算计"],
+                "keywords": ["妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "家庭", "生日", "礼物", "亲戚"],
+            },
+            {
+                "id": "service",
+                "pt": "Cliente, chefe ou atendimento",
+                "zh": "顾客/老板/服务",
+                "types": ["赖账", "骗子", "偷奸耍滑", "整蛊"],
+                "keywords": ["老板", "员工", "顾客", "服务", "付款", "结账", "工资", "交易", "投诉", "费用"],
+            },
+            {
+                "id": "unsure_scene",
+                "pt": "Ainda não sei",
+                "zh": "不确定",
+                "types": [],
+                "keywords": ["热门", "反转", "误会", "发现", "日常", "简单"],
+            },
+        ],
+    },
+    {
+        "id": "humor",
+        "pt": "Que tipo de graça você quer?",
+        "zh": "你想要哪种笑点？",
+        "options": [
+            {
+                "id": "banter",
+                "pt": "Discussão e respostas rápidas",
+                "zh": "拌嘴互怼",
+                "types": ["夫妻吵架", "妻管严", "夫妻算计"],
+                "keywords": ["吵架", "争执", "训斥", "反驳", "打脸", "抱怨", "不满"],
+            },
+            {
+                "id": "twist",
+                "pt": "Segredo e revelação",
+                "zh": "隐瞒反转",
+                "types": ["夫妻欺骗", "骗子", "夫妻算计"],
+                "keywords": ["假装", "隐瞒", "谎称", "秘密", "真相", "发现", "揭开", "被骗", "冒充"],
+            },
+            {
+                "id": "prank",
+                "pt": "Pegadinha ou susto",
+                "zh": "整蛊恶搞",
+                "types": ["整蛊", "夫妻整蛊"],
+                "keywords": ["整蛊", "恶作剧", "捉弄", "吓唬", "陷阱", "搞怪", "吓得", "反应"],
+            },
+            {
+                "id": "money",
+                "pt": "Dinheiro ou vantagem",
+                "zh": "钱/占便宜",
+                "types": ["赖账", "骗子", "夫妻算计"],
+                "keywords": ["付款", "欠钱", "不给钱", "逃单", "结账", "费用", "花钱", "信用卡", "便宜", "贵"],
+            },
+            {
+                "id": "sneaky",
+                "pt": "Preguiça ou esperteza",
+                "zh": "偷懒/偷吃/耍小聪明",
+                "types": ["偷吃东西", "偷奸耍滑"],
+                "keywords": ["偷吃", "偷喝", "冰箱", "零食", "偷懒", "装病", "钻空子", "耍小聪明", "蒙混过关"],
+            },
+            {
+                "id": "hot",
+                "pt": "Mostre os populares",
+                "zh": "先看热门",
+                "types": [],
+                "keywords": ["热门", "完整", "反转", "误会", "简单", "日常"],
+            },
+        ],
+    },
+]
+
+
+def is_local_creator_portal_request(handler: BaseHTTPRequestHandler) -> bool:
+    if env_flag("KOKO_CREATOR_PORTAL_ENABLED"):
+        return True
+    if os.environ.get("RENDER") or os.environ.get("RENDER_SERVICE_ID"):
+        return False
+    host = str(handler.headers.get("Host") or "").split(":", 1)[0].strip().lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def creator_library_entries_with_source() -> tuple[list[dict[str, Any]], str]:
+    sync_creator_online_library_if_needed()
+    data = read_json_file(CREATOR_ONLINE_LIBRARY_FILE, default=[])
+    if isinstance(data, list) and data:
+        entries = [entry for entry in data if isinstance(entry, dict)]
+        for entry in entries:
+            if str(entry.get("content_type") or "").strip() not in ALLOWED_CONTENT_TYPES:
+                entry["content_type"] = DEFAULT_CONTENT_TYPE
+        return entries, "https://koko-kwai-coach.onrender.com"
+    return load_library_entries(), ""
+
+
+def sync_creator_online_library_if_needed(*, force: bool = False) -> dict[str, Any]:
+    source_url = str(CREATOR_LIBRARY_SOURCE_URL or "").strip()
+    if not source_url:
+        return {"ok": False, "reason": "missing_source_url"}
+    meta = read_json_file(CREATOR_SYNC_META_FILE, default={})
+    if not isinstance(meta, dict):
+        meta = {}
+    if not force and CREATOR_ONLINE_LIBRARY_FILE.exists():
+        last_synced = str(meta.get("last_synced_at") or "").strip()
+        try:
+            synced_at = datetime.fromisoformat(last_synced.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) - synced_at < timedelta(seconds=CREATOR_LIBRARY_SYNC_INTERVAL_SEC):
+                return {"ok": True, "status": "fresh", **meta}
+        except Exception:
+            pass
+    try:
+        raw = fetch_remote_text(source_url, timeout=20)
+        payload = json.loads(raw)
+        entries = payload.get("entries") if isinstance(payload, dict) else payload
+        if not isinstance(entries, list):
+            raise ValueError("Creator library source did not return a list.")
+        clean_entries = [entry for entry in entries if isinstance(entry, dict)]
+        write_json_atomic(CREATOR_ONLINE_LIBRARY_FILE, clean_entries)
+        meta = {
+            "ok": True,
+            "status": "synced",
+            "source_url": source_url,
+            "entries_count": len(clean_entries),
+            "last_synced_at": now_iso(),
+        }
+        write_json_atomic(CREATOR_SYNC_META_FILE, meta)
+        return meta
+    except Exception as exc:
+        meta = {
+            **meta,
+            "ok": False,
+            "status": "failed",
+            "source_url": source_url,
+            "error": friendly_error(str(exc)),
+            "failed_at": now_iso(),
+        }
+        write_json_atomic(CREATOR_SYNC_META_FILE, meta)
+        return meta
+
+
+def creator_abs_url(url: object, base_url: str) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        return text
+    if text.startswith("/") and base_url:
+        return base_url.rstrip("/") + text
+    return text
+
+
+def creator_effective_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    filtered = [
+        entry for entry in entries
+        if str(entry.get("title") or "").strip()
+        and str(entry.get("whole_video_summary") or "").strip()
+        and (entry.get("html_url") or entry.get("zh_html_url") or entry.get("video_url"))
+    ]
+    return sorted(filtered, key=lambda item: str(item.get("saved_at") or item.get("created_at") or ""), reverse=True)
+
+
+def creator_option_lookup() -> dict[str, dict[str, Any]]:
+    return {
+        str(option["id"]): option
+        for question in CREATOR_QUESTIONS
+        for option in question.get("options", [])
+    }
+
+
+def creator_score_entry(entry: dict[str, Any], selected: list[str], index: int) -> int:
+    lookup = creator_option_lookup()
+    text = " ".join(str(entry.get(key) or "") for key in ["content_type", "title", "whole_video_summary", "content_type_reasoning"])
+    content_type = str(entry.get("content_type") or DEFAULT_CONTENT_TYPE)
+    score = 0
+    for option_id in selected:
+        option = lookup.get(option_id) or {}
+        if content_type in set(option.get("types") or []):
+            score += 42
+        hits = sum(1 for keyword in option.get("keywords") or [] if str(keyword) and str(keyword) in text)
+        score += min(24, hits * 6)
+    if content_type != DEFAULT_CONTENT_TYPE:
+        score += 10
+    if entry.get("html_url") or entry.get("zh_html_url"):
+        score += 8
+    if entry.get("video_url"):
+        score += 4
+    score += max(0, 10 - min(index, 10))
+    return score
+
+
+def creator_public_entry(entry: dict[str, Any], base_url: str, score: int) -> dict[str, Any]:
+    entry_id = str(entry.get("entry_id") or "").strip()
+    return {
+        "entry_id": entry_id,
+        "title": entry.get("title") or "未命名脚本",
+        "summary": entry.get("whole_video_summary") or "",
+        "content_type": entry.get("content_type") or DEFAULT_CONTENT_TYPE,
+        "created_at": format_beijing_time(entry.get("created_at") or entry.get("saved_at") or ""),
+        "video_url": creator_abs_url(entry.get("video_url"), ""),
+        "html_url": creator_abs_url(entry.get("zh_html_url") or entry.get("html_url"), base_url),
+        "docx_url": creator_abs_url(entry.get("zh_docx_url") or entry.get("docx_url"), base_url),
+        "thumbnail_url": f"/api/creator/thumbnail/{entry_id}.svg" if entry_id else "",
+        "score": score,
+    }
+
+
+def creator_recommendation_payload(selected: list[str], limit: int = 80) -> dict[str, Any]:
+    entries, base_url = creator_library_entries_with_source()
+    effective = creator_effective_entries(entries)
+    selected = [value for value in selected if value in creator_option_lookup()]
+    scored = sorted(
+        ((creator_score_entry(entry, selected, idx), entry) for idx, entry in enumerate(effective)),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    return {
+        "questions": CREATOR_QUESTIONS,
+        "selected": selected,
+        "total": len(scored),
+        "entries": [creator_public_entry(entry, base_url, score) for score, entry in scored[:limit]],
+        "using_online_cache": bool(base_url),
+    }
+
+
+def creator_facets_payload() -> dict[str, Any]:
+    entries, _ = creator_library_entries_with_source()
+    return {"questions": CREATOR_QUESTIONS, "total": len(creator_effective_entries(entries))}
+
+
+def creator_entry_by_id(entry_id: str) -> dict[str, Any] | None:
+    entries, _ = creator_library_entries_with_source()
+    for entry in entries:
+        if str(entry.get("entry_id") or "") == entry_id:
+            return entry
+    return None
+
+
+def creator_thumbnail_cache() -> dict[str, Any]:
+    data = read_json_file(CREATOR_THUMBNAIL_CACHE_FILE, default={})
+    return data if isinstance(data, dict) else {}
+
+
+def creator_placeholder_svg(entry: dict[str, Any] | None) -> bytes:
+    title = html.escape(str((entry or {}).get("title") or "Koko Creator")[:54])
+    content_type = html.escape(str((entry or {}).get("content_type") or "Roteiro"))
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#ffb357"/>
+      <stop offset=".52" stop-color="#ff6500"/>
+      <stop offset="1" stop-color="#372018"/>
+    </linearGradient>
+  </defs>
+  <rect width="320" height="420" rx="28" fill="url(#bg)"/>
+  <circle cx="238" cy="82" r="62" fill="#fff" opacity=".18"/>
+  <circle cx="52" cy="338" r="96" fill="#fff" opacity=".12"/>
+  <text x="28" y="64" fill="#fff" font-family="Arial, sans-serif" font-size="22" font-weight="700">Koko Creator</text>
+  <text x="28" y="304" fill="#fff" font-family="Arial, sans-serif" font-size="18" font-weight="700">{content_type}</text>
+  <foreignObject x="28" y="322" width="250" height="76">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="color:white;font-family:Arial,sans-serif;font-size:24px;font-weight:800;line-height:1.12;">{title}</div>
+  </foreignObject>
+</svg>"""
+    return svg.encode("utf-8")
+
+
+def creator_thumbnail_url_for_entry(entry: dict[str, Any]) -> str:
+    entry_id = str(entry.get("entry_id") or "").strip()
+    video_url = str(entry.get("video_url") or "").strip()
+    if not entry_id or not video_url:
+        return ""
+    cache = creator_thumbnail_cache()
+    cached = cache.get(entry_id)
+    if isinstance(cached, dict) and str(cached.get("thumbnail_url") or "").strip():
+        return str(cached.get("thumbnail_url") or "").strip()
+    try:
+        metadata = fetch_kwai_light_metadata(video_url)
+        thumbnail_url = str(metadata.get("thumbnail_url") or "").strip()
+    except Exception:
+        thumbnail_url = ""
+    cache[entry_id] = {
+        "thumbnail_url": thumbnail_url,
+        "video_url": video_url,
+        "checked_at": now_iso(),
+    }
+    write_json_atomic(CREATOR_THUMBNAIL_CACHE_FILE, cache)
+    return thumbnail_url
+
+
+def load_creator_submissions() -> list[dict[str, Any]]:
+    data = read_json_file(CREATOR_SUBMISSIONS_FILE, default=[])
+    return data if isinstance(data, list) else []
+
+
+def save_creator_submission(payload: dict[str, Any]) -> dict[str, Any]:
+    entry_id = str(payload.get("entry_id") or "").strip()
+    video_url = str(payload.get("video_url") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        raise ValueError("Invalid script id.")
+    if not video_url.startswith(("http://", "https://")):
+        raise ValueError("Please submit a public video link.")
+    entry = creator_entry_by_id(entry_id)
+    if not entry:
+        raise ValueError("Script not found.")
+    submission = {
+        "submission_id": uuid4().hex,
+        "entry_id": entry_id,
+        "script_title": str(entry.get("title") or ""),
+        "script_content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
+        "creator_id": str(payload.get("creator_id") or "local_creator").strip()[:120],
+        "video_url": video_url,
+        "note": str(payload.get("note") or "").strip()[:1000],
+        "status": "pending_review",
+        "created_at": now_iso(),
+    }
+    submissions = load_creator_submissions()
+    submissions.insert(0, submission)
+    write_json_atomic(CREATOR_SUBMISSIONS_FILE, submissions[:1000])
+    return submission
+
+
+def creator_portal_html() -> str:
+    questions_json = json.dumps(CREATOR_QUESTIONS, ensure_ascii=False)
+    facets_json = json.dumps(creator_facets_payload(), ensure_ascii=False)
+    return f"""<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Koko Creator</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
+    * {{ box-sizing: border-box; font-family: 'Readex Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+    body {{ margin:0; min-height:100vh; background:#fff4ea; color:#1f1f1f; }}
+    button,a {{ font:inherit; }}
+    .phone {{ width:min(100%,480px); min-height:100vh; margin:0 auto; overflow-x:hidden; padding-bottom:96px; background:radial-gradient(circle at 88% 22%,rgba(255,130,0,.16),transparent 25%),linear-gradient(180deg,#fffaf5 0%,#fff0df 42%,#fff8f2 100%); }}
+    .topbar {{ position:sticky; top:0; z-index:20; min-height:74px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:max(16px,env(safe-area-inset-top)) 24px 12px; background:rgba(255,252,248,.88); backdrop-filter:blur(18px); }}
+    .brand {{ display:flex; align-items:center; gap:12px; min-width:0; }}
+    .brand img {{ width:126px; }}
+    .brand span {{ color:#ff5f00; font-weight:850; white-space:nowrap; }}
+    .menu {{ border:0; background:transparent; font-size:30px; cursor:pointer; }}
+    .lang {{ position:fixed; right:max(16px,calc((100vw - 480px)/2 + 16px)); bottom:98px; z-index:30; display:flex; gap:4px; padding:5px; border-radius:999px; background:rgba(255,255,255,.9); box-shadow:0 12px 28px rgba(255,130,0,.12); }}
+    .lang button {{ border:0; border-radius:999px; padding:7px 10px; background:transparent; color:#777; font-size:12px; font-weight:850; }}
+    .lang .active {{ background:#ff5f00; color:#fff; }}
+    .view {{ display:none; padding:22px 24px 18px; }}
+    .view.active {{ display:block; }}
+    .pill {{ display:inline-flex; align-items:center; gap:9px; max-width:100%; border:1px solid rgba(255,95,0,.48); border-radius:999px; padding:9px 14px; color:#ff5f00; font-size:13px; font-weight:850; background:rgba(255,255,255,.54); }}
+    h1 {{ margin:22px 0 14px; font-size:clamp(40px,11vw,60px); line-height:1.08; font-weight:900; letter-spacing:0; }}
+    .accent {{ color:#ff5f00; }}
+    .lead {{ margin:0; color:#69707a; font-size:17px; line-height:1.55; }}
+    .hero-art {{ position:relative; min-height:168px; margin:12px -24px 0; overflow:hidden; }}
+    .wave {{ position:absolute; right:-70px; bottom:-36px; width:260px; height:128px; border-radius:80% 0 0 0; background:rgba(255,130,0,.14); }}
+    .mascot {{ position:absolute; right:22px; bottom:8px; width:118px; height:118px; border-radius:52% 48% 44% 56%; background:radial-gradient(circle at 35% 22%,#ffbe55,#ff8e24 64%,#f97808); box-shadow:0 18px 40px rgba(255,130,0,.22); }}
+    .mascot:before,.mascot:after {{ content:""; position:absolute; top:30px; width:26px; height:31px; border-radius:50%; background:#fff; }}
+    .mascot:before {{ left:28px; }} .mascot:after {{ right:27px; }}
+    .eye {{ position:absolute; top:41px; width:11px; height:13px; border-radius:50%; background:#5b2a10; z-index:2; }}
+    .eye.left {{ left:37px; }} .eye.right {{ right:36px; }}
+    .mouth {{ position:absolute; left:48px; top:69px; width:30px; height:22px; border-radius:0 0 18px 18px; background:#9b2b00; }}
+    .cta-row {{ display:grid; gap:12px; margin:18px 0 24px; }}
+    .primary {{ border:0; border-radius:999px; min-height:58px; padding:0 18px; display:flex; align-items:center; justify-content:center; gap:12px; background:linear-gradient(90deg,#ff6a00,#ff5200); color:#fff; box-shadow:0 14px 30px rgba(255,95,0,.28); font-size:18px; font-weight:900; cursor:pointer; text-decoration:none; }}
+    .view > .primary {{ position:sticky; bottom:92px; z-index:18; width:100%; margin-top:18px; }}
+    .secondary {{ border:0; border-radius:999px; min-height:48px; padding:0 18px; background:rgba(255,255,255,.86); color:#1f1f1f; box-shadow:0 10px 24px rgba(0,0,0,.06); font-weight:850; cursor:pointer; }}
+    .card {{ border-radius:24px; background:rgba(255,255,255,.84); border:1px solid rgba(255,130,0,.10); box-shadow:0 16px 40px rgba(85,45,10,.08); }}
+    .preview {{ padding:18px; margin-top:12px; }}
+    .preview-head {{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }}
+    .preview-head h2 {{ margin:0; font-size:18px; }}
+    .mini-cards {{ display:grid; grid-template-columns:repeat(3,150px); gap:12px; overflow:auto; padding-bottom:6px; scrollbar-width:none; }}
+    .mini-card {{ position:relative; overflow:hidden; height:188px; border-radius:16px; color:#fff; padding:12px; display:flex; flex-direction:column; justify-content:flex-end; background:#2a1d16; }}
+    .mini-card img {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+    .mini-card:after {{ content:""; position:absolute; inset:0; background:linear-gradient(180deg,rgba(0,0,0,.08),rgba(0,0,0,.72)); }}
+    .mini-card > * {{ position:relative; z-index:1; }}
+    .score {{ align-self:flex-start; margin-bottom:auto; border-radius:9px; padding:6px 8px; background:rgba(158,73,12,.88); font-size:12px; font-weight:850; }}
+    .mini-card b {{ font-size:16px; line-height:1.18; }}
+    .stepper {{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin:18px 0 24px; }}
+    .step {{ min-height:58px; border-radius:18px; background:rgba(255,255,255,.66); color:#878787; display:grid; place-items:center; text-align:center; font-size:12px; font-weight:850; }}
+    .step.active {{ background:#ff5f00; color:#fff; }}
+    .step i {{ display:grid; place-items:center; width:28px; height:28px; border-radius:50%; background:rgba(255,255,255,.72); color:#ff5f00; font-style:normal; }}
+    .question {{ display:none; }}
+    .question.active {{ display:block; }}
+    .options {{ display:grid; gap:12px; margin:18px 0; }}
+    .option {{ min-height:74px; display:flex; align-items:center; gap:12px; width:100%; border:1px solid rgba(255,130,0,.14); border-radius:18px; padding:14px; background:rgba(255,255,255,.86); color:#1f1f1f; text-align:left; font-weight:850; cursor:pointer; }}
+    .option.selected {{ border-color:#ff5f00; color:#ff5f00; box-shadow:0 12px 26px rgba(255,95,0,.12); }}
+    .option span {{ display:grid; place-items:center; width:38px; height:38px; border-radius:50%; background:#fff0e8; font-size:20px; }}
+    .filters {{ display:flex; flex-wrap:wrap; gap:9px; margin:16px 0; }}
+    .chip {{ border:1px solid rgba(255,95,0,.34); border-radius:999px; padding:8px 11px; color:#ff5f00; background:rgba(255,255,255,.58); font-size:12px; font-weight:850; }}
+    .feed {{ display:grid; gap:14px; }}
+    .script {{ padding:14px; display:grid; grid-template-columns:116px 1fr; gap:13px; min-height:168px; }}
+    .thumb {{ position:relative; overflow:hidden; border-radius:16px; min-height:142px; background:#2a1d16; color:#fff; padding:10px; font-weight:900; font-size:12px; }}
+    .thumb img {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+    .thumb:after {{ content:""; position:absolute; inset:0; background:linear-gradient(180deg,rgba(0,0,0,.08),rgba(0,0,0,.66)); }}
+    .thumb span {{ position:relative; z-index:1; display:inline-flex; border-radius:9px; padding:6px 8px; background:rgba(158,73,12,.88); }}
+    .script-body {{ min-width:0; display:flex; flex-direction:column; gap:8px; }}
+    .script h3 {{ margin:0; font-size:19px; line-height:1.22; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }}
+    .script p {{ margin:0; color:#69707a; font-size:13px; line-height:1.42; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }}
+    .tags {{ display:flex; gap:6px; flex-wrap:wrap; }}
+    .tag {{ border-radius:999px; padding:5px 8px; background:#fff0e8; color:#ff5f00; font-size:11px; font-weight:850; }}
+    .actions {{ display:flex; align-items:center; gap:8px; margin-top:auto; }}
+    .open {{ flex:1; min-height:38px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; background:#ff5f00; color:#fff; text-decoration:none; font-size:13px; font-weight:900; }}
+    .plain {{ color:#1f1f1f; text-decoration:none; font-size:12px; font-weight:850; }}
+    .state-card {{ padding:18px; display:grid; gap:12px; }}
+    .state-card h3 {{ margin:0; font-size:18px; }}
+    .state-card p {{ margin:0; color:#69707a; line-height:1.45; font-size:14px; }}
+    .section-title {{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:20px 0 12px; }}
+    .section-title h2 {{ margin:0; font-size:20px; line-height:1.2; }}
+    .quick-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:16px 0; }}
+    .quick {{ min-height:78px; border:0; border-radius:18px; padding:12px 8px; background:rgba(255,255,255,.86); color:#1f1f1f; box-shadow:0 10px 24px rgba(0,0,0,.05); font-weight:850; font-size:12px; }}
+    .quick b {{ display:block; color:#ff5f00; font-size:20px; margin-bottom:4px; }}
+    .status-tabs {{ display:flex; gap:8px; overflow:auto; padding:4px 0 12px; scrollbar-width:none; }}
+    .status-tabs button {{ flex:0 0 auto; border:1px solid rgba(255,95,0,.22); border-radius:999px; padding:9px 13px; background:rgba(255,255,255,.72); color:#777; font-size:12px; font-weight:850; }}
+    .status-tabs .active {{ background:#ff5f00; color:#fff; border-color:#ff5f00; }}
+    .icon-btn {{ border:0; width:38px; height:38px; border-radius:50%; display:grid; place-items:center; background:#fff0e8; color:#ff5f00; font-size:18px; font-weight:900; }}
+    .action-row {{ display:grid; grid-template-columns:1fr 38px 38px; gap:8px; align-items:center; }}
+    .modal {{ position:fixed; inset:0; z-index:50; display:none; background:rgba(31,31,31,.34); padding:20px 18px 0; }}
+    .modal.active {{ display:flex; align-items:flex-end; justify-content:center; }}
+    .sheet {{ width:min(100%,480px); max-height:88vh; overflow:auto; border-radius:28px 28px 0 0; background:#fffaf5; padding:18px 18px max(22px,env(safe-area-inset-bottom)); box-shadow:0 -20px 50px rgba(0,0,0,.20); }}
+    .sheet-head {{ display:flex; align-items:flex-start; gap:12px; justify-content:space-between; }}
+    .sheet h2 {{ margin:6px 0 10px; font-size:25px; line-height:1.15; }}
+    .detail-media {{ position:relative; overflow:hidden; height:220px; border-radius:20px; background:#2a1d16; margin:14px 0; }}
+    .detail-media img {{ width:100%; height:100%; object-fit:cover; }}
+    .detail-block {{ margin:14px 0; }}
+    .detail-block h3 {{ margin:0 0 7px; font-size:16px; }}
+    .detail-block p {{ margin:0; color:#69707a; line-height:1.5; font-size:14px; }}
+    .submit-box {{ display:grid; gap:10px; padding:14px; margin:14px 0; border-radius:18px; background:#fff0e8; border:1px solid rgba(255,95,0,.18); }}
+    .submit-box label {{ font-size:13px; font-weight:900; color:#ff5f00; }}
+    .submit-box input {{ width:100%; min-height:46px; border:1px solid rgba(255,95,0,.22); border-radius:14px; padding:0 12px; background:#fff; color:#1f1f1f; font-size:14px; }}
+    .submit-hint {{ margin:0; color:#69707a; line-height:1.45; font-size:12px; }}
+    .submit-status {{ min-height:18px; color:#ff5f00; font-size:12px; font-weight:850; }}
+    .bottom {{ position:fixed; left:50%; bottom:0; transform:translateX(-50%); z-index:25; width:min(100%,480px); display:grid; grid-template-columns:repeat(2,1fr); gap:2px; padding:10px 14px max(10px,env(safe-area-inset-bottom)); border-radius:24px 24px 0 0; background:rgba(255,255,255,.94); box-shadow:0 -14px 34px rgba(0,0,0,.08); }}
+    .bottom button {{ border:0; background:transparent; color:#777; min-height:54px; display:grid; place-items:center; gap:4px; font-size:12px; font-weight:750; }}
+    .bottom .active {{ color:#ff5f00; }}
+    .nav-icon {{ font-size:23px; }}
+    @media (max-width:380px) {{ .brand img{{width:108px}} .brand span{{font-size:14px}} .view{{padding-left:18px;padding-right:18px}} h1{{font-size:38px}} .script{{grid-template-columns:104px 1fr}} }}
+  </style>
+</head>
+<body>
+  <main class="phone">
+    <header class="topbar"><div class="brand"><img src="/brand/kwai-wordmark.svg" alt="Kwai"><span>Koko Creator</span></div><button class="menu" type="button" aria-label="Menu">☰</button></header>
+    <div class="lang"><button type="button" data-lang="pt" class="active">PT</button><button type="button" data-lang="zh">中文</button></div>
+    <section class="view" data-view="home">
+      <div class="pill">✦ <span data-i18n="homePill">Biblioteca de roteiros Koko Creator</span></div>
+      <h1 data-i18n-html="homeTitle">Encontre mais rápido <span class="accent">roteiros</span> que você realmente consegue gravar</h1>
+      <p class="lead" data-i18n="homeLead">Responda 3 perguntas simples e veja roteiros que combinam com o jeito que você grava.</p>
+      <div class="hero-art"><div class="wave"></div><div class="mascot"><span class="eye left"></span><span class="eye right"></span><span class="mouth"></span></div></div>
+      <div class="cta-row"><button class="primary" type="button" data-go="choose">✦ <span data-i18n="start">Começar agora</span> →</button></div>
+      <section class="preview card"><div class="preview-head"><h2 data-i18n="recommended">Recomendado para você</h2></div><div class="mini-cards" id="mini-cards"></div></section>
+    </section>
+    <section class="view" data-view="dashboard">
+      <div class="pill">✦ <span data-i18n="todayPill">Recomendação de roteiros</span></div>
+      <h1 data-i18n="todayTitle">Recomendação de roteiros</h1>
+      <p class="lead" data-i18n="todayLead">Abra, salve e marque o que você vai gravar hoje.</p>
+      <div class="quick-grid">
+        <button class="quick" type="button"><b id="count-new">0</b><span data-i18n="quickNew">novos</span></button>
+        <button class="quick" type="button" data-go="saved"><b id="count-saved">0</b><span data-i18n="quickSaved">salvos</span></button>
+        <button class="quick" type="button" data-go="saved" data-saved-tab="planned"><b id="count-planned">0</b><span data-i18n="quickPlan">para gravar</span></button>
+      </div>
+      <div class="filters" id="dashboard-filters"></div>
+      <div class="section-title"><h2 data-i18n="todayRecommended">Para gravar hoje</h2></div>
+      <div class="feed" id="dashboard-feed"></div>
+    </section>
+    <section class="view" data-view="choose">
+      <div class="pill">✦ <span id="step-label">Etapa 1 de 3</span></div>
+      <div class="stepper" id="stepper"></div>
+      <div id="question-wrap"></div>
+      <button class="primary" type="button" id="next-step"><span data-i18n="next">Próxima etapa</span> →</button>
+    </section>
+    <section class="view" data-view="library">
+      <div class="pill">✦ <span data-i18n="libraryPill">Biblioteca de roteiros Koko Creator</span></div>
+      <h1 data-i18n="resultTitle">Roteiros recomendados para você</h1>
+      <div class="filters" id="selected-filters"></div>
+      <div class="feed" id="feed"></div>
+    </section>
+    <section class="view" data-view="saved">
+      <div class="pill">✦ <span data-i18n="savedPill">Meus roteiros</span></div>
+      <h1 data-i18n="savedTitle">Sua lista de gravação</h1>
+      <div class="status-tabs" id="saved-tabs"></div>
+      <div class="feed" id="saved-feed"></div>
+    </section>
+  </main>
+  <nav class="bottom"><button type="button" data-go="dashboard"><span class="nav-icon">⌂</span><span data-i18n="navHome">Roteiros</span></button><button type="button" data-go="saved"><span class="nav-icon">♡</span><span data-i18n="navSaved">Salvos</span></button></nav>
+  <div class="modal" id="detail-modal"><section class="sheet"><div class="sheet-head"><div class="pill">Koko Creator</div><button class="icon-btn" type="button" data-close-detail>×</button></div><div id="detail-content"></div></section></div>
+  <script>
+    const questions = {questions_json};
+    const facets = {facets_json};
+    const profileKey = "koko_creator_profile_v3";
+    const langKey = "koko_creator_lang";
+    const workspaceKey = "koko_creator_workspace_v1";
+    let lang = localStorage.getItem(langKey) || "pt";
+    let step = 0;
+    let savedTab = "saved";
+    let matchesCache = [];
+    let answers = JSON.parse(localStorage.getItem(profileKey) || "null") || {{ people: "duo", scene: "couple", humor: "twist" }};
+    let workspace = JSON.parse(localStorage.getItem(workspaceKey) || "null") || {{ saved: [], planned: [], finished: [], rejected: [] }};
+    const i18n = {{
+      pt: {{ homePill:"Biblioteca de roteiros Koko Creator", homeTitle:'Encontre mais rápido <span class="accent">roteiros</span> que você realmente consegue gravar', homeLead:"Responda 3 perguntas simples e veja roteiros que combinam com o jeito que você grava.", start:"Começar agora", seePopular:"Ver populares", recommended:"Recomendado para você", seeAll:"Ver todos", next:"Próxima etapa", finish:"Ver recomendações", libraryPill:"Biblioteca de roteiros Koko Creator", resultTitle:"Sua biblioteca recomendada", open:"Abrir", original:"Vídeo", navHome:"Roteiros", navPrefs:"Perfil", navSaved:"Salvos", navLibrary:"Biblioteca", changePrefs:"Mudar preferências", step:"Etapa", todayPill:"Recomendação de roteiros", todayTitle:"Recomendação de roteiros", todayLead:"Abra, salve e marque o que você vai gravar hoje.", quickNew:"roteiros", quickSaved:"salvos", quickPlan:"para gravar", todayRecommended:"Para gravar hoje", savedPill:"Meus roteiros", savedTitle:"Sua lista de gravação", save:"Salvar", saved:"Salvo", plan:"Vou gravar", done:"Gravado", reject:"Não serve", copy:"Copiar resumo", emptySaved:"Nada aqui ainda", emptySavedText:"Salve um roteiro da recomendação para montar sua lista.", details:"Detalhes do roteiro", quickSummary:"Resumo rápido", howToUse:"Como usar", howToUseText:"Leia o resumo, veja o vídeo de referência e marque se vai gravar.", peopleTag:"2 pessoas", placeTag:"Baixo custo", statusSaved:"Salvos", statusPlanned:"Vou gravar", statusFinished:"Gravados", statusRejected:"Não servem", submitTitle:"Enviar vídeo gravado", submitHint:"Envie o link do vídeo gravado seguindo este roteiro. Vamos revisar e, se aprovado, ajudar com impulsionamento.", submitPlaceholder:"Cole aqui o link do seu vídeo", submitButton:"Enviar para revisão", submitOk:"Recebido. Vamos revisar seu vídeo.", submitError:"Não foi possível enviar. Confira o link e tente novamente." }},
+      zh: {{ homePill:"Koko Creator 脚本推荐", homeTitle:'更快找到你<span class="accent">真的能拍</span>的脚本', homeLead:"回答 3 个简单问题，Koko 会按你的拍摄方式推荐脚本。", start:"开始选择", seePopular:"先看热门", recommended:"为你推荐", seeAll:"查看全部", next:"下一步", finish:"查看推荐", libraryPill:"Koko Creator 脚本库", resultTitle:"你的推荐脚本库", open:"打开", original:"原视频", navHome:"脚本推荐", navPrefs:"偏好", navSaved:"收藏", navLibrary:"脚本库", changePrefs:"重新选择偏好", step:"第", todayPill:"脚本推荐", todayTitle:"脚本推荐", todayLead:"打开、收藏，并标记今天准备拍的脚本。", quickNew:"推荐脚本", quickSaved:"已收藏", quickPlan:"准备拍", todayRecommended:"今天可以拍", savedPill:"我的脚本", savedTitle:"你的拍摄清单", save:"收藏", saved:"已收藏", plan:"准备拍", done:"已拍", reject:"不适合", copy:"复制摘要", emptySaved:"这里还没有脚本", emptySavedText:"先从脚本推荐里收藏一个脚本，建立你的拍摄清单。", details:"脚本详情", quickSummary:"快速梗概", howToUse:"怎么使用", howToUseText:"先看梗概和原视频，再标记是否准备拍。", peopleTag:"2 人", placeTag:"低成本", statusSaved:"已收藏", statusPlanned:"准备拍", statusFinished:"已拍", statusRejected:"不适合", submitTitle:"回传拍摄视频", submitHint:"上传按照脚本拍摄的视频，我们会审核后给您投流。", submitPlaceholder:"把你发布后的视频链接粘贴在这里", submitButton:"提交审核", submitOk:"已收到，我们会审核这个视频。", submitError:"提交失败，请检查链接后重试。" }}
+    }};
+    const t = key => (i18n[lang] && i18n[lang][key]) || key;
+    const label = item => lang === "zh" ? item.zh : item.pt;
+    const esc = value => String(value || "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
+    function save() {{ localStorage.setItem(profileKey, JSON.stringify(answers)); }}
+    function saveWorkspace() {{ localStorage.setItem(workspaceKey, JSON.stringify(workspace)); updateCounts(); }}
+    function hasProfile() {{ return !!localStorage.getItem(profileKey); }}
+    function ids(name) {{ return new Set(workspace[name] || []); }}
+    function entryById(id) {{ return matchesCache.find(e => e.entry_id === id); }}
+    function setStatus(id, status) {{
+      ["saved","planned","finished","rejected"].forEach(key => workspace[key] = (workspace[key] || []).filter(item => item !== id));
+      if (status) workspace[status] = [...(workspace[status] || []), id];
+      saveWorkspace();
+      renderAllKnown();
+    }}
+    function statusOf(id) {{
+      if (ids("planned").has(id)) return "planned";
+      if (ids("finished").has(id)) return "finished";
+      if (ids("rejected").has(id)) return "rejected";
+      if (ids("saved").has(id)) return "saved";
+      return "";
+    }}
+    function updateCounts() {{
+      const newNode = document.querySelector("#count-new"); if (newNode) newNode.textContent = String(matchesCache.length || facets.total || 0);
+      const savedNode = document.querySelector("#count-saved"); if (savedNode) savedNode.textContent = String((workspace.saved || []).length);
+      const plannedNode = document.querySelector("#count-planned"); if (plannedNode) plannedNode.textContent = String((workspace.planned || []).length);
+    }}
+    function applyLang() {{
+      document.documentElement.lang = lang === "zh" ? "zh-CN" : "pt-BR";
+      document.querySelectorAll("[data-lang]").forEach(btn => btn.classList.toggle("active", btn.dataset.lang === lang));
+      document.querySelectorAll("[data-i18n]").forEach(node => node.textContent = t(node.dataset.i18n));
+      document.querySelectorAll("[data-i18n-html]").forEach(node => node.innerHTML = t(node.dataset.i18nHtml));
+      renderQuestion(); renderMini(); renderSaved(); if (activeView() === "library") show("dashboard"); if (activeView() === "dashboard") renderDashboard(); updateNav(); updateCounts();
+    }}
+    function activeView() {{ return document.querySelector(".view.active")?.dataset.view || "home"; }}
+    function show(view) {{
+      if (view === "library") view = "dashboard";
+      if ((view === "dashboard" || view === "saved") && !hasProfile()) view = "home";
+      document.querySelectorAll("[data-view]").forEach(v => v.classList.toggle("active", v.dataset.view === view));
+      if (view === "dashboard") renderDashboard();
+      if (view === "saved") renderSaved();
+      updateNav(); window.scrollTo({{top:0,behavior:"smooth"}});
+    }}
+    function updateNav() {{
+      const active = activeView();
+      document.querySelectorAll(".bottom button").forEach(btn => btn.classList.toggle("active", btn.dataset.go === active));
+    }}
+    function renderQuestion() {{
+      const q = questions[step];
+      document.querySelector("#step-label").textContent = lang === "zh" ? `${{t("step")}} ${{step + 1}} / 3` : `${{t("step")}} ${{step + 1}} de 3`;
+      document.querySelector("#stepper").innerHTML = questions.map((item, idx) => `<div class="step ${{idx === step ? "active" : ""}}"><i>${{idx + 1}}</i></div>`).join("");
+      document.querySelector("#question-wrap").innerHTML = `<section class="question active"><h1>${{esc(label(q))}}</h1><div class="options">${{q.options.map(opt => `<button class="option ${{answers[q.id] === opt.id ? "selected" : ""}}" type="button" data-answer="${{esc(q.id)}}" data-value="${{esc(opt.id)}}"><span>${{opt.id === "hot" ? "★" : "●"}}</span><b>${{esc(label(opt))}}</b></button>`).join("")}}</div></section>`;
+      document.querySelector("#next-step span").textContent = step === questions.length - 1 ? t("finish") : t("next");
+    }}
+    async function fetchMatches(limit=80) {{
+      const params = new URLSearchParams({{limit}});
+      Object.values(answers).forEach(value => params.append("selected", value));
+      const response = await fetch(`/api/creator/recommendations?${{params.toString()}}&_=${{Date.now()}}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Load failed");
+      matchesCache = data.entries || [];
+      updateCounts();
+      return data;
+    }}
+    async function renderMini() {{
+      try {{ const data = await fetchMatches(3); document.querySelector("#mini-cards").innerHTML = (data.entries || []).map((e,i)=>`<article class="mini-card"><img src="${{esc(e.thumbnail_url)}}" alt="" loading="lazy"><span class="score">${{96 - i * 3}} pontos</span><b>${{esc(e.title).slice(0,52)}}</b><span>🔥 ${{98 - i*11}},${{i+2}} mil</span></article>`).join(""); }} catch(e) {{}}
+    }}
+    function selectedChips() {{
+      const lookup = Object.fromEntries(questions.flatMap(q => q.options.map(o => [o.id, o])));
+      return Object.values(answers).map(id => lookup[id]).filter(Boolean).map(opt => `<span class="chip">${{esc(label(opt))}} ✓</span>`).join("");
+    }}
+    function statusLabel(status) {{ return status === "planned" ? t("plan") : status === "finished" ? t("done") : status === "rejected" ? t("reject") : t("saved"); }}
+    function card(e, i, compact=false) {{
+      const status = statusOf(e.entry_id);
+      return `<article class="script card"><div class="thumb"><img src="${{esc(e.thumbnail_url)}}" alt="" loading="lazy"><span>${{Math.max(78, 96 - Math.min(i, 18))}} match</span></div><div class="script-body"><h3>${{esc(e.title)}}</h3><p>${{esc(e.summary)}}</p><div class="tags"><span class="tag">${{esc(e.content_type)}}</span><span class="tag">${{t("peopleTag")}}</span><span class="tag">${{t("placeTag")}}</span>${{status ? `<span class="tag">${{statusLabel(status)}}</span>` : ""}}</div><div class="action-row"><button class="open" type="button" data-detail="${{esc(e.entry_id)}}">▷ ${{t("open")}}</button><button class="icon-btn" type="button" data-status="${{status === "saved" ? "" : "saved"}}" data-entry="${{esc(e.entry_id)}}">${{status === "saved" ? "✓" : "♡"}}</button><button class="icon-btn" type="button" data-status="planned" data-entry="${{esc(e.entry_id)}}">＋</button></div></div></article>`;
+    }}
+    function renderCards(target, entries, emptyTitle, emptyText) {{
+      const node = document.querySelector(target);
+      if (!node) return;
+      node.innerHTML = entries.length ? entries.map((e,i) => card(e,i)).join("") : `<section class="state-card card"><h3>${{emptyTitle}}</h3><p>${{emptyText}}</p><button class="primary" type="button" data-go="dashboard">${{t("navHome")}}</button></section>`;
+    }}
+    function renderAllKnown() {{
+      if (activeView() === "library") renderCards("#feed", matchesCache, "", "");
+      if (activeView() === "dashboard") renderDashboard();
+      if (activeView() === "saved") renderSaved();
+    }}
+    async function ensureMatches() {{ if (!matchesCache.length) await fetchMatches(80); }}
+    async function renderDashboard() {{
+      document.querySelector("#dashboard-filters").innerHTML = selectedChips() + `<button class="chip" type="button" data-go="choose">${{t("changePrefs")}}</button>`;
+      document.querySelector("#dashboard-feed").innerHTML = `<section class="state-card card"><h3>${{lang === "zh" ? "正在加载今日推荐…" : "Carregando recomendações..."}}</h3><p>Koko Creator</p></section>`;
+      try {{ await fetchMatches(80); renderCards("#dashboard-feed", matchesCache, t("emptySaved"), t("emptySavedText")); }}
+      catch (error) {{ document.querySelector("#dashboard-feed").innerHTML = `<section class="state-card card"><h3>${{lang === "zh" ? "推荐加载失败" : "Não foi possível carregar"}}</h3><p>localhost:8391</p><button class="primary" type="button" data-go="dashboard">${{lang === "zh" ? "重试" : "Tentar novamente"}}</button></section>`; }}
+      updateCounts();
+    }}
+    function savedEntriesFor(tab) {{ return (workspace[tab] || []).map(entryById).filter(Boolean); }}
+    async function renderSaved() {{
+      document.querySelector("#saved-tabs").innerHTML = [["saved",t("statusSaved")],["planned",t("statusPlanned")],["finished",t("statusFinished")],["rejected",t("statusRejected")]].map(([id,text]) => `<button type="button" class="${{savedTab === id ? "active" : ""}}" data-tab="${{id}}">${{text}} ${{(workspace[id] || []).length}}</button>`).join("");
+      try {{ await ensureMatches(); renderCards("#saved-feed", savedEntriesFor(savedTab), t("emptySaved"), t("emptySavedText")); }}
+      catch (error) {{ document.querySelector("#saved-feed").innerHTML = `<section class="state-card card"><h3>${{t("emptySaved")}}</h3><p>${{t("emptySavedText")}}</p></section>`; }}
+    }}
+    function openDetail(id) {{
+      const e = entryById(id);
+      if (!e) return;
+      document.querySelector("#detail-content").innerHTML = `<div class="detail-media"><img src="${{esc(e.thumbnail_url)}}" alt=""></div><h2>${{esc(e.title)}}</h2><div class="tags"><span class="tag">${{esc(e.content_type)}}</span><span class="tag">${{t("peopleTag")}}</span><span class="tag">${{t("placeTag")}}</span></div><div class="detail-block"><h3>${{t("quickSummary")}}</h3><p>${{esc(e.summary)}}</p></div><div class="detail-block"><h3>${{t("howToUse")}}</h3><p>${{t("howToUseText")}}</p></div><section class="submit-box"><label for="submission-url">${{t("submitTitle")}}</label><p class="submit-hint">${{t("submitHint")}}</p><input id="submission-url" type="url" inputmode="url" placeholder="${{t("submitPlaceholder")}}" data-submit-url="${{esc(e.entry_id)}}"><button class="primary" type="button" data-submit-video="${{esc(e.entry_id)}}">${{t("submitButton")}}</button><div class="submit-status" id="submit-status-${{esc(e.entry_id)}}"></div></section><div class="cta-row"><button class="primary" type="button" data-status="planned" data-entry="${{esc(e.entry_id)}}">${{t("plan")}}</button><button class="secondary" type="button" data-status="saved" data-entry="${{esc(e.entry_id)}}">${{t("save")}}</button><button class="secondary" type="button" data-status="finished" data-entry="${{esc(e.entry_id)}}">${{t("done")}}</button><button class="secondary" type="button" data-status="rejected" data-entry="${{esc(e.entry_id)}}">${{t("reject")}}</button>${{e.html_url ? `<a class="primary" href="${{esc(e.html_url)}}" target="_blank" rel="noreferrer">▷ ${{t("details")}}</a>` : ""}}${{e.video_url ? `<a class="secondary" href="${{esc(e.video_url)}}" target="_blank" rel="noreferrer">${{t("original")}}</a>` : ""}}</div>`;
+      document.querySelector("#detail-modal").classList.add("active");
+    }}
+    function closeDetail() {{ document.querySelector("#detail-modal").classList.remove("active"); }}
+    async function submitVideo(entryId) {{
+      const input = document.querySelector(`[data-submit-url="${{entryId}}"]`);
+      const status = document.querySelector(`#submit-status-${{entryId}}`);
+      const videoUrl = String(input?.value || "").trim();
+      if (!videoUrl) {{ if (status) status.textContent = t("submitError"); return; }}
+      if (status) status.textContent = lang === "zh" ? "提交中…" : "Enviando...";
+      try {{
+        const response = await fetch("/api/creator/submissions", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{entry_id: entryId, video_url: videoUrl, creator_id: "local_creator"}})
+        }});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "submit failed");
+        if (status) status.textContent = t("submitOk");
+        setStatus(entryId, "finished");
+      }} catch (error) {{
+        if (status) status.textContent = t("submitError");
+      }}
+    }}
+    async function loadResults() {{
+      document.querySelector("#selected-filters").innerHTML = selectedChips() + `<button class="chip" type="button" data-go="choose">${{lang === "zh" ? "重新筛选" : "Filtrar novamente"}}</button>`;
+      document.querySelector("#feed").innerHTML = `<section class="state-card card"><h3>${{lang === "zh" ? "正在加载推荐脚本…" : "Carregando roteiros..."}}</h3><p>Koko Creator</p></section>`;
+      try {{
+        const data = await fetchMatches(80);
+        const entries = data.entries || [];
+        if (!entries.length) {{
+          document.querySelector("#feed").innerHTML = `<section class="state-card card"><h3>${{lang === "zh" ? "暂时没有匹配脚本" : "Ainda não encontramos roteiros"}}</h3><p>${{lang === "zh" ? "换一个偏好组合再试试。" : "Tente ajustar suas preferências."}}</p><button class="primary" type="button" data-go="choose">${{lang === "zh" ? "重新筛选" : "Filtrar novamente"}}</button></section>`;
+          return;
+        }}
+        renderCards("#feed", entries, "", "");
+      }} catch (error) {{
+        document.querySelector("#feed").innerHTML = `<section class="state-card card"><h3>${{lang === "zh" ? "推荐脚本加载失败" : "Não foi possível carregar"}}</h3><p>${{lang === "zh" ? "本地服务或接口刚才没有响应。请确认 localhost:8391 正在运行，然后重试。" : "O serviço local ou a API não respondeu. Confira se localhost:8391 está rodando e tente novamente."}}</p><button class="primary" type="button" data-go="library">${{lang === "zh" ? "重试" : "Tentar novamente"}}</button><button class="secondary" type="button" data-go="choose">${{lang === "zh" ? "重新筛选" : "Filtrar novamente"}}</button></section>`;
+      }}
+    }}
+    document.addEventListener("click", event => {{
+      const langBtn = event.target.closest("[data-lang]"); if (langBtn) {{ lang = langBtn.dataset.lang; localStorage.setItem(langKey, lang); applyLang(); return; }}
+      const tabBtn = event.target.closest("[data-tab]"); if (tabBtn) {{ savedTab = tabBtn.dataset.tab; renderSaved(); return; }}
+      const detailBtn = event.target.closest("[data-detail]"); if (detailBtn) {{ openDetail(detailBtn.dataset.detail); return; }}
+      if (event.target.closest("[data-close-detail]") || event.target.id === "detail-modal") {{ closeDetail(); return; }}
+      const submitBtn = event.target.closest("[data-submit-video]"); if (submitBtn) {{ submitVideo(submitBtn.dataset.submitVideo); return; }}
+      const statusBtn = event.target.closest("[data-status]"); if (statusBtn) {{ setStatus(statusBtn.dataset.entry, statusBtn.dataset.status || ""); return; }}
+      const go = event.target.closest("[data-go]"); if (go) {{ if (go.dataset.savedTab) savedTab = go.dataset.savedTab; show(go.dataset.go); return; }}
+      const answer = event.target.closest("[data-answer]"); if (answer) {{ answers[answer.dataset.answer] = answer.dataset.value; save(); renderQuestion(); return; }}
+      if (event.target.closest("#next-step")) {{ if (step < questions.length - 1) {{ step += 1; renderQuestion(); }} else {{ save(); show("dashboard"); }} }}
+    }});
+    applyLang();
+    show(hasProfile() ? "dashboard" : "home");
+  </script>
+</body>
+</html>"""
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "VideoAnalysisV3Web/0.2"
 
@@ -10190,6 +11931,12 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/library":
             self.send_html(library_html())
             return
+        if parsed.path == "/creator-portal":
+            if not is_local_creator_portal_request(self):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_html(creator_portal_html())
+            return
         if parsed.path == "/brand/kwai-wordmark.svg" and HERO_WORDMARK.exists():
             self.send_file(HERO_WORDMARK)
             return
@@ -10199,6 +11946,84 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/library":
             self.send_json({"entries": load_library_entries()})
             return
+        if parsed.path == "/api/creator/facets":
+            if not is_local_creator_portal_request(self):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_json(creator_facets_payload())
+            return
+        if parsed.path == "/api/creator/submissions":
+            if not is_local_creator_portal_request(self):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_json({"submissions": load_creator_submissions()})
+            return
+        if parsed.path == "/api/creator/sync-status":
+            if not is_local_creator_portal_request(self):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            meta = read_json_file(CREATOR_SYNC_META_FILE, default={})
+            if not isinstance(meta, dict):
+                meta = {}
+            self.send_json({
+                "source_url": CREATOR_LIBRARY_SOURCE_URL,
+                "cache_exists": CREATOR_ONLINE_LIBRARY_FILE.exists(),
+                "entries_count": len(read_json_file(CREATOR_ONLINE_LIBRARY_FILE, default=[])) if CREATOR_ONLINE_LIBRARY_FILE.exists() else 0,
+                **meta,
+            })
+            return
+        if parsed.path.startswith("/api/creator/thumbnail/"):
+            if not is_local_creator_portal_request(self):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            filename = parsed.path.rsplit("/", 1)[-1]
+            entry_id = filename[:-4] if filename.endswith(".svg") else filename
+            if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            entry = creator_entry_by_id(entry_id)
+            if not entry:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            thumbnail_url = creator_thumbnail_url_for_entry(entry)
+            if thumbnail_url:
+                try:
+                    req = urllib.request.Request(
+                        thumbnail_url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    with urllib.request.urlopen(req, timeout=15) as response:
+                        raw = response.read()
+                        content_type = response.headers.get("Content-Type") or "image/webp"
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Cache-Control", "public, max-age=86400")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                except Exception:
+                    pass
+            raw = creator_placeholder_svg(entry)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        if parsed.path == "/api/creator/recommendations":
+            if not is_local_creator_portal_request(self):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            selected = [str(value or "") for value in query.get("selected", [])]
+            try:
+                limit = max(1, min(200, int(str((query.get("limit") or ["80"])[0] or "80"))))
+            except Exception:
+                limit = 80
+            self.send_json(creator_recommendation_payload(selected, limit=limit))
+            return
         if parsed.path.startswith("/api/filter-jobs/"):
             job_id = parsed.path.split("/")[-1]
             with filter_jobs_lock:
@@ -10207,6 +12032,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Filter job not found."}, status=404)
                 return
             self.send_json(public_filter_job_view(job))
+            return
+        if parsed.path.startswith("/api/translation-jobs/"):
+            job_id = parsed.path.split("/")[-1]
+            with translation_jobs_lock:
+                job = translation_jobs.get(job_id)
+            if not job:
+                self.send_json({"error": "Translation job not found."}, status=404)
+                return
+            self.send_json(public_translation_job_view(job))
             return
         if parsed.path.startswith("/api/jobs/"):
             reconcile_stale_jobs()
@@ -10263,6 +12097,16 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return
+        if parsed.path == "/creator-portal":
+            if not is_local_creator_portal_request(self):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            body = creator_portal_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return
         if parsed.path == "/brand/kwai-wordmark.svg" and HERO_WORDMARK.exists():
             self.head_file(HERO_WORDMARK)
             return
@@ -10286,6 +12130,24 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/creator/submissions":
+            if not is_local_creator_portal_request(self):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            try:
+                payload = self.read_json()
+                submission = save_creator_submission(payload)
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except Exception as exc:
+                self.send_json({"error": friendly_error(str(exc))}, status=500)
+                return
+            self.send_json({"ok": True, "submission": submission}, status=201)
+            return
         if parsed.path == "/api/stop-all":
             summary = stop_all_tasks()
             self.send_json({"ok": True, **summary})
@@ -10390,6 +12252,25 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "entry": updated})
             return
         if parsed.path != "/api/jobs":
+            if parsed.path == "/api/translation-jobs":
+                try:
+                    payload = self.read_json()
+                except json.JSONDecodeError:
+                    self.send_json({"error": "Invalid JSON body."}, status=400)
+                    return
+                video_url = str(payload.get("video_url") or "").strip()
+                if not video_url:
+                    urls = split_video_urls(str(payload.get("raw_text") or ""))
+                    video_url = urls[0] if urls else ""
+                if not video_url:
+                    self.send_json({"error": "请提供一个可公开访问的视频链接。"}, status=400)
+                    return
+                if not TRANSCREATE_VIDEO.exists():
+                    self.send_json({"error": f"Missing transcreation entrypoint: {TRANSCREATE_VIDEO}"}, status=500)
+                    return
+                job = create_translation_job(video_url, language=str(payload.get("language") or "pt-BR").strip() or "pt-BR")
+                self.send_json(job, status=202)
+                return
             if parsed.path != "/api/filter-jobs":
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -10470,10 +12351,13 @@ class AppHandler(BaseHTTPRequestHandler):
 def main() -> int:
     load_jobs()
     load_filter_jobs()
+    load_translation_jobs()
     restore_pending_jobs_to_queue()
     restore_pending_filter_jobs_to_queue()
+    restore_pending_translation_jobs_to_queue()
     start_job_workers()
     start_filter_workers()
+    start_translation_workers()
     start_watchdog()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AppHandler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT), "skill_root": str(SKILL_ROOT)}, ensure_ascii=False))
