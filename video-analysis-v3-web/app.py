@@ -7901,54 +7901,6 @@ def studio_html() -> str:
       return text || fallback;
     }}
 
-    function parseTimelineSeconds(value) {{
-      const raw = String(value || "").trim();
-      if (!raw) return null;
-      const match = raw.match(/(\\d{{1,2}}(?::\\d{{1,2}}){{0,2}}(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)\\s*(?:-|–|—|~|至|到)?\\s*(\\d{{1,2}}(?::\\d{{1,2}}){{0,2}}(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)?/);
-      if (!match) return null;
-      const toSeconds = (part) => {{
-        const text = String(part || "").trim().replace(/[秒sS]$/g, "");
-        if (!text) return null;
-        if (text.includes(":")) {{
-          const nums = text.split(":").map((piece) => Number(piece));
-          if (nums.some((num) => Number.isNaN(num))) return null;
-          return nums.reduce((acc, num) => acc * 60 + num, 0);
-        }}
-        const num = Number(text);
-        return Number.isNaN(num) ? null : num;
-      }};
-      const start = toSeconds(match[1]);
-      const end = toSeconds(match[2]);
-      if (start === null) return null;
-      return {{
-        start,
-        end: end !== null && end >= start ? end : start + 1,
-      }};
-    }}
-
-    function formatClock(seconds) {{
-      const safe = Math.max(0, Number(seconds) || 0);
-      const total = Math.floor(safe);
-      const mins = Math.floor(total / 60);
-      const secs = total % 60;
-      return `${{String(mins).padStart(2, "0")}}:${{String(secs).padStart(2, "0")}}`;
-    }}
-
-    function buildVideoReviewMarkup(item) {{
-      if (item.status !== "completed") return "";
-      const sourceUrl = item.artifacts?.["source.mp4"] || `/results/${{item.id}}/source.mp4`;
-      return `
-        <div class="video-review-strip" data-video-review="${{item.id}}">
-          <video controls preload="metadata" src="${{escapeHtml(sourceUrl)}}" data-review-video="${{item.id}}"></video>
-          <div class="video-review-meta">
-            <div class="video-review-title">视频复核</div>
-            <div class="video-review-copy">点击脚本行旁边的“跳到”，播放器会定位到对应时间；播放时当前脚本行会自动高亮。</div>
-            <div class="video-review-now" data-video-now="${{item.id}}">当前 00:00</div>
-          </div>
-        </div>
-      `;
-    }}
-
     function buildLibraryConfirmMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const alreadySaved = Boolean(item.saved_to_library_at || item.in_library);
@@ -8312,7 +8264,6 @@ def studio_html() -> str:
       const title = escapeHtml(item.title || `视频 ${{idx + 1}}`);
       const editor = buildEditorMarkup(item);
       const review = buildReviewMarkup(item);
-      const videoReview = buildVideoReviewMarkup(item);
       const libraryConfirm = buildLibraryConfirmMarkup(item);
       const toggleButton = item.display_language === "pt"
         ? `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="zh">切回中文</button>`
@@ -8335,7 +8286,6 @@ def studio_html() -> str:
           <div class="item-body">
             <div class="item-sections">
               ${{libraryConfirm}}
-              ${{videoReview}}
               ${{review}}
               ${{editor}}
               <div class="item-actions-shell"><div class="link-row">${{links}}</div></div>
