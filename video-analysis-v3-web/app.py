@@ -374,17 +374,7 @@ def load_jobs() -> None:
         cleanup_old_results()
     except Exception as exc:
         log_runtime_warning("cleanup_results_skipped", "Automatic result cleanup failed during startup.", error=str(exc))
-    try:
-        sync_library_from_jobs()
-    except Exception as exc:
-        if is_no_space_error(exc):
-            log_runtime_warning(
-                "library_sync_skipped",
-                "Skipped script library sync during startup because the persistent disk is full.",
-                path=str(LIBRARY_FILE),
-            )
-        else:
-            raise
+    log_runtime_info("library_sync_startup_skipped", "Script library sync is manual-only.")
 
 
 def save_jobs() -> None:
@@ -4061,6 +4051,8 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "review_feedback": item.get("review_feedback") or "",
         "reviewed": bool(item.get("reviewed")),
         "edited": bool(item.get("edited")),
+        "saved_to_library_at": item.get("saved_to_library_at") or "",
+        "in_library": bool(item.get("saved_to_library_at")) or library_entry_exists(str(item.get("id") or "")),
     }
 
 
@@ -5097,8 +5089,6 @@ def run_job_batch(job_id: str) -> None:
             stage_message=f"Completed {completed}/{len(final_items)} items. Failed {failed}.",
             error="" if completed else "All batch items failed.",
         )
-        if completed:
-            persist_completed_job_items_async(job_id, use_llm=True)
     except Exception as exc:
         update_job(job_id, status="failed", error=friendly_error(str(exc)), completed_at=now_iso(), stage="failed", stage_message="Batch failed.")
 
@@ -6490,6 +6480,40 @@ def studio_html() -> str:
       color: #fff;
       border-color: transparent;
     }}
+    .library-confirm-card {{
+      border: 1px solid rgba(255,130,0,.22);
+      border-radius: 18px;
+      background:
+        radial-gradient(circle at 12% 18%, rgba(255,130,0,.13), rgba(255,130,0,0) 28%),
+        rgba(255,255,255,.78);
+      padding: 16px;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }}
+    .library-confirm-copy {{
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-width: min(420px, 100%);
+    }}
+    .library-confirm-title {{
+      font-size: 17px;
+      font-weight: 900;
+      color: var(--ink);
+    }}
+    .library-confirm-note {{
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+    }}
+    .library-confirm-card.done {{
+      border-color: rgba(21,115,71,.22);
+      background: rgba(240,253,244,.78);
+    }}
     .toast {{
       position: fixed;
       right: 24px;
@@ -7637,7 +7661,8 @@ def studio_html() -> str:
       }}
       if (primaryItem?.result_json || primaryItem?.html_url) hints.push("最终脚本已生成");
       if (primaryItem?.docx_url) hints.push("导出文件已生成");
-      if (primaryItem?.saved_to_library_at || primaryItem?.entry_id) hints.push("已同步脚本库");
+      if (primaryItem?.saved_to_library_at || primaryItem?.in_library) hints.push("已确认入库");
+      else if (primaryItem?.status === "completed" && primaryItem?.result_json) hints.push("待确认入库");
       if (primaryItem?.report_url || primaryItem?.evidence_url) hints.push("报告已生成");
       return hints;
     }}
@@ -7673,8 +7698,10 @@ def studio_html() -> str:
       if (primaryItem?.docx_url) {{
         events.push({{ type: effectiveStatus === "completed" ? "done" : "note", text: "导出文件已经准备好。" }});
       }}
-      if (primaryItem?.saved_to_library_at || primaryItem?.entry_id) {{
-        events.push({{ type: "done", text: "脚本已同步进入脚本库。" }});
+      if (primaryItem?.saved_to_library_at || primaryItem?.in_library) {{
+        events.push({{ type: "done", text: "脚本已确认进入脚本库。" }});
+      }} else if (effectiveStatus === "completed" && primaryItem?.result_json) {{
+        events.push({{ type: "note", text: "脚本尚未入库，请确认版本可用后点击“确认入库”。" }});
       }}
       const stageMessage = String(primaryItem?.stage_message || data?.stage_message || data?.message || "").trim();
       if (stageMessage) {{
@@ -7874,6 +7901,79 @@ def studio_html() -> str:
       return text || fallback;
     }}
 
+    function parseTimelineSeconds(value) {{
+      const raw = String(value || "").trim();
+      if (!raw) return null;
+      const match = raw.match(/(\\d{{1,2}}(?::\\d{{1,2}}){{0,2}}(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)\\s*(?:-|–|—|~|至|到)?\\s*(\\d{{1,2}}(?::\\d{{1,2}}){{0,2}}(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)?/);
+      if (!match) return null;
+      const toSeconds = (part) => {{
+        const text = String(part || "").trim().replace(/[秒sS]$/g, "");
+        if (!text) return null;
+        if (text.includes(":")) {{
+          const nums = text.split(":").map((piece) => Number(piece));
+          if (nums.some((num) => Number.isNaN(num))) return null;
+          return nums.reduce((acc, num) => acc * 60 + num, 0);
+        }}
+        const num = Number(text);
+        return Number.isNaN(num) ? null : num;
+      }};
+      const start = toSeconds(match[1]);
+      const end = toSeconds(match[2]);
+      if (start === null) return null;
+      return {{
+        start,
+        end: end !== null && end >= start ? end : start + 1,
+      }};
+    }}
+
+    function formatClock(seconds) {{
+      const safe = Math.max(0, Number(seconds) || 0);
+      const total = Math.floor(safe);
+      const mins = Math.floor(total / 60);
+      const secs = total % 60;
+      return `${{String(mins).padStart(2, "0")}}:${{String(secs).padStart(2, "0")}}`;
+    }}
+
+    function buildVideoReviewMarkup(item) {{
+      if (item.status !== "completed") return "";
+      const sourceUrl = item.artifacts?.["source.mp4"] || `/results/${{item.id}}/source.mp4`;
+      return `
+        <div class="video-review-strip" data-video-review="${{item.id}}">
+          <video controls preload="metadata" src="${{escapeHtml(sourceUrl)}}" data-review-video="${{item.id}}"></video>
+          <div class="video-review-meta">
+            <div class="video-review-title">视频复核</div>
+            <div class="video-review-copy">点击脚本行旁边的“跳到”，播放器会定位到对应时间；播放时当前脚本行会自动高亮。</div>
+            <div class="video-review-now" data-video-now="${{item.id}}">当前 00:00</div>
+          </div>
+        </div>
+      `;
+    }}
+
+    function buildLibraryConfirmMarkup(item) {{
+      if (item.status !== "completed" || !item.result_json) return "";
+      const alreadySaved = Boolean(item.saved_to_library_at || item.in_library);
+      if (alreadySaved) {{
+        return `
+          <div class="library-confirm-card done" data-library-confirm-card="${{item.id}}">
+            <div class="library-confirm-copy">
+              <div class="library-confirm-title">已入库</div>
+              <div class="library-confirm-note">这条脚本已经进入脚本库，后续可以在脚本库中预览、导出或删除。</div>
+            </div>
+            <a class="action-link" href="/library">打开脚本库</a>
+          </div>
+        `;
+      }}
+      return `
+        <div class="library-confirm-card" data-library-confirm-card="${{item.id}}">
+          <div class="library-confirm-copy">
+            <div class="library-confirm-title">确认入库</div>
+            <div class="library-confirm-note">脚本生成后不会自动进入脚本库。确认这个版本可用后，再点击按钮手动入库。</div>
+          </div>
+          <button class="action-link primary" type="button" data-confirm-library="${{item.id}}">确认入库</button>
+        </div>
+      `;
+    }}
+
     function buildEditorMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const script = item.result_json || {{}};
@@ -7949,7 +8049,7 @@ def studio_html() -> str:
             ${{rowBlocks}}
             <div class="link-row">
               <button class="action-link" type="button" data-save-edits="${{item.id}}">保存修改</button>
-              <button class="action-link primary" type="button" data-save-library="${{item.id}}">保存到脚本库</button>
+              <button class="action-link primary" type="button" data-save-library="${{item.id}}">保存修改并确认入库</button>
             </div>
           </div>
         </details>
@@ -8094,6 +8194,32 @@ def studio_html() -> str:
       }}
     }}
 
+    async function confirmLibraryEntry(itemId, button) {{
+      if (!itemId || !button) return;
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "入库中...";
+      try {{
+        const response = await fetch(`/api/items/${{itemId}}/confirm-library`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{}}),
+        }});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Confirm library failed");
+        showToast("已入库", "这条脚本已进入脚本库。");
+        if (activeJobId) {{
+          pollJob(activeJobId);
+        }} else {{
+          window.location.reload();
+        }}
+      }} catch (error) {{
+        alert(String(error.message || error));
+        button.disabled = false;
+        button.textContent = original;
+      }}
+    }}
+
     async function downloadScript(url, button) {{
       if (!url) return;
       const original = button ? button.textContent : "";
@@ -8186,6 +8312,8 @@ def studio_html() -> str:
       const title = escapeHtml(item.title || `视频 ${{idx + 1}}`);
       const editor = buildEditorMarkup(item);
       const review = buildReviewMarkup(item);
+      const videoReview = buildVideoReviewMarkup(item);
+      const libraryConfirm = buildLibraryConfirmMarkup(item);
       const toggleButton = item.display_language === "pt"
         ? `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="zh">切回中文</button>`
         : `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="pt">转换成葡语</button>`;
@@ -8206,6 +8334,8 @@ def studio_html() -> str:
           </summary>
           <div class="item-body">
             <div class="item-sections">
+              ${{libraryConfirm}}
+              ${{videoReview}}
               ${{review}}
               ${{editor}}
               <div class="item-actions-shell"><div class="link-row">${{links}}</div></div>
@@ -8966,6 +9096,11 @@ def studio_html() -> str:
       const libraryBtn = event.target.closest("[data-save-library]");
       if (libraryBtn) {{
         persistItemEdits(libraryBtn.getAttribute("data-save-library"), "library", libraryBtn);
+        return;
+      }}
+      const confirmLibraryBtn = event.target.closest("[data-confirm-library]");
+      if (confirmLibraryBtn) {{
+        confirmLibraryEntry(confirmLibraryBtn.getAttribute("data-confirm-library"), confirmLibraryBtn);
         return;
       }}
       const toggleLanguageBtn = event.target.closest("[data-toggle-language]");
@@ -9908,7 +10043,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 headers=[("Set-Cookie", f"{ERROR_CASE_AUTH_COOKIE}=1; Path=/; Max-Age=604800; SameSite=Lax")],
             )
             return
-        item_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/(save|save-to-library|display-language)", parsed.path)
+        item_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/(save|save-to-library|confirm-library|display-language)", parsed.path)
         if item_match:
             item_id, action = item_match.groups()
             context = find_item_context(item_id)
@@ -9931,6 +10066,20 @@ class AppHandler(BaseHTTPRequestHandler):
             parent_job_id, item_index, item = context
             if not item.get("result_json"):
                 self.send_json({"error": "No script is available for editing yet."}, status=400)
+                return
+            if action == "confirm-library":
+                if str(item.get("status") or "").strip() != "completed":
+                    self.send_json({"error": "Only completed scripts can be added to the library."}, status=400)
+                    return
+                try:
+                    if persist_library_entry(parent_job_id, item, use_llm=False):
+                        update_job_item(parent_job_id, item_index, saved_to_library_at=now_iso())
+                    with job_lock:
+                        updated_item = public_item_view(jobs[parent_job_id]["items"][item_index])
+                except Exception as exc:
+                    self.send_json({"error": friendly_error(str(exc))}, status=500)
+                    return
+                self.send_json({"ok": True, "item": updated_item, "saved_to_library": True})
                 return
             try:
                 target_language = str(payload.get("target_language") or item.get("display_language") or "zh").strip().lower()
