@@ -101,26 +101,6 @@ def time_text(seg: dict) -> str:
     return ""
 
 
-def render_humor_mechanism(data: dict) -> str:
-    humor = data.get("humor_mechanism") or {}
-    if not humor:
-        return ""
-    items = [
-        ("铺垫", humor.get("setup")),
-        ("违和点", humor.get("incongruity")),
-        ("反转点", humor.get("reversal")),
-        ("笑点落点", humor.get("punchline")),
-        ("背后原因", humor.get("underlying_reason")),
-    ]
-    lis = []
-    for title, text in items:
-        if text:
-            lis.append(f"<li><b>{esc(title)}：</b>{esc(text)}</li>")
-    if not lis:
-        return ""
-    return f'<div class="card"><h2>包袱机制</h2><ul>{"".join(lis)}</ul></div>'
-
-
 def render_verification(story: dict) -> str:
     hyps = story.get("mechanism_hypotheses") or []
     wins = story.get("verification_windows") or []
@@ -250,7 +230,6 @@ def main() -> int:
  <div class="card"><h1>视频总结归纳 + 脚本表</h1><div class="meta">Route: {esc(route)}{meta_extra} · Analysis status: {esc(score)}<br>视频链接：<a href="{esc(source)}">{esc(source)}</a></div></div>
  <div class="card"><h2>视频整体内容总结</h2><div class="summary">{esc(summary)}</div></div>
  <div class="card"><h2>脚本表</h2><table class="script-table"><thead><tr><th>时间</th><th>画面内容</th><th>动作</th><th>关键对白/旁白</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
- {render_humor_mechanism(data)}
  <div class="card"><h2>核心爆点</h2>{list_cards(story.get('core_points') or [], core_fallback)}</div>
  <div class="card"><h2>可替换部分</h2>{list_cards(story.get('replaceable_parts') or [], replace_fallback)}</div>
  {render_verification(story)}

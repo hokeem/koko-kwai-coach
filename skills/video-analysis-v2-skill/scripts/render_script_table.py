@@ -21,7 +21,6 @@ LOCALE_COPY = {
         "core_points_title": "核心爆点",
         "replaceable_title": "可替换部分",
         "table_title": "脚本表",
-        "mechanism_title": "包袱机制",
         "time_col": "时间",
         "visual_col": "画面内容",
         "action_col": "动作",
@@ -37,7 +36,6 @@ LOCALE_COPY = {
         "core_points_title": "Pontos centrais",
         "replaceable_title": "Partes substituíveis",
         "table_title": "Tabela do roteiro",
-        "mechanism_title": "Mecanismo da piada",
         "time_col": "Tempo",
         "visual_col": "Conteúdo visual",
         "action_col": "Ação",
@@ -66,19 +64,6 @@ def render_rows(data: dict) -> str:
             "</tr>"
         )
     return "\n".join(rows)
-
-
-def render_mechanism(data: dict, locale: str) -> str:
-    mechanism = data.get("mechanism")
-    if not mechanism:
-        return ""
-    items = []
-    for item in mechanism.get("items", []):
-        items.append(f"<li><b>{esc(item.get('label', ''))}：</b>{esc(item.get('text', ''))}</li>")
-    if not items:
-        return ""
-    title = mechanism.get("title", LOCALE_COPY.get(locale, LOCALE_COPY["zh"])["mechanism_title"])
-    return f'<div class="card"><h2>{esc(title)}</h2><ul>{"".join(items)}</ul></div>'
 
 
 def normalize_items(value: object) -> list[dict]:
@@ -143,7 +128,6 @@ def render(data: dict, base_dir: Path, locale: str = "zh") -> str:
         .replace("{{ core_viral_points_card }}", render_insight_card(copy["core_points_title"], data.get("core_viral_points"), locale))
         .replace("{{ replaceable_parts_card }}", render_insight_card(copy["replaceable_title"], data.get("replaceable_parts"), locale))
         .replace("{{ table_card }}", table_card)
-        .replace("{{ mechanism_card }}", render_mechanism(data, locale))
     )
 
 

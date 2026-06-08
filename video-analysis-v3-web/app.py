@@ -38,8 +38,7 @@ REVIEW_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_REVIEW_STALE_SEC", "9
 PROCESSLESS_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_PROCESSLESS_STALE_SEC", "180"))
 RESTORE_PENDING_MAX_AGE_SEC = int(os.environ.get("VIDEO_ANALYSIS_RESTORE_PENDING_MAX_AGE_SEC", "1800"))
 WATCHDOG_INTERVAL_SEC = int(os.environ.get("VIDEO_ANALYSIS_WATCHDOG_INTERVAL_SEC", "15"))
-SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTION_DAYS", "3"))
-SOURCE_VIDEO_EXTENDED_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_EXTENDED_RETENTION_DAYS", "30"))
+SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTION_DAYS", "2"))
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "14"))
 MAX_CONCURRENT_FILTERS = max(1, int(os.environ.get("VIDEO_FILTER_MAX_CONCURRENT_JOBS", "1")))
 FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "1")).strip().lower() in {"1", "true", "yes", "on"}
@@ -47,7 +46,6 @@ FILTER_DURATION_MIN_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MIN_SEC", "3
 FILTER_DURATION_MAX_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MAX_SEC", "120"))
 FILTER_AUDIO_MAX_MB = int(os.environ.get("VIDEO_FILTER_AUDIO_MAX_MB", "18"))
 MAX_CONCURRENT_TRANSLATIONS = max(1, int(os.environ.get("VIDEO_TRANSLATION_MAX_CONCURRENT_JOBS", "1")))
-DELETE_SOURCE_VIDEO_AFTER_ANALYSIS = str(os.environ.get("VIDEO_ANALYSIS_DELETE_SOURCE_AFTER_SUCCESS", "1")).strip().lower() in {"1", "true", "yes", "on"}
 SYNC_LIBRARY_ON_STARTUP = str(os.environ.get("VIDEO_ANALYSIS_SYNC_LIBRARY_ON_STARTUP", "0")).strip().lower() in {"1", "true", "yes", "on"}
 GEMINI_TRANSIENT_RETRY_ATTEMPTS = max(1, int(os.environ.get("VIDEO_ANALYSIS_TRANSIENT_RETRY_ATTEMPTS", "3")))
 GEMINI_TRANSIENT_RETRY_DELAYS = [
@@ -349,6 +347,8 @@ def collect_cleanup_metadata() -> dict[str, dict[str, Any]]:
                     "status": str(item.get("status") or "").strip(),
                     "reviewed": bool(item.get("reviewed")) or str(item.get("review_status") or "").strip() == "completed",
                     "edited": bool(item.get("edited")),
+                    "in_library": bool(item.get("saved_to_library_at")) or library_entry_exists(item_id),
+                    "saved_to_library_at": best_timestamp_from_values(item.get("saved_to_library_at")),
                     "updated_at": best_timestamp_from_values(
                         item.get("completed_at"),
                         item.get("updated_at"),
@@ -360,6 +360,8 @@ def collect_cleanup_metadata() -> dict[str, dict[str, Any]]:
                 "status": str(job.get("status") or "").strip(),
                 "reviewed": bool(job.get("reviewed")) or str(job.get("review_status") or "").strip() == "completed",
                 "edited": bool(job.get("edited")),
+                "in_library": bool(job.get("saved_to_library_at")) or library_entry_exists(job_id),
+                "saved_to_library_at": best_timestamp_from_values(job.get("saved_to_library_at")),
                 "updated_at": best_timestamp_from_values(
                     job.get("completed_at"),
                     job.get("updated_at"),
@@ -367,6 +369,37 @@ def collect_cleanup_metadata() -> dict[str, dict[str, Any]]:
                 ),
             }
     return metadata
+
+
+def source_video_cleanup_reason(info: dict[str, Any], output_dir: Path, now_dt: datetime) -> str:
+    saved_at = info.get("saved_to_library_at")
+    if isinstance(saved_at, datetime) or bool(info.get("in_library")):
+        return "saved_to_library"
+    updated_at = info.get("updated_at")
+    if not isinstance(updated_at, datetime):
+        try:
+            updated_at = datetime.fromtimestamp(output_dir.stat().st_mtime, timezone.utc)
+        except Exception:
+            updated_at = now_dt
+    age_days = max(0.0, (now_dt - updated_at).total_seconds() / 86400.0)
+    if age_days > SOURCE_VIDEO_RETENTION_DAYS:
+        return "unsaved_retention_expired"
+    return ""
+
+
+def delete_source_video_if_allowed(item_id: str, *, reason: str = "saved_to_library") -> bool:
+    source_path = RESULTS_ROOT / item_id / SOURCE_VIDEO_NAME
+    if not source_path.exists():
+        return False
+    try:
+        source_path.unlink()
+        log_runtime_info("source_video_deleted", "Removed source video after it was no longer needed.", path=str(source_path), reason=reason)
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception as exc:
+        log_runtime_warning("source_video_delete_failed", "Could not remove source video.", path=str(source_path), reason=reason, error=str(exc))
+        return False
 
 
 def cleanup_old_results(*, now_dt: datetime | None = None) -> dict[str, int]:
@@ -391,12 +424,10 @@ def cleanup_old_results(*, now_dt: datetime | None = None) -> dict[str, int]:
                 updated_at = datetime.fromtimestamp(output_dir.stat().st_mtime, timezone.utc)
             except Exception:
                 updated_at = now_dt
-        age_days = max(0.0, (now_dt - updated_at).total_seconds() / 86400.0)
-        reviewed_or_edited = bool(info.get("reviewed")) or bool(info.get("edited"))
-        source_retention_days = SOURCE_VIDEO_EXTENDED_RETENTION_DAYS if reviewed_or_edited else SOURCE_VIDEO_RETENTION_DAYS
 
         source_path = output_dir / SOURCE_VIDEO_NAME
-        if source_path.exists() and age_days > source_retention_days:
+        source_cleanup_reason = source_video_cleanup_reason(info, output_dir, now_dt)
+        if source_path.exists() and source_cleanup_reason:
             try:
                 source_path.unlink()
                 cleaned_source += 1
@@ -407,9 +438,11 @@ def cleanup_old_results(*, now_dt: datetime | None = None) -> dict[str, int]:
                     "cleanup_source_failed",
                     "Could not remove expired source video.",
                     path=str(source_path),
+                    reason=source_cleanup_reason,
                     error=str(exc),
                 )
 
+        age_days = max(0.0, (now_dt - updated_at).total_seconds() / 86400.0)
         if age_days > RAW_ARTIFACT_RETENTION_DAYS:
             for name in RAW_ARTIFACT_NAMES:
                 raw_path = output_dir / name
@@ -450,12 +483,19 @@ def emergency_cleanup_result_artifacts() -> dict[str, int]:
             skipped_running += 1
             continue
         source_path = output_dir / SOURCE_VIDEO_NAME
-        if source_path.exists():
+        source_cleanup_reason = source_video_cleanup_reason(info, output_dir, datetime.now(timezone.utc))
+        if source_path.exists() and source_cleanup_reason:
             try:
                 source_path.unlink()
                 cleaned_source += 1
             except Exception as exc:
-                log_runtime_warning("emergency_cleanup_source_failed", "Could not remove source video during emergency cleanup.", path=str(source_path), error=str(exc))
+                log_runtime_warning(
+                    "emergency_cleanup_source_failed",
+                    "Could not remove source video during emergency cleanup.",
+                    path=str(source_path),
+                    reason=source_cleanup_reason,
+                    error=str(exc),
+                )
         for name in RAW_ARTIFACT_NAMES:
             raw_path = output_dir / name
             if not raw_path.exists():
@@ -4112,7 +4152,7 @@ def stats_html() -> str:
             f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 7 天</span><strong>{summary['last_7d']}</strong><small>生成脚本数</small></article>",
             f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 30 天</span><strong>{summary['last_30d']}</strong><small>生成脚本数</small></article>",
             f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 30 天</span><strong>{summary['review_count_30d']}</strong><small>复盘重做次数</small></article>",
-            f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 30 天</span><strong>{summary['edited_count_30d']}</strong><small>直接修改次数</small></article>",
+            f"<article class='stats-summary-card'><span class='stats-summary-label'>最近 30 天</span><strong>{summary['edited_count_30d']}</strong><small>整稿编辑次数</small></article>",
             f"<article class='stats-summary-card'><span class='stats-summary-label'>累计</span><strong>{summary['all_time']}</strong><small>历史生成脚本数</small></article>",
         ]
     )
@@ -4121,7 +4161,7 @@ def stats_html() -> str:
         item_rows = []
         for idx, item in enumerate(day.get("items") or [], start=1):
             review_badge = "<span class='stats-badge yes'>已复盘</span>" if item.get("reviewed") else "<span class='stats-badge'>未复盘</span>"
-            edit_badge = "<span class='stats-badge yes'>已直接修改</span>" if item.get("edited") else "<span class='stats-badge'>未直接修改</span>"
+            edit_badge = "<span class='stats-badge yes'>已整稿编辑</span>" if item.get("edited") else "<span class='stats-badge'>未整稿编辑</span>"
             item_rows.append(
                 "<article class='stats-item-row'>"
                 f"<div class='stats-item-index'>#{idx}</div>"
@@ -4277,7 +4317,7 @@ def stats_html() -> str:
         <div>
           <button class="action-link" id="back-home" type="button">← 返回 Koko</button>
           <h1>Stats</h1>
-          <p>这里会按北京时间聚合已有历史任务数据，统计每天生成了多少脚本、分别是哪些链接，以及它们是否触发过复盘重做和直接修改。</p>
+          <p>这里会按北京时间聚合已有历史任务数据，统计每天生成了多少脚本、分别是哪些链接，以及它们是否触发过复盘重做和整稿编辑。</p>
         </div>
       </div>
       <div class="stats-grid">{summary_cards}</div>
@@ -5478,7 +5518,10 @@ def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: 
         "source": "edited" if item.get("edited") else "ai",
         "saved_at": item.get("saved_to_library_at") or now_iso(),
     }
-    return append_library_entry(entry)
+    saved = append_library_entry(entry)
+    if saved:
+        delete_source_video_if_allowed(item["id"], reason="saved_to_library")
+    return saved
 
 
 def persist_completed_job_items_async(job_id: str, *, use_llm: bool = True) -> None:
@@ -5561,6 +5604,16 @@ def apply_script_edits(script: dict[str, Any], payload: dict[str, Any]) -> dict[
                 "text": fill_text(point.get("text"), "无"),
             }
             for point in incoming_points
+            if isinstance(point, dict)
+        ]
+    incoming_replaceable = payload.get("replaceable_parts")
+    if isinstance(incoming_replaceable, list):
+        edited["replaceable_parts"] = [
+            {
+                "label": fill_text(point.get("label"), "可替换项"),
+                "text": fill_text(point.get("text"), "无"),
+            }
+            for point in incoming_replaceable
             if isinstance(point, dict)
         ]
     rows = choose_script_rows(edited)
@@ -6072,13 +6125,6 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                     script_json = read_json(output_dir / "script_table.json") or read_json(output_dir / "analysis_result.json") or result_json or {}
                     docx_path = write_script_docx(output_dir, script_json, item["video_url"])
                     docx_url = f"/results/{item['id']}/{docx_path.name}" if docx_path and docx_path.exists() else ""
-                    if DELETE_SOURCE_VIDEO_AFTER_ANALYSIS:
-                        source_path = output_dir / SOURCE_VIDEO_NAME
-                        if source_path.exists():
-                            try:
-                                source_path.unlink()
-                            except Exception as exc:
-                                log_runtime_warning("source_video_delete_failed", "Could not remove source video after successful analysis.", path=str(source_path), error=str(exc))
                     # Final pipeline completion must not block on an extra LLM
                     # classification round, otherwise the UI can sit at 90%
                     # long after the script files are already written.
@@ -7813,6 +7859,12 @@ def studio_html() -> str:
       min-height: 96px;
       resize: vertical;
     }}
+    .editor-draft-textarea {{
+      min-height: 620px;
+      font-family: "SFMono-Regular", Menlo, "Noto Sans SC", monospace;
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }}
     .editor-row-card {{
       border: 1px solid rgba(255,130,0,.12);
       border-radius: 14px;
@@ -8441,7 +8493,7 @@ def studio_html() -> str:
           <div class="studio-card-head">
             <div>
               <h2>视频拆解任务中心</h2>
-              <p>保留现有的视频分析、批量任务、队列、脚本预览、导出、复盘和直接修改能力。这里承接你现在全部的视频拆解逻辑。</p>
+              <p>保留现有的视频分析、批量任务、队列、脚本预览、导出、复盘和整稿编辑能力。这里承接你现在全部的视频拆解逻辑。</p>
             </div>
           </div>
           <div class="composer-block">
@@ -8500,7 +8552,7 @@ def studio_html() -> str:
           <div class="studio-card-head">
             <div>
               <h2>数据看板</h2>
-              <p>这里直接承接现有 Stats 页面，用于查看脚本生成、复盘和直接修改等行为数据。</p>
+              <p>这里直接承接现有 Stats 页面，用于查看脚本生成、复盘和整稿编辑等行为数据。</p>
             </div>
           </div>
           <iframe class="studio-iframe" src="/stats" title="Koko 数据看板"></iframe>
@@ -9162,6 +9214,108 @@ def studio_html() -> str:
       return text || fallback;
     }}
 
+    function normalizeInsightItems(value) {{
+      if (Array.isArray(value) && value.length) return value;
+      return [{{ label: "要点", text: "无" }}];
+    }}
+
+    function formatInsightDraft(items) {{
+      return normalizeInsightItems(items).map((item, idx) => {{
+        const label = normalizedText(item.label || item.title || item.name, `要点${{idx + 1}}`);
+        const text = normalizedText(item.text || item.description || item.value);
+        return `${{idx + 1}}. ${{label}}：${{text}}`;
+      }}).join("\\n");
+    }}
+
+    function formatScriptDraft(item, script) {{
+      const rows = normalizeRows(script);
+      const mechanismReason = (((script.mechanism || {{}}).reason) || "");
+      const rowText = rows.map((row) => {{
+        return [
+          `时间：${{normalizedText(row.time, "")}}`,
+          `画面内容：${{normalizedText(row.visual_content, "")}}`,
+          `动作：${{normalizedText(row.action, "")}}`,
+          "关键对白/旁白：",
+          normalizedText(row.dialogue_or_audio, ""),
+        ].join("\\n");
+      }}).join("\\n---\\n");
+      return [
+        "标题：",
+        normalizedText(script.title || item.title || "", "视频脚本"),
+        "",
+        "整体梗概：",
+        normalizedText(script.whole_video_summary),
+        "",
+        "机制说明：",
+        normalizedText(mechanismReason),
+        "",
+        "核心爆点：",
+        formatInsightDraft(script.core_viral_points),
+        "",
+        "可替换部分：",
+        formatInsightDraft(script.replaceable_parts),
+        "",
+        "脚本表：",
+        rowText,
+      ].join("\\n");
+    }}
+
+    function splitDraftSections(text) {{
+      const sections = {{}};
+      const order = [];
+      let current = "";
+      String(text || "").split(/\\r?\\n/).forEach((line) => {{
+        const match = line.match(/^\\s*(标题|整体梗概|机制说明|核心爆点|可替换部分|脚本表)\\s*[:：]\\s*$/);
+        if (match) {{
+          current = match[1];
+          if (!sections[current]) {{
+            sections[current] = [];
+            order.push(current);
+          }}
+          return;
+        }}
+        if (current) sections[current].push(line);
+      }});
+      return sections;
+    }}
+
+    function parseInsightDraft(text) {{
+      const lines = String(text || "").split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean);
+      return lines.map((line) => {{
+        const cleaned = line.replace(/^\\d+[.、)]\\s*/, "");
+        const parts = cleaned.split(/[:：]/);
+        if (parts.length >= 2) {{
+          return {{
+            label: normalizedText(parts.shift(), "要点"),
+            text: normalizedText(parts.join("："), "无"),
+          }};
+        }}
+        return {{ label: "要点", text: normalizedText(cleaned, "无") }};
+      }});
+    }}
+
+    function parseScriptRowsDraft(text, originalRows) {{
+      const blocks = String(text || "").split(/\\n\\s*---\\s*\\n/g).map((block) => block.trim()).filter(Boolean);
+      return blocks.map((block, idx) => {{
+        const original = originalRows[idx] || {{}};
+        const readField = (label, nextLabels) => {{
+          const escaped = label.replace(/[.*+?^${{}}()|[\\]\\\\]/g, "\\\\$&");
+          const lookahead = nextLabels.map((item) => item.replace(/[.*+?^${{}}()|[\\]\\\\]/g, "\\\\$&")).join("|");
+          const pattern = new RegExp(`${{escaped}}\\\\s*[:：]\\\\s*([\\\\s\\\\S]*?)(?=\\\\n(?:${{lookahead}})\\\\s*[:：]|$)`);
+          const match = block.match(pattern);
+          return match ? match[1].trim() : "";
+        }};
+        return {{
+          original_index: idx,
+          time: readField("时间", ["画面内容", "动作", "关键对白/旁白"]) || original.time || "",
+          visual_content: readField("画面内容", ["动作", "关键对白/旁白"]) || original.visual_content || "",
+          action: readField("动作", ["关键对白/旁白"]) || original.action || "",
+          dialogue_or_audio: readField("关键对白/旁白", []) || original.dialogue_or_audio || "",
+          integrated_summary: original.integrated_summary || "",
+        }};
+      }});
+    }}
+
     function buildLibraryConfirmMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const alreadySaved = Boolean(item.saved_to_library_at || item.in_library);
@@ -9190,76 +9344,15 @@ def studio_html() -> str:
     function buildEditorMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const script = item.result_json || {{}};
-      const rows = normalizeRows(script);
-      const mechanismReason = (((script.mechanism || {{}}).reason) || "");
-      const corePoints = Array.isArray(script.core_viral_points) && script.core_viral_points.length
-        ? script.core_viral_points
-        : [{{ label: "要点", text: "无" }}];
-      const corePointBlocks = corePoints.map((point, idx) => `
-        <div class="editor-row-card" data-core-point-index="${{idx}}">
-          <div class="editor-row-title">核心爆点 ${{idx + 1}}</div>
-          <div class="editor-grid">
-            <div class="editor-field">
-              <div class="editor-label">标签</div>
-              <input class="editor-input" data-core-point-field="label" value="${{escapeHtml(normalizedText(point.label, "要点"))}}">
-            </div>
-            <div class="editor-field">
-              <div class="editor-label">内容</div>
-              <textarea class="editor-textarea" data-core-point-field="text">${{escapeHtml(normalizedText(point.text))}}</textarea>
-            </div>
-          </div>
-        </div>
-      `).join("");
-      const rowBlocks = rows.map((row, idx) => `
-        <div class="editor-row-card" data-row-index="${{idx}}" data-row-original-index="${{idx}}">
-          <div class="editor-row-head">
-            <div class="editor-row-title">脚本行 ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
-            <button class="action-link action-link-danger editor-row-remove" type="button" data-delete-row>删除这一段</button>
-          </div>
-          <div class="editor-grid">
-            <div class="editor-field">
-              <div class="editor-label">时间</div>
-              <input class="editor-input" data-row-field="time" value="${{escapeHtml(normalizedText(row.time))}}">
-            </div>
-            <div class="editor-field">
-              <div class="editor-label">画面</div>
-              <textarea class="editor-textarea" data-row-field="visual_content">${{escapeHtml(normalizedText(row.visual_content))}}</textarea>
-            </div>
-            <div class="editor-field">
-              <div class="editor-label">动作</div>
-              <textarea class="editor-textarea" data-row-field="action">${{escapeHtml(normalizedText(row.action))}}</textarea>
-            </div>
-            <div class="editor-field">
-              <div class="editor-label">对白 / 音频</div>
-              <textarea class="editor-textarea" data-row-field="dialogue_or_audio">${{escapeHtml(normalizedText(row.dialogue_or_audio))}}</textarea>
-            </div>
-            <div class="editor-field">
-              <div class="editor-label">整合总结</div>
-              <textarea class="editor-textarea" data-row-field="integrated_summary">${{escapeHtml(normalizedText(row.integrated_summary))}}</textarea>
-            </div>
-          </div>
-        </div>
-      `).join("");
+      const draft = formatScriptDraft(item, script);
+      const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
       return `
         <details class="editor-disclosure">
           <summary class="editor-summary">
-            <span class="editor-summary-title">直接修改</span>
+            <span class="editor-summary-title">整稿编辑</span>
           </summary>
-          <div class="editor-shell" data-editor-item="${{item.id}}" data-editor-lang="${{escapeHtml(item.display_language || "zh")}}">
-            <div class="editor-field">
-              <div class="editor-label">标题</div>
-              <input class="editor-input" data-edit-field="title" value="${{escapeHtml(normalizedText(script.title || item.title || "", "视频脚本"))}}">
-            </div>
-            <div class="editor-field">
-              <div class="editor-label">整体梗概</div>
-              <textarea class="editor-textarea" data-edit-field="whole_video_summary">${{escapeHtml(normalizedText(script.whole_video_summary))}}</textarea>
-            </div>
-            <div class="editor-field">
-              <div class="editor-label">机制说明</div>
-              <textarea class="editor-textarea" data-edit-field="mechanism_reason">${{escapeHtml(normalizedText(mechanismReason))}}</textarea>
-            </div>
-            ${{corePointBlocks}}
-            ${{rowBlocks}}
+          <div class="editor-shell" data-editor-item="${{item.id}}" data-editor-lang="${{escapeHtml(item.display_language || "zh")}}" data-editor-rows="${{rowsJson}}">
+            <textarea class="editor-textarea editor-draft-textarea" data-editor-draft spellcheck="false">${{escapeHtml(draft)}}</textarea>
             <div class="link-row">
               <button class="action-link" type="button" data-save-edits="${{item.id}}">保存修改</button>
               <button class="action-link primary" type="button" data-save-library="${{item.id}}">保存修改并确认入库</button>
@@ -9274,8 +9367,9 @@ def studio_html() -> str:
       const status = normalizedText(item.review_status || "", "");
       const stage = normalizedText(item.review_stage || "", "");
       const message = normalizedText(item.review_message || "", "");
-      const feedback = normalizedText(item.review_feedback || "", "");
-      const reviewMode = normalizedText(item.review_mode || "partial", "partial");
+      const feedback = status === "running" || status === "failed" ? normalizedText(item.review_feedback || "", "") : "";
+      const previousReviewMode = normalizedText(item.review_mode || "partial", "partial");
+      const reviewMode = status === "running" ? previousReviewMode : "partial";
       const editedBadge = item.edited ? `<span class="batch-chip">Manual edits exist</span>` : "";
       const reviewedBadge = item.reviewed ? `<span class="batch-chip">Reviewed version active</span>` : "";
       const reviewState = status ? `<div class="review-note">${{escapeHtml(status)}}${{message ? ` · ${{escapeHtml(message)}}` : ""}}</div>` : "";
@@ -9289,11 +9383,11 @@ def studio_html() -> str:
             <div class="review-note">直接用自然语言告诉 Koko 这条脚本哪里理解错了。系统会拿你的反馈和原始分析结果做对照，必要时只复核关键片段，然后重新生成脚本。</div>
             <div class="review-mode-toggle" role="radiogroup" aria-label="复盘模式">
               <label class="review-mode-option">
-                <input type="radio" name="review-mode-${{item.id}}" value="partial" ${{reviewMode !== "full" ? "checked" : ""}}>
+                <input type="radio" name="review-mode-${{item.id}}" value="partial" ${{reviewMode !== "full" ? "checked" : ""}} ${{status === "running" ? "disabled" : ""}}>
                 <span>部分错误</span>
               </label>
               <label class="review-mode-option">
-                <input type="radio" name="review-mode-${{item.id}}" value="full" ${{reviewMode === "full" ? "checked" : ""}}>
+                <input type="radio" name="review-mode-${{item.id}}" value="full" ${{reviewMode === "full" ? "checked" : ""}} ${{status === "running" ? "disabled" : ""}}>
                 <span>完全错误</span>
               </label>
             </div>
@@ -9346,28 +9440,22 @@ def studio_html() -> str:
     function collectItemEdits(itemId) {{
       const root = document.querySelector(`[data-editor-item="${{itemId}}"]`);
       if (!root) return null;
-      const core_viral_points = Array.from(root.querySelectorAll("[data-core-point-index]")).map((pointCard) => {{
-        return {{
-          label: pointCard.querySelector('[data-core-point-field="label"]')?.value || "",
-          text: pointCard.querySelector('[data-core-point-field="text"]')?.value || "",
-        }};
-      }});
-      const rows = Array.from(root.querySelectorAll("[data-row-index]")).map((rowCard) => {{
-        return {{
-          original_index: Number(rowCard.getAttribute("data-row-original-index") || "0"),
-          time: rowCard.querySelector('[data-row-field="time"]')?.value || "",
-          visual_content: rowCard.querySelector('[data-row-field="visual_content"]')?.value || "",
-          action: rowCard.querySelector('[data-row-field="action"]')?.value || "",
-          dialogue_or_audio: rowCard.querySelector('[data-row-field="dialogue_or_audio"]')?.value || "",
-          integrated_summary: rowCard.querySelector('[data-row-field="integrated_summary"]')?.value || "",
-        }};
-      }});
+      const draft = root.querySelector("[data-editor-draft]")?.value || "";
+      const sections = splitDraftSections(draft);
+      let originalRows = [];
+      try {{
+        originalRows = JSON.parse(root.getAttribute("data-editor-rows") || "[]");
+      }} catch (_error) {{
+        originalRows = [];
+      }}
+      const textOf = (name) => (sections[name] || []).join("\\n").trim();
       return {{
-        title: root.querySelector('[data-edit-field="title"]')?.value || "",
-        whole_video_summary: root.querySelector('[data-edit-field="whole_video_summary"]')?.value || "",
-        mechanism_reason: root.querySelector('[data-edit-field="mechanism_reason"]')?.value || "",
-        core_viral_points,
-        rows,
+        title: textOf("标题"),
+        whole_video_summary: textOf("整体梗概"),
+        mechanism_reason: textOf("机制说明"),
+        core_viral_points: parseInsightDraft(textOf("核心爆点")),
+        replaceable_parts: parseInsightDraft(textOf("可替换部分")),
+        rows: parseScriptRowsDraft(textOf("脚本表"), originalRows),
         target_language: root.getAttribute("data-editor-lang") || "zh",
       }};
     }}
@@ -9382,19 +9470,6 @@ def studio_html() -> str:
       const root = document.querySelector(`[data-review-item="${{itemId}}"]`);
       if (!root) return "partial";
       return root.querySelector('input[name="review-mode-' + itemId + '"]:checked')?.value || "partial";
-    }}
-
-    function refreshEditorRowLabels(container) {{
-      const root = container?.closest?.("[data-editor-item]") || container;
-      if (!root) return;
-      Array.from(root.querySelectorAll("[data-row-index]")).forEach((rowCard, idx) => {{
-        rowCard.setAttribute("data-row-index", String(idx));
-        const titleNode = rowCard.querySelector(".editor-row-title");
-        const timeValue = rowCard.querySelector('[data-row-field="time"]')?.value || "";
-        if (titleNode) {{
-          titleNode.textContent = `脚本行 ${{idx + 1}}${{timeValue ? ` · ${{timeValue}}` : ""}}`;
-        }}
-      }});
     }}
 
     async function persistItemEdits(itemId, mode, button) {{
@@ -10359,16 +10434,6 @@ def studio_html() -> str:
       const saveBtn = event.target.closest("[data-save-edits]");
       if (saveBtn) {{
         persistItemEdits(saveBtn.getAttribute("data-save-edits"), "save", saveBtn);
-        return;
-      }}
-      const deleteRowBtn = event.target.closest("[data-delete-row]");
-      if (deleteRowBtn) {{
-        const rowCard = deleteRowBtn.closest("[data-row-index]");
-        if (rowCard) {{
-          const editorRoot = rowCard.closest("[data-editor-item]");
-          rowCard.remove();
-          refreshEditorRowLabels(editorRoot);
-        }}
         return;
       }}
       const reviewBtn = event.target.closest("[data-run-review]");
