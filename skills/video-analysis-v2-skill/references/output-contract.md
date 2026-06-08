@@ -91,7 +91,7 @@ The final HTML must contain these cards in order:
    - Short items that describe reusable variables for adaptation
 5. Script table card
    - H2: `脚本表`
-   - Table with exactly five user-facing columns
+   - Table with exactly four user-facing script columns
 6. Optional mechanism card
    - H2: `包袱机制` or another precise mechanism title
    - Short bullet list with bold labels
@@ -148,18 +148,17 @@ Good examples:
 
 ## Script Table Columns
 
-Use exactly these five columns in the final user-facing table:
+Use exactly these four columns in the final user-facing script table:
 
-| 视频链接 | 时间 | 画面内容 | 动作 | 关键对白/旁白（中文忠实翻译） |
-|---|---|---|---|---|
+| 时间 | 画面内容 | 动作 | 关键对白/旁白 |
+|---|---|---|---|
 
 Column rules:
 
-- `视频链接`: show a clickable `原视频链接` in every row.
-- `时间`: use `MM:SS-MM:SS` or `HH:MM:SS-HH:MM:SS` consistently.
-- `画面内容`: describe what is visually present across the segment. Include embedded start/end frames inside this cell when available.
-- `动作`: describe what changes, progresses, is revealed, or is completed during the segment.
-- `关键对白/旁白（中文忠实翻译）`: provide faithful Chinese translation of spoken content. Do not summarize or add interpretation here.
+- `时间`: use `MM:SS-MM:SS`, `HH:MM:SS-HH:MM:SS`, or a story-beat range such as `00:40-Final`.
+- `画面内容`: keep it short like a filming prep note: location/scene, people present, and necessary props. Avoid camera analysis, action chains, emotion, dialogue, or plot summary.
+- `动作`: describe concrete staging, gestures, facial expressions, emotional shift, and what changes/progresses/is revealed in the beat.
+- `关键对白/旁白`: provide faithful Chinese translation of spoken content. Preserve speaker labels and line breaks. Do not summarize or add interpretation here.
 
 ## Dialogue Rules
 

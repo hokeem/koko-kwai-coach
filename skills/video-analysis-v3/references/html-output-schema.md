@@ -86,16 +86,15 @@ Typical replaceable elements:
 
 Main public table columns must be exactly:
 
-| 视频链接 | 时间 | 画面内容 | 动作 | 关键对白/旁白（中文忠实翻译） |
-|---|---|---|---|---|
+| 时间 | 画面内容 | 动作 | 关键对白/旁白 |
+|---|---|---|---|
 
 Column mapping:
 
-- `视频链接`: source link, usually only first row needs `原视频链接`.
-- `时间`: segment start-end.
-- `画面内容`: objective visible scene plus embedded reference frames when available.
-- `动作`: local integrated action summary; do not paste raw per-second Gemini text.
-- `关键对白/旁白（中文忠实翻译）`: faithful Chinese translation/transcription when audio is available. If not clear, write: `无明确对白/旁白，主要靠画面动作推进。`
+- `时间`: story/action beat range, such as `00:00-00:15` or `00:40-Final`.
+- `画面内容`: short filming prep note only: location/scene, people present, necessary props. Avoid camera analysis, action chains, emotion, dialogue, or plot summary.
+- `动作`: concrete staging, gestures, facial expressions, emotional shift, and how the beat advances the joke/story.
+- `关键对白/旁白`: faithful Chinese translation/transcription when audio is available. Preserve speaker labels and line breaks. If not clear, write: `无明确对白/旁白，主要靠画面动作推进。`
 
 ## Collapsed appendices
 

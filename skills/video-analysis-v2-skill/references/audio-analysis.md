@@ -54,7 +54,7 @@ When multi-speaker analysis is requested, also preserve utterance-level records 
 For the final table:
 
 - Use the original transcript content as the source.
-- Present faithful Chinese translation in `关键对白/旁白（中文忠实翻译）`.
+- Present faithful Chinese translation in `关键对白/旁白`.
 - Do not summarize in the dialogue field.
 - Mark speaker/source when possible.
 - Use neutral speaker labels when uncertain.

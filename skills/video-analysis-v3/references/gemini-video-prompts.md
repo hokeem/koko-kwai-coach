@@ -122,7 +122,7 @@ Rules:
 
 Final HTML must use `html-output-schema.md`:
 
-| 视频链接 | 时间 | 画面内容 | 动作 | 关键对白/旁白（中文忠实翻译） |
-|---|---|---|---|---|
+| 时间 | 画面内容 | 动作 | 关键对白/旁白 |
+|---|---|---|---|
 
 Raw observations and audit details belong in collapsed appendices or JSON, not the main table.

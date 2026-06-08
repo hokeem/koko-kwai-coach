@@ -60,6 +60,8 @@ def list_cards(items: list[dict], fallback: list[tuple[str, str]]) -> str:
 
 
 def seg_audio(seg: dict) -> str:
+    if seg.get("dialogue_or_audio"):
+        return str(seg.get("dialogue_or_audio"))
     if seg.get("dialogue_text"):
         return str(seg.get("dialogue_text"))
     lines = seg.get("audio_lines") or []
@@ -70,6 +72,8 @@ def seg_audio(seg: dict) -> str:
 
 
 def action_text(seg: dict) -> str:
+    if seg.get("action"):
+        return str(seg.get("action"))
     if seg.get("action_text"):
         return str(seg.get("action_text"))
     action = list_text(seg.get("action_chain") or [])
@@ -79,11 +83,22 @@ def action_text(seg: dict) -> str:
 
 
 def visual_text(seg: dict) -> str:
-    visual = seg.get("objective_visual") or seg.get("visual") or "画面细节不足，按关键帧复核。"
+    visual = seg.get("visual_content") or seg.get("objective_visual") or seg.get("visual") or "画面细节不足，按关键帧复核。"
     objs = list_text(seg.get("object_tracks") or [])
     if objs:
-        return f'{visual}<br><span class="small">道具轨迹：{esc(objs)}</span>'
+        return f'{esc(visual)}<br><span class="small">道具轨迹：{esc(objs)}</span>'
     return esc(visual)
+
+
+def time_text(seg: dict) -> str:
+    value = seg.get("time")
+    if value not in (None, ""):
+        return str(value)
+    start = seg.get("start")
+    end = seg.get("end")
+    if start not in (None, "") or end not in (None, ""):
+        return f"{start or ''}-{end or ''}"
+    return ""
 
 
 def render_humor_mechanism(data: dict) -> str:
@@ -171,7 +186,7 @@ def main() -> int:
     frames = load_frames(args.frames)
     source = meta.get("source_url") or meta.get("input") or ""
     story = data.get("story_analysis") or {}
-    segments = data.get("synthesized_segments") or data.get("timeline") or []
+    segments = data.get("rows") or data.get("synthesized_segments") or data.get("timeline") or []
 
     title = "视频总结归纳 + 脚本表"
     route = data.get("report_route") or data.get("analysis_route") or data.get("mode") or "observation-first"
@@ -180,13 +195,11 @@ def main() -> int:
     audio_score = data.get("audio_information_score")
 
     rows = []
-    for i, seg in enumerate(segments, 1):
-        link_cell = f'<a href="{esc(source)}">原视频链接</a>' if i == 1 and source else ""
+    for seg in segments:
         rows.append(f"""
 <tr>
-<td>{link_cell}</td>
-<td>{esc(seg.get('start'))}-{esc(seg.get('end'))}</td>
-<td>{visual_text(seg)}{frame_pair_html(frames.get(i, {}))}</td>
+<td>{esc(time_text(seg))}</td>
+<td>{visual_text(seg)}</td>
 <td>{esc(action_text(seg))}</td>
 <td>{esc(seg_audio(seg))}</td>
 </tr>""")
@@ -222,7 +235,13 @@ def main() -> int:
  .insight b{{display:block;margin-bottom:4px;color:#111827}} .insight div{{font-size:14px;line-height:1.8;color:#374151}}
  a{{color:#2563eb;text-decoration:none;word-break:break-all}}
  table{{width:100%;border-collapse:collapse;table-layout:fixed}} th,td{{border:1px solid #e5e7eb;vertical-align:top;padding:12px 10px;line-height:1.8;font-size:14px}}
- th{{background:#f3f4f6;text-align:left}} th:nth-child(1),td:nth-child(1){{width:14%}} th:nth-child(2),td:nth-child(2){{width:8%}} th:nth-child(3),td:nth-child(3){{width:34%}} th:nth-child(4),td:nth-child(4){{width:18%}} th:nth-child(5),td:nth-child(5){{width:26%}}
+ th{{background:#f3f4f6;text-align:left}}
+ .script-table th{{background:#d9f0fb;font-weight:800;text-align:center}}
+ .script-table td{{white-space:pre-wrap}}
+ .script-table th:nth-child(1),.script-table td:nth-child(1){{width:10%;text-align:center}}
+ .script-table th:nth-child(2),.script-table td:nth-child(2){{width:24%}}
+ .script-table th:nth-child(3),.script-table td:nth-child(3){{width:38%}}
+ .script-table th:nth-child(4),.script-table td:nth-child(4){{width:28%}}
  .frames{{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}} .frame{{flex:1;min-width:90px}} .frame img{{width:100%;border-radius:8px;border:1px solid #e5e7eb;display:block}} .cap{{font-size:12px;color:#666;margin-top:4px;text-align:center}}
  ul{{margin:8px 0 0 20px;padding:0;line-height:1.8}} .small{{font-size:12px;color:#666}} summary{{cursor:pointer;font-weight:700;color:#111827}}
  </style>
@@ -230,7 +249,7 @@ def main() -> int:
 <body><div class="wrap">
  <div class="card"><h1>视频总结归纳 + 脚本表</h1><div class="meta">Route: {esc(route)}{meta_extra} · Analysis status: {esc(score)}<br>视频链接：<a href="{esc(source)}">{esc(source)}</a></div></div>
  <div class="card"><h2>视频整体内容总结</h2><div class="summary">{esc(summary)}</div></div>
- <div class="card"><h2>脚本表</h2><table><thead><tr><th>视频链接</th><th>时间</th><th>画面内容</th><th>动作</th><th>关键对白/旁白（中文忠实翻译）</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+ <div class="card"><h2>脚本表</h2><table class="script-table"><thead><tr><th>时间</th><th>画面内容</th><th>动作</th><th>关键对白/旁白</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
  {render_humor_mechanism(data)}
  <div class="card"><h2>核心爆点</h2>{list_cards(story.get('core_points') or [], core_fallback)}</div>
  <div class="card"><h2>可替换部分</h2>{list_cards(story.get('replaceable_parts') or [], replace_fallback)}</div>
