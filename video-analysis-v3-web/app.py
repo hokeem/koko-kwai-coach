@@ -7827,33 +7827,6 @@ def studio_html() -> str:
       font-weight: 800;
       color: #FF8200;
     }}
-    .editor-row-title-wrap {{
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      min-width: 0;
-    }}
-    .timeline-jump {{
-      border: 1px solid rgba(255,130,0,.18);
-      border-radius: 999px;
-      background: rgba(255,255,255,.86);
-      color: #FF8200;
-      cursor: pointer;
-      font-size: 12px;
-      font-weight: 800;
-      line-height: 1;
-      padding: 7px 10px;
-    }}
-    .timeline-jump:disabled {{
-      cursor: not-allowed;
-      opacity: .45;
-    }}
-    .editor-row-card.video-active {{
-      border-color: rgba(255,130,0,.42);
-      background: rgba(255,248,238,.92);
-      box-shadow: 0 10px 24px rgba(249,115,0,.08);
-    }}
     .editor-row-head {{
       display: flex;
       align-items: center;
@@ -7975,54 +7948,6 @@ def studio_html() -> str:
       flex-direction: column;
       gap: 14px;
       margin-bottom: 14px;
-    }}
-    .video-review-strip {{
-      border: 1px solid rgba(255,130,0,.16);
-      border-radius: 16px;
-      background: rgba(255,255,255,.78);
-      padding: 12px;
-      display: grid;
-      grid-template-columns: minmax(132px, 220px) minmax(0, 1fr);
-      gap: 14px;
-      align-items: center;
-    }}
-    .video-review-strip video {{
-      width: 100%;
-      max-height: 220px;
-      aspect-ratio: 9 / 16;
-      object-fit: contain;
-      border-radius: 12px;
-      background: #111;
-      display: block;
-    }}
-    .video-review-meta {{
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }}
-    .video-review-title {{
-      font-size: 14px;
-      font-weight: 800;
-      color: var(--ink);
-    }}
-    .video-review-copy {{
-      font-size: 13px;
-      line-height: 1.55;
-      color: var(--muted);
-    }}
-    .video-review-now {{
-      display: inline-flex;
-      align-items: center;
-      width: fit-content;
-      max-width: 100%;
-      border: 1px solid rgba(255,130,0,.14);
-      border-radius: 999px;
-      background: rgba(255,248,238,.86);
-      color: #FF8200;
-      font-size: 12px;
-      font-weight: 800;
-      padding: 7px 10px;
     }}
     .item-actions-shell {{
       border: 1px solid rgba(255,130,0,.16);
@@ -8453,12 +8378,6 @@ def studio_html() -> str:
         display: none;
       }}
       .queue-list {{ grid-template-columns: 1fr; }}
-      .video-review-strip {{
-        grid-template-columns: 1fr;
-      }}
-      .video-review-strip video {{
-        width: min(220px, 100%);
-      }}
     }}
   </style>
 </head>
@@ -9243,54 +9162,6 @@ def studio_html() -> str:
       return text || fallback;
     }}
 
-    function parseTimelineSeconds(value) {{
-      const raw = String(value || "").trim();
-      if (!raw) return null;
-      const match = raw.match(/(\\d{{1,2}}(?::\\d{{1,2}}){{0,2}}(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)\\s*(?:-|–|—|~|至|到)?\\s*(\\d{{1,2}}(?::\\d{{1,2}}){{0,2}}(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)?/);
-      if (!match) return null;
-      const toSeconds = (part) => {{
-        const text = String(part || "").trim().replace(/[秒sS]$/g, "");
-        if (!text) return null;
-        if (text.includes(":")) {{
-          const nums = text.split(":").map((piece) => Number(piece));
-          if (nums.some((num) => Number.isNaN(num))) return null;
-          return nums.reduce((acc, num) => acc * 60 + num, 0);
-        }}
-        const num = Number(text);
-        return Number.isNaN(num) ? null : num;
-      }};
-      const start = toSeconds(match[1]);
-      const end = toSeconds(match[2]);
-      if (start === null) return null;
-      return {{
-        start,
-        end: end !== null && end >= start ? end : start + 1,
-      }};
-    }}
-
-    function formatClock(seconds) {{
-      const safe = Math.max(0, Number(seconds) || 0);
-      const total = Math.floor(safe);
-      const mins = Math.floor(total / 60);
-      const secs = total % 60;
-      return `${{String(mins).padStart(2, "0")}}:${{String(secs).padStart(2, "0")}}`;
-    }}
-
-    function buildVideoReviewMarkup(item) {{
-      if (item.status !== "completed") return "";
-      const sourceUrl = item.artifacts?.["source.mp4"] || `/results/${{item.id}}/source.mp4`;
-      return `
-        <div class="video-review-strip" data-video-review="${{item.id}}">
-          <video controls preload="metadata" src="${{escapeHtml(sourceUrl)}}" data-review-video="${{item.id}}"></video>
-          <div class="video-review-meta">
-            <div class="video-review-title">视频复核</div>
-            <div class="video-review-copy">点击脚本行旁边的“跳到”，播放器会定位到对应时间；播放时当前脚本行会自动高亮。</div>
-            <div class="video-review-now" data-video-now="${{item.id}}">当前 00:00</div>
-          </div>
-        </div>
-      `;
-    }}
-
     function buildLibraryConfirmMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const alreadySaved = Boolean(item.saved_to_library_at || item.in_library);
@@ -9339,17 +9210,10 @@ def studio_html() -> str:
           </div>
         </div>
       `).join("");
-      const rowBlocks = rows.map((row, idx) => {{
-        const range = parseTimelineSeconds(row.time);
-        const timeAttrs = range ? ` data-row-start="${{range.start}}" data-row-end="${{range.end}}"` : "";
-        const jumpButton = range ? `<button class="timeline-jump" type="button" data-jump-video="${{item.id}}" data-jump-time="${{range.start}}">跳到 ${{formatClock(range.start)}}</button>` : "";
-        return `
-        <div class="editor-row-card" data-row-index="${{idx}}" data-row-original-index="${{idx}}"${{timeAttrs}}>
+      const rowBlocks = rows.map((row, idx) => `
+        <div class="editor-row-card" data-row-index="${{idx}}" data-row-original-index="${{idx}}">
           <div class="editor-row-head">
-            <div class="editor-row-title-wrap">
-              <div class="editor-row-title">脚本行 ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
-              ${{jumpButton}}
-            </div>
+            <div class="editor-row-title">脚本行 ${{idx + 1}}${{row.time ? ` · ${{escapeHtml(row.time)}}` : ""}}</div>
             <button class="action-link action-link-danger editor-row-remove" type="button" data-delete-row>删除这一段</button>
           </div>
           <div class="editor-grid">
@@ -9375,8 +9239,7 @@ def studio_html() -> str:
             </div>
           </div>
         </div>
-      `;
-      }}).join("");
+      `).join("");
       return `
         <details class="editor-disclosure">
           <summary class="editor-summary">
@@ -9531,57 +9394,7 @@ def studio_html() -> str:
         if (titleNode) {{
           titleNode.textContent = `脚本行 ${{idx + 1}}${{timeValue ? ` · ${{timeValue}}` : ""}}`;
         }}
-        const range = parseTimelineSeconds(timeValue);
-        const jumpBtn = rowCard.querySelector("[data-jump-video]");
-        if (range) {{
-          rowCard.setAttribute("data-row-start", String(range.start));
-          rowCard.setAttribute("data-row-end", String(range.end));
-          if (jumpBtn) {{
-            jumpBtn.setAttribute("data-jump-time", String(range.start));
-            jumpBtn.textContent = `跳到 ${{formatClock(range.start)}}`;
-            jumpBtn.disabled = false;
-          }}
-        }} else {{
-          rowCard.removeAttribute("data-row-start");
-          rowCard.removeAttribute("data-row-end");
-          if (jumpBtn) jumpBtn.disabled = true;
-        }}
       }});
-    }}
-
-    function seekReviewVideo(itemId, seconds) {{
-      const detail = document.querySelector(`.item-card[data-item-id="${{itemId}}"]`);
-      if (detail instanceof HTMLDetailsElement) detail.open = true;
-      const video = document.querySelector(`video[data-review-video="${{itemId}}"]`);
-      if (!(video instanceof HTMLVideoElement)) {{
-        showToast("视频未就绪", "这个结果暂时没有可播放的源视频。");
-        return;
-      }}
-      const target = Math.max(0, Number(seconds) || 0);
-      video.currentTime = target;
-      video.scrollIntoView({{ behavior: "smooth", block: "nearest" }});
-      video.play().catch(() => {{
-        // Some browsers require a second user action before autoplay.
-      }});
-      highlightRowsForVideo(itemId, target);
-    }}
-
-    function highlightRowsForVideo(itemId, currentTime) {{
-      const detail = document.querySelector(`.item-card[data-item-id="${{itemId}}"]`);
-      if (!detail) return;
-      let active = null;
-      detail.querySelectorAll(".editor-row-card[data-row-start]").forEach((row) => {{
-        const start = Number(row.getAttribute("data-row-start") || "0");
-        const end = Number(row.getAttribute("data-row-end") || start + 1);
-        const matched = currentTime >= start && currentTime < Math.max(end, start + 0.75);
-        row.classList.toggle("video-active", matched);
-        if (matched && !active) active = row;
-      }});
-      const now = detail.querySelector(`[data-video-now="${{itemId}}"]`);
-      if (now) {{
-        const label = active?.querySelector(".editor-row-title")?.textContent || "";
-        now.textContent = label ? `当前 ${{formatClock(currentTime)}} · ${{label}}` : `当前 ${{formatClock(currentTime)}}`;
-      }}
     }}
 
     async function persistItemEdits(itemId, mode, button) {{
@@ -9730,7 +9543,6 @@ def studio_html() -> str:
       const title = escapeHtml(item.title || `视频 ${{idx + 1}}`);
       const editor = buildEditorMarkup(item);
       const review = buildReviewMarkup(item);
-      const videoReview = buildVideoReviewMarkup(item);
       const libraryConfirm = buildLibraryConfirmMarkup(item);
       const toggleButton = item.display_language === "pt"
         ? `<button class="action-link" type="button" data-toggle-language="${{item.id}}" data-language-target="zh">切回中文</button>`
@@ -9753,7 +9565,6 @@ def studio_html() -> str:
           <div class="item-body">
             <div class="item-sections">
               ${{libraryConfirm}}
-              ${{videoReview}}
               ${{review}}
               ${{editor}}
               <div class="item-actions-shell"><div class="link-row">${{links}}</div></div>
@@ -10507,23 +10318,10 @@ def studio_html() -> str:
       ensureDetailIframes(detail.parentElement || detail);
     }}, true);
 
-    document.addEventListener("timeupdate", (event) => {{
-      const video = event.target;
-      if (!(video instanceof HTMLVideoElement)) return;
-      const itemId = video.getAttribute("data-review-video") || "";
-      if (!itemId) return;
-      highlightRowsForVideo(itemId, video.currentTime || 0);
-    }}, true);
-
     document.addEventListener("click", (event) => {{
       const copyBtn = event.target.closest("[data-copy-text]");
       if (copyBtn) {{
         copyText(copyBtn.getAttribute("data-copy-text") || "", "任务 ID 已复制");
-        return;
-      }}
-      const jumpBtn = event.target.closest("[data-jump-video]");
-      if (jumpBtn) {{
-        seekReviewVideo(jumpBtn.getAttribute("data-jump-video") || "", jumpBtn.getAttribute("data-jump-time") || "0");
         return;
       }}
       const expandBtn = event.target.closest("[data-item-expand]");
