@@ -34,10 +34,10 @@ For richer audio requests, `audio-sop` can be paired with a multi-speaker sideca
 - gender guess
 - relationship hypotheses
 
-The final table uses exactly five user-facing columns:
+The final table uses exactly four user-facing script columns:
 
-| 视频链接 | 时间 | 画面内容 | 动作 | 关键对白/旁白（中文忠实翻译） |
-|---|---|---|---|---|
+| 时间 | 画面内容 | 动作 | 关键对白/旁白 |
+|---|---|---|---|
 
 ## Skill structure
 

@@ -57,10 +57,16 @@ The user-facing HTML must contain:
 4. `可替换部分`
 5. `脚本表`
 
-The main table columns must be exactly:
+The main script-breakdown table columns must be exactly:
 
-| 视频链接 | 时间 | 画面内容 | 动作 | 关键对白/旁白（中文忠实翻译） |
-|---|---|---|---|---|
+| 时间 | 画面内容 | 动作 | 关键对白/旁白 |
+|---|---|---|---|
+
+Script-table writing rules:
+- `时间`: split by story beat or action beat, not mechanically by every frame. Ranges like `00:00-00:15` and `00:40-Final` are acceptable.
+- `画面内容`: keep it short like a filming prep note: location/scene, people present, and necessary props. Do not put camera analysis, action chains, dialogue, emotion, or plot summary here.
+- `动作`: describe concrete staging, gestures, facial expressions, emotional change, and how the beat advances the joke/story.
+- `关键对白/旁白`: preserve speaker labels and line breaks whenever possible. If no reliable audio/subtitle exists, write `无明确对白/旁白，主要靠画面动作推进。`
 
 Process artifacts such as `mechanism_hypotheses`, `verification_windows`, `allowed_claims`, `blocked_claims`, object conflicts, and raw Gemini observations may be retained in JSON or collapsed appendices, but must not become the main report.
 

@@ -89,7 +89,7 @@ def main() -> int:
             "核心爆点",
             "可替换部分",
             "脚本表",
-            "关键对白/旁白（中文忠实翻译）",
+            "关键对白/旁白",
         ]:
             if needle not in html_text:
                 errors.append(f"HTML missing text: {needle}")
