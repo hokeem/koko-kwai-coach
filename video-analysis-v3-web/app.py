@@ -7624,6 +7624,130 @@ def studio_html() -> str:
     .item-body {{
       padding: 0 16px 16px;
     }}
+    .result-workbench {{
+      display: grid;
+      grid-template-columns: minmax(420px, 1.45fr) minmax(260px, .82fr) minmax(300px, .95fr);
+      gap: 14px;
+      align-items: start;
+    }}
+    .workbench-pane {{
+      min-width: 0;
+      border: 1px solid rgba(255,130,0,.14);
+      border-radius: 18px;
+      background: rgba(255,255,255,.76);
+      padding: 14px;
+    }}
+    .workbench-pane h4 {{
+      margin: 0 0 10px;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.35;
+    }}
+    .workbench-pane-note {{
+      margin: -4px 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }}
+    .script-preview-pane {{
+      min-height: 720px;
+    }}
+    .video-verify-pane {{
+      position: sticky;
+      top: 18px;
+    }}
+    .source-video-frame {{
+      width: 100%;
+      aspect-ratio: 9 / 16;
+      max-height: 70vh;
+      border-radius: 16px;
+      background: #111;
+      display: block;
+      object-fit: contain;
+      border: 1px solid rgba(255,130,0,.12);
+    }}
+    .source-video-status {{
+      margin-top: 10px;
+      border-radius: 14px;
+      background: rgba(255,244,232,.82);
+      color: #FF8200;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.55;
+    }}
+    .video-timeline {{
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow: auto;
+      padding-right: 2px;
+    }}
+    .timeline-jump {{
+      width: 100%;
+      text-align: left;
+      border: 1px solid rgba(255,130,0,.14);
+      background: rgba(255,255,255,.82);
+      color: #FF8200;
+      border-radius: 14px;
+      padding: 10px 12px;
+      cursor: pointer;
+    }}
+    .timeline-jump strong {{
+      display: block;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }}
+    .timeline-jump span {{
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }}
+    .ops-pane {{
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }}
+    .ops-section {{
+      border: 1px solid rgba(255,130,0,.14);
+      border-radius: 16px;
+      background: rgba(255,248,235,.62);
+      padding: 14px;
+    }}
+    .ops-section.final-action {{
+      background: rgba(255,255,255,.86);
+      border-color: rgba(255,130,0,.24);
+    }}
+    .ops-section-title {{
+      margin: 0 0 8px;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 900;
+    }}
+    .review-chat-log {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 10px;
+    }}
+    .review-message {{
+      border-radius: 14px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.6;
+    }}
+    .review-message.koko {{
+      background: rgba(255,255,255,.88);
+      color: var(--muted);
+      border: 1px solid rgba(255,130,0,.10);
+    }}
+    .review-message.user {{
+      background: rgba(255,130,0,.12);
+      color: #FF8200;
+      border: 1px solid rgba(255,130,0,.14);
+    }}
     .link-row {{
       display: flex;
       flex-wrap: wrap;
@@ -8009,7 +8133,7 @@ def studio_html() -> str:
     }}
     .item-card iframe {{
       width: 100%;
-      min-height: 420px;
+      min-height: 680px;
       border: 1px solid rgba(255,130,0,.14);
       border-radius: 16px;
       background: #fff;
@@ -8355,6 +8479,19 @@ def studio_html() -> str:
       .studio-kpis,
       .studio-placeholder-grid {{
         grid-template-columns: 1fr;
+      }}
+      .result-workbench {{
+        grid-template-columns: 1fr;
+      }}
+      .video-verify-pane {{
+        position: static;
+      }}
+      .source-video-frame {{
+        aspect-ratio: 16 / 9;
+        max-height: none;
+      }}
+      .script-preview-pane {{
+        min-height: 0;
       }}
       .hero-copy {{
         grid-template-columns: 1fr;
@@ -8715,14 +8852,28 @@ def studio_html() -> str:
           if (slot.firstElementChild !== cached.node) {{
             slot.replaceChildren(cached.node);
           }}
+          wirePreviewTimeJumps(cached.node, itemId);
           return;
         }}
         const iframe = document.createElement("iframe");
         iframe.loading = "lazy";
         iframe.src = url;
         iframe.setAttribute("data-preview-item-id", itemId);
+        iframe.addEventListener("load", () => wirePreviewTimeJumps(iframe, itemId));
         slot.replaceChildren(iframe);
         detailIframeCache.set(itemId, {{ src: url, node: iframe }});
+      }});
+      root.querySelectorAll("video[data-source-video]").forEach((video) => {{
+        if (!(video instanceof HTMLVideoElement) || video.getAttribute("data-video-wired") === "1") return;
+        video.setAttribute("data-video-wired", "1");
+        const itemId = video.getAttribute("data-source-video") || "";
+        const status = document.querySelector(`[data-source-video-status="${{itemId}}"]`);
+        video.addEventListener("loadedmetadata", () => {{
+          if (status) status.textContent = `原视频已加载，可用于校验脚本。时长约 ${{Math.round(video.duration || 0)}} 秒。`;
+        }});
+        video.addEventListener("error", () => {{
+          if (status) status.textContent = "原视频没有加载出来：可能是 source.mp4 不存在、文件编码浏览器不支持，或文件还没有写入完成。";
+        }});
       }});
     }}
 
@@ -8733,6 +8884,54 @@ def studio_html() -> str:
       if (!version) return rawUrl;
       const separator = rawUrl.includes("?") ? "&" : "?";
       return `${{rawUrl}}${{separator}}v=${{encodeURIComponent(version)}}`;
+    }}
+
+    function parseTimeToSeconds(value) {{
+      const text = String(value || "").trim();
+      const match = text.match(/(\\d{{1,2}}):(\\d{{2}})(?::(\\d{{2}}))?/);
+      if (!match) return 0;
+      if (match[3] !== undefined) {{
+        return Number(match[1] || 0) * 3600 + Number(match[2] || 0) * 60 + Number(match[3] || 0);
+      }}
+      return Number(match[1] || 0) * 60 + Number(match[2] || 0);
+    }}
+
+    function seekSourceVideo(itemId, seconds) {{
+      const video = document.querySelector(`[data-source-video="${{itemId}}"]`);
+      const status = document.querySelector(`[data-source-video-status="${{itemId}}"]`);
+      if (!(video instanceof HTMLVideoElement)) {{
+        showToast("无法跳转视频", "当前结果没有可用的视频播放器。");
+        return;
+      }}
+      try {{
+        video.currentTime = Math.max(0, Number(seconds) || 0);
+        video.play().catch(() => {{}});
+        if (status) status.textContent = `已跳到 ${{Math.floor(video.currentTime / 60).toString().padStart(2, "0")}}:${{Math.floor(video.currentTime % 60).toString().padStart(2, "0")}}。`;
+      }} catch (error) {{
+        showToast("视频跳转失败", "原视频可能还没有加载完成。");
+      }}
+    }}
+
+    function wirePreviewTimeJumps(iframe, itemId) {{
+      if (!(iframe instanceof HTMLIFrameElement) || !itemId) return;
+      let doc = null;
+      try {{
+        doc = iframe.contentDocument || iframe.contentWindow?.document || null;
+      }} catch (error) {{
+        return;
+      }}
+      if (!doc) return;
+      doc.querySelectorAll("table.script-table tbody tr, table tbody tr").forEach((row) => {{
+        const timeCell = row.querySelector("td");
+        if (!timeCell || timeCell.getAttribute("data-koko-time-wired") === "1") return;
+        const seconds = parseTimeToSeconds(timeCell.textContent || "");
+        timeCell.setAttribute("data-koko-time-wired", "1");
+        timeCell.setAttribute("title", "点击跳到原视频对应片段");
+        timeCell.style.cursor = "pointer";
+        timeCell.style.color = "#FF8200";
+        timeCell.style.fontWeight = "800";
+        timeCell.addEventListener("click", () => seekSourceVideo(itemId, seconds));
+      }});
     }}
 
     function setStatus(html, ready = false) {{
@@ -9375,12 +9574,16 @@ def studio_html() -> str:
       const reviewState = status ? `<div class="review-note">${{escapeHtml(status)}}${{message ? ` · ${{escapeHtml(message)}}` : ""}}</div>` : "";
       const reviewProgress = buildReviewProgressMarkup(stage, status, message);
       return `
-        <details class="editor-disclosure" ${{status === "running" ? "open" : ""}}>
+        <details class="editor-disclosure" open>
           <summary class="editor-summary">
             <span class="editor-summary-title">复盘重做</span>
           </summary>
           <div class="review-shell" data-review-item="${{item.id}}">
-            <div class="review-note">直接用自然语言告诉 Koko 这条脚本哪里理解错了。系统会拿你的反馈和原始分析结果做对照，必要时只复核关键片段，然后重新生成脚本。</div>
+            <div class="review-chat-log">
+              <div class="review-message koko">直接用自然语言告诉 Koko 哪里理解错了。你可以说“漏掉煤气没关”这种小问题，也可以说“整个故事主轴错了”。</div>
+              ${{item.review_feedback ? `<div class="review-message user">${{escapeHtml(item.review_feedback)}}</div>` : ""}}
+              ${{item.review_message ? `<div class="review-message koko">${{escapeHtml(item.review_message)}}</div>` : ""}}
+            </div>
             <div class="review-mode-toggle" role="radiogroup" aria-label="复盘模式">
               <label class="review-mode-option">
                 <input type="radio" name="review-mode-${{item.id}}" value="partial" ${{reviewMode !== "full" ? "checked" : ""}} ${{status === "running" ? "disabled" : ""}}>
@@ -9395,9 +9598,9 @@ def studio_html() -> str:
             ${{reviewedBadge.replace("Reviewed version active", "当前是复盘版本")}}
             ${{reviewProgress}}
             ${{reviewState}}
-            <textarea class="editor-textarea" data-review-feedback placeholder="部分错误：漏掉煤气没关。完全错误：故事主轴不是情侣吵架，而是丈夫撒谎被拆穿。">${{escapeHtml(feedback)}}</textarea>
+            <textarea class="editor-textarea" data-review-feedback placeholder="像聊天一样说：这里不是煤气没关，是锅烧糊了；或者：整个主轴错了，应该是丈夫撒谎被拆穿。">${{escapeHtml(feedback)}}</textarea>
             <div class="link-row">
-              <button class="action-link" type="button" data-run-review="${{item.id}}">${{status === "running" ? "复盘中..." : "复盘重做"}}</button>
+              <button class="action-link primary" type="button" data-run-review="${{item.id}}">${{status === "running" ? "复盘中..." : "发送给 Koko 修改"}}</button>
             </div>
           </div>
         </details>
@@ -9435,6 +9638,23 @@ def studio_html() -> str:
           <div class="review-steps">${{steps}}</div>
         </div>
       `;
+    }}
+
+    function buildVideoTimelineMarkup(item) {{
+      const rows = normalizeRows(item?.result_json || {{}}).slice(0, 80);
+      if (!rows.length) return "";
+      const buttons = rows.map((row, idx) => {{
+        const time = normalizedText(row.time || "", `片段 ${{idx + 1}}`);
+        const seconds = parseTimeToSeconds(time);
+        const label = normalizedText(row.visual_content || row.action || row.dialogue_or_audio || "", "查看这一段");
+        return `
+          <button class="timeline-jump" type="button" data-seek-video="${{item.id}}" data-seek-seconds="${{seconds}}">
+            <strong>${{escapeHtml(time)}}</strong>
+            <span>${{escapeHtml(label)}}</span>
+          </button>
+        `;
+      }}).join("");
+      return `<div class="video-timeline">${{buttons}}</div>`;
     }}
 
     function collectItemEdits(itemId) {{
@@ -9630,6 +9850,14 @@ def studio_html() -> str:
       const previewSlot = previewUrl
         ? `<div class="item-preview-slot" data-preview-item-id="${{item.id}}" data-preview-url="${{escapeHtml(previewUrl)}}"></div>`
         : "";
+      const sourceVideoUrl = versionedResultUrl(`/results/${{item.id}}/source.mp4`, item);
+      const sourceVideo = item.status === "completed"
+        ? `
+          <video class="source-video-frame" data-source-video="${{item.id}}" controls playsinline preload="metadata" src="${{escapeHtml(sourceVideoUrl)}}"></video>
+          <div class="source-video-status" data-source-video-status="${{item.id}}">原视频用于对照脚本。点击下方时间线，或左侧脚本表时间，可跳到对应片段。</div>
+          ${{buildVideoTimelineMarkup(item)}}
+        `
+        : "";
       const error = item.error ? `<code>${{escapeHtml(item.error)}}</code>` : "";
       return `
         <details class="item-card" data-item-id="${{item.id}}" ${{open ? "open" : ""}}>
@@ -9638,14 +9866,41 @@ def studio_html() -> str:
             <span>${{escapeHtml(item.status === "completed" ? "已完成" : item.status === "failed" ? "失败" : item.status || "")}}</span>
           </summary>
           <div class="item-body">
-            <div class="item-sections">
-              ${{libraryConfirm}}
-              ${{review}}
-              ${{editor}}
-              <div class="item-actions-shell"><div class="link-row">${{links}}</div></div>
-            </div>
-            ${{error}}
-            ${{previewSlot}}
+            ${{item.status === "completed" ? `
+              <div class="result-workbench">
+                <section class="workbench-pane script-preview-pane">
+                  <h4>脚本分析</h4>
+                  <div class="workbench-pane-note">这里直接展示拆解出来的 HTML。脚本表时间会尽量标记成可点击；中间视频下方也会生成稳定的时间线按钮。</div>
+                  ${{previewSlot || `<div class="review-note">脚本预览还没有生成。</div>`}}
+                </section>
+                <section class="workbench-pane video-verify-pane">
+                  <h4>原视频验证</h4>
+                  <div class="workbench-pane-note">用原视频校验 Koko 的理解是否准确。源视频确认入库后会清理，未入库会保留约 2 天。</div>
+                  ${{sourceVideo}}
+                </section>
+                <aside class="workbench-pane ops-pane">
+                  <div class="ops-section">
+                    <div class="ops-section-title">复盘修改</div>
+                    ${{review}}
+                  </div>
+                  <div class="ops-section">
+                    <div class="ops-section-title">整稿编辑</div>
+                    ${{editor}}
+                  </div>
+                  <div class="ops-section">
+                    <div class="ops-section-title">后续操作</div>
+                    <div class="link-row">${{links}}</div>
+                  </div>
+                  <div class="ops-section final-action">
+                    ${{libraryConfirm}}
+                  </div>
+                </aside>
+              </div>
+            ` : `
+              <div class="item-sections">
+                ${{error}}
+              </div>
+            `}}
           </div>
         </details>
       `;
@@ -9773,7 +10028,7 @@ def studio_html() -> str:
         </div>
       ` : "";
       const cards = detailItems.map((item, idx) => {{
-        const open = Object.prototype.hasOwnProperty.call(itemOpenState, item.id) ? !!itemOpenState[item.id] : false;
+        const open = Object.prototype.hasOwnProperty.call(itemOpenState, item.id) ? !!itemOpenState[item.id] : item.status === "completed";
         return renderItemCard(item, idx, open);
       }}).join("");
       return `
@@ -10397,6 +10652,11 @@ def studio_html() -> str:
       const copyBtn = event.target.closest("[data-copy-text]");
       if (copyBtn) {{
         copyText(copyBtn.getAttribute("data-copy-text") || "", "任务 ID 已复制");
+        return;
+      }}
+      const seekBtn = event.target.closest("[data-seek-video]");
+      if (seekBtn) {{
+        seekSourceVideo(seekBtn.getAttribute("data-seek-video") || "", Number(seekBtn.getAttribute("data-seek-seconds") || "0"));
         return;
       }}
       const expandBtn = event.target.closest("[data-item-expand]");
