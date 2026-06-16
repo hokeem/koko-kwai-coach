@@ -2947,6 +2947,67 @@ FULL_REVIEW_REFINE_PROMPT = REVIEW_REFINE_PROMPT + """
 """
 
 
+CHAT_SCRIPT_EDIT_PROMPT = """你是 Koko 的脚本修稿助手，负责根据用户的自然语言反馈，直接修改当前短视频拆解脚本。
+
+输入里会包含：
+1. current_script：当前已经生成的完整 script_table.json
+2. user_message：用户这一次想让你修改的内容
+3. conversation：同一条脚本的历史修稿对话
+4. edit_mode：minor 或 major
+
+你的权限边界：
+- 只能修改当前脚本 JSON 内容，不要修改文件名、任务状态、视频文件或脚本库状态
+- 可以全局修改 title、whole_video_summary、core_viral_points、replaceable_parts、rows、mechanism
+- 如果用户只指出一个小问题，也要让这个纠正自然贯穿相关标题、总结、爆点和分镜，不要只机械改一个词
+- 如果用户要求大改，要以 current_script 为基础重组故事主轴，但不要假装重新看过视频
+- 如果用户的问题需要重新看视频才能确认，请在 assistant_message 里说明“需要重新看视频”，并仍然尽量做保守文本修订
+- 不要删除 rows 里的图片引用或时间顺序
+- `dialogue_or_audio` 必须保持中文 1:1 直译风格：只翻译，不改写，不润色，不概括，不补解释，不合并句子
+
+输出严格 JSON，必须包含：
+{
+  "assistant_message": "像聊天一样告诉用户你改了什么；简短、具体",
+  "change_summary": [
+    "修改点1",
+    "修改点2"
+  ],
+  "script": {
+    "title": "修改后的标题",
+    "route": "保留或修正后的 route",
+    "audio_information_score": "保留或修正后的分数",
+    "source_url": "原视频链接",
+    "whole_video_summary": "修改后的完整总结",
+    "core_viral_points": [
+      {"label": "核心点标题", "text": "为什么成立"}
+    ],
+    "replaceable_parts": [
+      {"label": "可替换项", "text": "替换说明"}
+    ],
+    "rows": [
+      {
+        "source_url": "原视频链接",
+        "time": "00:00-00:15",
+        "visual_content": "这一段整体看到了什么",
+        "action": "这一段动作如何推进",
+        "dialogue_or_audio": "中文 1:1 直译",
+        "integrated_summary": "可选补充"
+      }
+    ],
+    "mechanism": {
+      "title": "包袱机制",
+      "items": [
+        {"label": "铺垫", "text": "..."},
+        {"label": "违和点", "text": "..."},
+        {"label": "反转点", "text": "..."},
+        {"label": "笑点落点", "text": "..."},
+        {"label": "背后原因", "text": "..."}
+      ]
+    }
+  }
+}
+"""
+
+
 ERROR_CASE_REVIEW_PROMPT = """你是一个短视频分析系统的“错误案例复盘器”。
 
 你会收到一次已经完成的“复盘重做”案例，里面包括：
@@ -4884,6 +4945,9 @@ def write_product_outputs(job_id: str, output_dir: Path, result_json: dict[str, 
 
 
 def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
+    item_id = str(item.get("id") or "").strip()
+    source_video_path = RESULTS_ROOT / item_id / SOURCE_VIDEO_NAME if item_id else Path()
+    source_video_available = bool(item_id and source_video_path.exists())
     return {
         "id": item.get("id"),
         "index": item.get("index"),
@@ -4917,10 +4981,13 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "review_message": item.get("review_message") or "",
         "review_feedback": item.get("review_feedback") or "",
         "review_mode": normalize_review_mode(item.get("review_mode")),
+        "chat_messages": item.get("chat_messages") if isinstance(item.get("chat_messages"), list) else [],
         "reviewed": bool(item.get("reviewed")),
         "edited": bool(item.get("edited")),
         "saved_to_library_at": item.get("saved_to_library_at") or "",
         "in_library": bool(item.get("saved_to_library_at")) or library_entry_exists(str(item.get("id") or "")),
+        "source_video_available": source_video_available,
+        "source_video_url": f"/results/{item_id}/{SOURCE_VIDEO_NAME}" if source_video_available else "",
     }
 
 
@@ -5482,6 +5549,232 @@ def start_review_job(item_id: str, feedback: str, review_mode: str = REVIEW_MODE
         daemon=True,
     ).start()
     return True, parent_job_id
+
+
+def append_item_chat_message(parent_job_id: str, item_index: int, role: str, content: str, **extra: Any) -> None:
+    text = str(content or "").strip()
+    if not text:
+        return
+    with job_lock:
+        item = jobs[parent_job_id]["items"][item_index]
+        messages = item.get("chat_messages")
+        if not isinstance(messages, list):
+            messages = []
+        message = {
+            "role": role,
+            "content": text,
+            "created_at": now_iso(),
+        }
+        message.update({key: value for key, value in extra.items() if value not in (None, "")})
+        messages.append(message)
+        item["chat_messages"] = messages[-40:]
+        item["updated_at"] = now_iso()
+        jobs[parent_job_id]["updated_at"] = now_iso()
+        save_jobs()
+
+
+def extract_gemini_text(raw: dict[str, Any]) -> str:
+    chunks: list[str] = []
+    for candidate in raw.get("candidates") or []:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            text = part.get("text")
+            if isinstance(text, str):
+                chunks.append(text)
+    text = "\n".join(chunks).strip()
+    if not text:
+        raise RuntimeError("Gemini returned no text.")
+    return text
+
+
+def parse_json_object_from_text(text: str) -> dict[str, Any]:
+    value = str(text or "").strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value)
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        start = value.find("{")
+        end = value.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        parsed = json.loads(value[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Gemini did not return a JSON object.")
+    return parsed
+
+
+CHAT_EDIT_HTTP_TIMEOUT_SEC = max(20, int(os.environ.get("KOKO_CHAT_EDIT_HTTP_TIMEOUT_SEC", "60")))
+
+
+def parse_gemini_raw_response(raw_text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw = json.loads(raw_text)
+    return parse_json_object_from_text(extract_gemini_text(raw)), raw
+
+
+def run_single_chat_text_json_prompt(payload: dict[str, Any], prompt: str, model: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {"text": json.dumps(payload, ensure_ascii=False)},
+                ]
+            }
+        ],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+        },
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    data = json.dumps(body).encode("utf-8")
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json", "x-goog-api-key": GOOGLE_API_KEY},
+            )
+            with urllib.request.urlopen(req, timeout=CHAT_EDIT_HTTP_TIMEOUT_SEC) as response:
+                return parse_gemini_raw_response(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            last_error = RuntimeError(f"Gemini text HTTP {exc.code}: {detail}")
+            if exc.code in {400, 404}:
+                break
+        except Exception as exc:
+            last_error = exc
+        if attempt < 2:
+            time.sleep(min(2 * attempt, 6))
+    curl_path = shutil.which("curl")
+    if curl_path:
+        try:
+            completed = subprocess.run(
+                [
+                    curl_path,
+                    "-sS",
+                    "--fail-with-body",
+                    "--retry",
+                    "1",
+                    "--retry-delay",
+                    "1",
+                    "--max-time",
+                    str(CHAT_EDIT_HTTP_TIMEOUT_SEC),
+                    "-H",
+                    "Content-Type: application/json",
+                    "-H",
+                    f"x-goog-api-key: {GOOGLE_API_KEY}",
+                    "--data-binary",
+                    "@-",
+                    url,
+                ],
+                input=data,
+                capture_output=True,
+                timeout=CHAT_EDIT_HTTP_TIMEOUT_SEC + 10,
+            )
+            stdout = completed.stdout.decode("utf-8", "replace")
+            stderr = completed.stderr.decode("utf-8", "replace")
+            if completed.returncode == 0:
+                return parse_gemini_raw_response(stdout)
+            last_error = RuntimeError((stdout or stderr or f"curl exited {completed.returncode}").strip())
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(str(last_error or "Gemini text request failed."))
+
+
+def run_chat_text_json_prompt(payload: dict[str, Any], prompt: str) -> tuple[dict[str, Any], dict[str, Any], str]:
+    last_error: Exception | None = None
+    tried: list[str] = []
+    for model in unique_models(*MODEL_CANDIDATES, *PRIMARY_FALLBACK_MODELS, *SUPPLEMENT_FALLBACK_MODELS):
+        tried.append(model)
+        try:
+            data, raw = run_single_chat_text_json_prompt(payload, prompt, model)
+            return data, raw, model
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"chat script edit failed across models {tried}: {last_error}") from last_error
+
+
+def run_chat_script_edit(item_id: str, message: str, edit_mode: str = "minor") -> tuple[bool, str | dict[str, Any]]:
+    context = find_item_context(item_id)
+    if not context:
+        return False, "Script item not found."
+    parent_job_id, item_index, item = context
+    if item.get("status") != "completed" or not item.get("result_json"):
+        return False, "Only completed scripts can be edited by Koko."
+    user_message = str(message or "").strip()
+    if not user_message:
+        return False, "请先告诉 Koko 你想改哪里。"
+    mode = str(edit_mode or "minor").strip().lower()
+    if mode not in {"minor", "major"}:
+        mode = "minor"
+    if not GOOGLE_API_KEY:
+        return False, "Missing GOOGLE_API_KEY for Koko edit."
+    if run_text_json_prompt_with_fallback is None:
+        return False, "Koko edit helpers are unavailable."
+
+    output_dir = RESULTS_ROOT / item_id
+    current_script = read_json(output_dir / "script_table.json") or item.get("result_json") or {}
+    if not current_script:
+        return False, "No existing script result to edit."
+    chat_messages = item.get("chat_messages") or []
+    append_item_chat_message(parent_job_id, item_index, "user", user_message, mode=mode)
+    request_payload = {
+        "edit_mode": mode,
+        "user_message": user_message,
+        "conversation": chat_messages[-16:],
+        "current_script": current_script,
+        "video_url": item.get("video_url") or "",
+        "source_metadata": read_json(output_dir / "source_metadata.json"),
+    }
+    try:
+        result, raw, _ = run_chat_text_json_prompt(
+            request_payload,
+            CHAT_SCRIPT_EDIT_PROMPT,
+        )
+        (output_dir / "chat_script_edit_raw_gemini.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        corrected_payload = extract_review_script_payload(result)
+        if not corrected_payload:
+            raise RuntimeError("Koko 没有返回可用的完整脚本 JSON。")
+        merged_script = json.loads(json.dumps(current_script, ensure_ascii=False))
+        for key in REVIEW_SCRIPT_KEYS:
+            if corrected_payload.get(key):
+                merged_script[key] = corrected_payload.get(key)
+        if not review_script_changed(current_script, merged_script, REVIEW_SCRIPT_KEYS):
+            raise RuntimeError("Koko 这次没有生成任何脚本变更，请把错误点说得再具体一点。")
+        merged_script = enforce_chinese_dialogue_translation(
+            merged_script,
+            GOOGLE_API_KEY,
+            unique_models(*MODEL_CANDIDATES),
+        )
+        updated_item = regenerate_item_outputs(
+            parent_job_id,
+            item_index,
+            item_id,
+            item.get("video_url") or "",
+            merged_script,
+            persist_library=False,
+            target_language=item.get("display_language") or "zh",
+        )
+        assistant_message = ""
+        if isinstance(result, dict):
+            assistant_message = str(result.get("assistant_message") or "").strip()
+            summary = result.get("change_summary")
+            if not assistant_message and isinstance(summary, list):
+                assistant_message = "已修改：" + "；".join(str(item or "").strip() for item in summary if str(item or "").strip())
+        if not assistant_message:
+            assistant_message = "我已经按你的反馈修改了脚本，并刷新了左侧的可编辑版本。"
+        append_item_chat_message(parent_job_id, item_index, "assistant", assistant_message, mode=mode)
+        with job_lock:
+            refreshed = public_item_view(jobs[parent_job_id]["items"][item_index])
+        return True, {"item": refreshed, "message": assistant_message}
+    except Exception as exc:
+        error_message = friendly_error(str(exc))
+        append_item_chat_message(parent_job_id, item_index, "assistant", f"这次没改成功：{error_message}", mode=mode, error=True)
+        return False, error_message
 
 
 def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True) -> bool:
@@ -7626,9 +7919,30 @@ def studio_html() -> str:
     }}
     .result-workbench {{
       display: grid;
-      grid-template-columns: minmax(420px, 1.45fr) minmax(260px, .82fr) minmax(300px, .95fr);
-      gap: 14px;
+      grid-template-columns: 1fr;
+      gap: 18px;
       align-items: start;
+    }}
+    .result-main {{
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }}
+    .primary-review-strip {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 18px;
+      padding: 2px;
+      align-items: start;
+    }}
+    .editable-script-pane {{
+      width: 100%;
+      min-width: 0;
+    }}
+    .reference-video-pane {{
+      width: 100%;
+      min-width: 0;
     }}
     .workbench-pane {{
       min-width: 0;
@@ -7649,22 +7963,96 @@ def studio_html() -> str:
       font-size: 12px;
       line-height: 1.6;
     }}
-    .script-preview-pane {{
-      min-height: 720px;
-    }}
     .video-verify-pane {{
       position: sticky;
-      top: 18px;
+      top: 14px;
+    }}
+    .assistant-sidebar {{
+      min-width: 0;
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 80;
+      width: 232px;
+      height: 100vh;
+      padding: 0;
+      overflow: hidden;
+      border-radius: 0;
+      border-width: 0 0 0 1px;
+      border-color: rgba(255,130,0,.18);
+      background:
+        radial-gradient(circle at 10% 4%, rgba(255,130,0,.16), rgba(255,130,0,0) 30%),
+        rgba(255,255,255,.94);
+      box-shadow: -18px 0 42px rgba(249,115,0,.14);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      display: flex;
+      flex-direction: column;
+    }}
+    .assistant-video-block {{
+      padding: 10px 10px 0;
+      flex: 0 0 auto;
+    }}
+    .assistant-video-block h4 {{
+      margin: 0 0 8px;
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.35;
+    }}
+    .assistant-video-block .workbench-pane-note {{
+      display: none;
+    }}
+    .assistant-video-block .source-video-frame {{
+      width: min(100%, 168px);
+      max-height: 260px;
+    }}
+    .assistant-video-block .source-video-empty {{
+      min-height: 82px;
+      padding: 10px;
+      font-size: 11px;
+      line-height: 1.55;
+    }}
+    .assistant-video-block .source-video-status {{
+      display: none;
+    }}
+    .assistant-video-block .video-timeline {{
+      display: none;
+    }}
+    .assistant-sidebar .review-shell {{
+      flex: 1 1 auto;
+      min-height: 0;
+      height: auto;
+    }}
+    .video-verify-layout {{
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+      align-items: start;
     }}
     .source-video-frame {{
       width: 100%;
       aspect-ratio: 9 / 16;
-      max-height: 70vh;
+      max-height: 620px;
       border-radius: 16px;
       background: #111;
       display: block;
       object-fit: contain;
       border: 1px solid rgba(255,130,0,.12);
+      margin: 0 auto;
+    }}
+    .source-video-empty {{
+      min-height: 360px;
+      border-radius: 16px;
+      border: 1px dashed rgba(255,130,0,.28);
+      background: rgba(255,244,232,.72);
+      color: #FF8200;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 18px;
+      line-height: 1.65;
+      font-weight: 700;
     }}
     .source-video-status {{
       margin-top: 10px;
@@ -7676,11 +8064,11 @@ def studio_html() -> str:
       line-height: 1.55;
     }}
     .video-timeline {{
-      margin-top: 12px;
+      margin-top: 0;
       display: flex;
       flex-direction: column;
       gap: 8px;
-      max-height: 320px;
+      max-height: 420px;
       overflow: auto;
       padding-right: 2px;
     }}
@@ -7707,46 +8095,81 @@ def studio_html() -> str:
     }}
     .ops-pane {{
       display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }}
-    .ops-section {{
-      border: 1px solid rgba(255,130,0,.14);
-      border-radius: 16px;
-      background: rgba(255,248,235,.62);
-      padding: 14px;
+      align-items: stretch;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 10px;
     }}
     .ops-section.final-action {{
-      background: rgba(255,255,255,.86);
-      border-color: rgba(255,130,0,.24);
+      flex: 1 1 360px;
+    }}
+    .ops-section {{
+      flex: 1 1 220px;
+      border: 0;
+      border-radius: 14px;
+      background: transparent;
+      padding: 0;
+    }}
+    .ops-section.final-action {{
+      background: transparent;
     }}
     .ops-section-title {{
-      margin: 0 0 8px;
+      margin: 0 0 6px;
       color: var(--ink);
       font-size: 14px;
       font-weight: 900;
     }}
+    .ops-pane .link-row {{
+      margin: 0;
+      gap: 8px;
+    }}
+    .ops-pane .action-link {{
+      min-height: 38px;
+      padding: 9px 14px;
+    }}
+    .ops-pane .library-confirm-card {{
+      min-height: 100%;
+      margin: 0;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.88);
+    }}
+    .ops-pane .library-confirm-title {{
+      font-size: 15px;
+    }}
+    .ops-pane .library-confirm-note {{
+      font-size: 12px;
+      line-height: 1.5;
+    }}
     .review-chat-log {{
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      margin-bottom: 10px;
+      gap: 6px;
+      margin-bottom: 6px;
+      flex: 1 1 auto;
+      min-height: 132px;
+      max-height: none;
+      overflow: auto;
+      padding-right: 2px;
     }}
     .review-message {{
-      border-radius: 14px;
-      padding: 10px 12px;
-      font-size: 12px;
-      line-height: 1.6;
+      border-radius: 12px;
+      padding: 8px 10px;
+      font-size: 11px;
+      line-height: 1.45;
+      max-width: 100%;
     }}
     .review-message.koko {{
       background: rgba(255,255,255,.88);
       color: var(--muted);
       border: 1px solid rgba(255,130,0,.10);
+      align-self: flex-start;
     }}
     .review-message.user {{
       background: rgba(255,130,0,.12);
       color: #FF8200;
       border: 1px solid rgba(255,130,0,.14);
+      align-self: flex-end;
     }}
     .link-row {{
       display: flex;
@@ -7984,10 +8407,142 @@ def studio_html() -> str:
       resize: vertical;
     }}
     .editor-draft-textarea {{
-      min-height: 620px;
+      min-height: 760px;
       font-family: "SFMono-Regular", Menlo, "Noto Sans SC", monospace;
       line-height: 1.75;
       white-space: pre-wrap;
+    }}
+    .structured-editor {{
+      gap: 16px;
+      background: #f6f7fb;
+      border-color: rgba(229,231,235,.95);
+    }}
+    .structured-editor-section {{
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 2px 10px rgba(15,23,42,.04);
+    }}
+    .structured-editor-section h5 {{
+      margin: 0 0 12px;
+      color: #111827;
+      font-size: 20px;
+      line-height: 1.25;
+      font-weight: 900;
+    }}
+    .structured-editor-input,
+    .structured-editor-textarea {{
+      width: 100%;
+      border: 1px solid #dfe3ea;
+      border-radius: 12px;
+      background: #fff;
+      color: #111827;
+      padding: 12px 14px;
+      font-size: 16px;
+      line-height: 1.75;
+      outline: none;
+    }}
+    .structured-editor-input:focus,
+    .structured-editor-textarea:focus {{
+      border-color: rgba(255,130,0,.45);
+      box-shadow: 0 0 0 3px rgba(255,130,0,.10);
+    }}
+    .structured-title-input {{
+      font-size: 26px;
+      line-height: 1.25;
+      font-weight: 900;
+      letter-spacing: 0;
+    }}
+    .structured-editor-textarea {{
+      min-height: 118px;
+      resize: vertical;
+    }}
+    .structured-insight-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .structured-insight {{
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      background: #fbfdff;
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+    }}
+    .structured-insight-label {{
+      min-height: 42px;
+      font-weight: 900;
+    }}
+    .structured-table-wrap {{
+      overflow-x: auto;
+      border: 1px solid #d9f0fb;
+      border-radius: 14px;
+      background: #fff;
+    }}
+    .structured-script-table {{
+      width: 100%;
+      min-width: 980px;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }}
+    .structured-script-table th,
+    .structured-script-table td {{
+      border: 1px solid #e5e7eb;
+      vertical-align: top;
+      padding: 10px;
+    }}
+    .structured-script-table th {{
+      background: #d9f0fb;
+      color: #111827;
+      font-size: 14px;
+      font-weight: 900;
+      text-align: center;
+    }}
+    .structured-script-table th:nth-child(1),
+    .structured-script-table td:nth-child(1) {{
+      width: 12%;
+    }}
+    .structured-script-table th:nth-child(2),
+    .structured-script-table td:nth-child(2) {{
+      width: 24%;
+    }}
+    .structured-script-table th:nth-child(3),
+    .structured-script-table td:nth-child(3) {{
+      width: 34%;
+    }}
+    .structured-script-table th:nth-child(4),
+    .structured-script-table td:nth-child(4) {{
+      width: 30%;
+    }}
+    .structured-cell-input,
+    .structured-cell-textarea {{
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: #111827;
+      font-size: 15px;
+      line-height: 1.7;
+      outline: none;
+      resize: vertical;
+    }}
+    .structured-cell-input {{
+      min-height: 38px;
+      text-align: center;
+      font-weight: 800;
+      color: #FF8200;
+    }}
+    .structured-cell-textarea {{
+      min-height: 120px;
+    }}
+    .structured-editor-actions {{
+      position: sticky;
+      bottom: 0;
+      z-index: 3;
+      margin-top: 2px;
+      padding: 12px 0 0;
+      background: linear-gradient(180deg, rgba(246,247,251,0), #f6f7fb 34%);
     }}
     .editor-row-card {{
       border: 1px solid rgba(255,130,0,.12);
@@ -8014,14 +8569,41 @@ def studio_html() -> str:
       flex-shrink: 0;
     }}
     .review-shell {{
-      margin-bottom: 14px;
-      border: 1px solid rgba(255,130,0,.16);
-      border-radius: 16px;
-      background: rgba(255,248,235,.72);
-      padding: 14px;
+      height: 100%;
+      margin-bottom: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      padding: 10px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 8px;
+    }}
+    .koko-chat-head {{
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      color: var(--ink);
+    }}
+    .koko-chat-avatar {{
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      background: linear-gradient(135deg, var(--brand), var(--brand-deep));
+      color: #fff;
+      font-size: 12px;
+      font-weight: 900;
+    }}
+    .koko-chat-title {{
+      font-size: 14px;
+      font-weight: 900;
+      line-height: 1.35;
+    }}
+    .koko-chat-subtitle {{
+      display: none;
     }}
     .review-progress {{
       display: flex;
@@ -8094,9 +8676,10 @@ def studio_html() -> str:
     .review-mode-toggle {{
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
+      gap: 6px;
     }}
-    .review-mode-option {{
+    .review-mode-option,
+    .chat-mode-option {{
       min-height: 44px;
       border: 1px solid rgba(255,130,0,.18);
       border-radius: 999px;
@@ -8114,10 +8697,52 @@ def studio_html() -> str:
       opacity: 0;
       pointer-events: none;
     }}
-    .review-mode-option:has(input:checked) {{
+    .review-mode-option:has(input:checked),
+    .chat-mode-option.active {{
       background: rgba(255,130,0,.14);
       border-color: rgba(255,130,0,.34);
       box-shadow: inset 0 0 0 1px rgba(255,130,0,.12);
+    }}
+    .chat-mode-option[disabled] {{
+      opacity: .52;
+      cursor: not-allowed;
+    }}
+    .assistant-sidebar .chat-mode-option {{
+      min-height: 36px;
+      padding: 0 6px;
+      font-size: 12px;
+      line-height: 1.2;
+    }}
+    .assistant-sidebar .chat-mode-option[data-chat-mode-choice="recheck"] {{
+      grid-column: 1 / -1;
+    }}
+    .chat-mode-note {{
+      display: none;
+    }}
+    .chat-compose {{
+      margin-top: auto;
+      border-top: 1px solid rgba(255,130,0,.12);
+      padding-top: 8px;
+      background: linear-gradient(180deg, rgba(255,255,255,0), rgba(255,255,255,.82) 22%);
+    }}
+    .chat-compose .editor-textarea {{
+      min-height: 92px;
+      max-height: 180px;
+      color: var(--ink);
+      background: rgba(255,255,255,.96);
+      font-size: 12px;
+      padding: 10px;
+      border-radius: 12px;
+    }}
+    .assistant-sidebar .link-row {{
+      gap: 6px;
+      margin-bottom: 0;
+    }}
+    .assistant-sidebar .action-link {{
+      width: 100%;
+      min-height: 38px;
+      padding: 9px 10px;
+      font-size: 12px;
     }}
     .item-sections {{
       display: flex;
@@ -8345,6 +8970,9 @@ def studio_html() -> str:
       padding: 24px;
       min-width: 0;
     }}
+    .studio-shell:has(.assistant-sidebar) .studio-main {{
+      padding-right: 264px;
+    }}
     .studio-page-title {{
       margin: 0 0 6px;
       font-size: clamp(2.2rem, 5vw, 3.2rem);
@@ -8483,15 +9111,20 @@ def studio_html() -> str:
       .result-workbench {{
         grid-template-columns: 1fr;
       }}
+      .primary-review-strip {{
+        grid-template-columns: 1fr;
+      }}
       .video-verify-pane {{
         position: static;
       }}
-      .source-video-frame {{
-        aspect-ratio: 16 / 9;
-        max-height: none;
+      .video-verify-layout,
+      .ops-pane {{
+        grid-template-columns: 1fr;
       }}
-      .script-preview-pane {{
-        min-height: 0;
+      .source-video-frame {{
+        width: min(420px, 100%);
+        margin: 0 auto;
+        max-height: 720px;
       }}
       .hero-copy {{
         grid-template-columns: 1fr;
@@ -8504,6 +9137,17 @@ def studio_html() -> str:
       }}
     }}
     @media (max-width: 720px) {{
+      .studio-shell:has(.assistant-sidebar) .studio-main {{
+        padding-right: 16px;
+      }}
+      .assistant-sidebar {{
+        position: static;
+        width: auto;
+        height: auto;
+      }}
+      .assistant-sidebar .review-chat-log {{
+        max-height: 420px;
+      }}
       .studio-main {{
         padding: 16px;
       }}
@@ -9561,49 +10205,115 @@ def studio_html() -> str:
       `;
     }}
 
+    function buildPrimaryEditorMarkup(item) {{
+      if (item.status !== "completed" || !item.result_json) return "";
+      const script = item.result_json || {{}};
+      const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
+      const mechanismReason = (((script.mechanism || {{}}).reason) || "");
+      const renderInsightEditors = (items, kind) => {{
+        return normalizeInsightItems(items).map((point, idx) => `
+          <div class="structured-insight" data-insight-kind="${{kind}}" data-insight-index="${{idx}}">
+            <input class="structured-editor-input structured-insight-label" data-insight-field="label" value="${{escapeHtml(normalizedText(point.label || point.title || point.name, `要点${{idx + 1}}`))}}">
+            <textarea class="structured-editor-textarea" data-insight-field="text">${{escapeHtml(normalizedText(point.text || point.description || point.value))}}</textarea>
+          </div>
+        `).join("");
+      }};
+      const rows = normalizeRows(script);
+      const rowEditors = rows.map((row, idx) => `
+        <tr data-structured-row-index="${{idx}}" data-row-original-index="${{idx}}">
+          <td><input class="structured-cell-input" data-row-field="time" value="${{escapeHtml(normalizedText(row.time, ""))}}"></td>
+          <td><textarea class="structured-cell-textarea" data-row-field="visual_content">${{escapeHtml(normalizedText(row.visual_content, ""))}}</textarea></td>
+          <td><textarea class="structured-cell-textarea" data-row-field="action">${{escapeHtml(normalizedText(row.action, ""))}}</textarea></td>
+          <td><textarea class="structured-cell-textarea" data-row-field="dialogue_or_audio">${{escapeHtml(normalizedText(row.dialogue_or_audio, ""))}}</textarea></td>
+        </tr>
+      `).join("");
+      return `
+        <div class="editor-shell structured-editor" data-editor-item="${{item.id}}" data-editor-mode="structured" data-editor-lang="${{escapeHtml(item.display_language || "zh")}}" data-editor-rows="${{rowsJson}}">
+          <section class="structured-editor-section">
+            <h5>标题</h5>
+            <input class="structured-editor-input structured-title-input" data-edit-field="title" value="${{escapeHtml(normalizedText(script.title || item.title || "", "视频脚本"))}}">
+          </section>
+          <section class="structured-editor-section">
+            <h5>视频整体内容总结</h5>
+            <textarea class="structured-editor-textarea" data-edit-field="whole_video_summary">${{escapeHtml(normalizedText(script.whole_video_summary))}}</textarea>
+          </section>
+          <section class="structured-editor-section">
+            <h5>核心爆点</h5>
+            <div class="structured-insight-grid">${{renderInsightEditors(script.core_viral_points, "core")}}</div>
+          </section>
+          <section class="structured-editor-section">
+            <h5>可替换部分</h5>
+            <div class="structured-insight-grid">${{renderInsightEditors(script.replaceable_parts, "replaceable")}}</div>
+          </section>
+          <section class="structured-editor-section">
+            <h5>脚本表</h5>
+            <div class="structured-table-wrap">
+              <table class="structured-script-table">
+                <thead>
+                  <tr><th>时间</th><th>画面内容</th><th>动作</th><th>关键对白/旁白</th></tr>
+                </thead>
+                <tbody>${{rowEditors}}</tbody>
+              </table>
+            </div>
+          </section>
+          <input type="hidden" data-edit-field="mechanism_reason" value="${{escapeHtml(normalizedText(mechanismReason))}}">
+          <div class="link-row structured-editor-actions">
+            <button class="action-link primary" type="button" data-save-edits="${{item.id}}">保存当前编辑</button>
+            <button class="action-link" type="button" data-save-library="${{item.id}}">保存并确认入库</button>
+          </div>
+        </div>
+      `;
+    }}
+
     function buildReviewMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const status = normalizedText(item.review_status || "", "");
       const stage = normalizedText(item.review_stage || "", "");
       const message = normalizedText(item.review_message || "", "");
       const feedback = status === "running" || status === "failed" ? normalizedText(item.review_feedback || "", "") : "";
-      const previousReviewMode = normalizedText(item.review_mode || "partial", "partial");
-      const reviewMode = status === "running" ? previousReviewMode : "partial";
       const editedBadge = item.edited ? `<span class="batch-chip">Manual edits exist</span>` : "";
       const reviewedBadge = item.reviewed ? `<span class="batch-chip">Reviewed version active</span>` : "";
       const reviewState = status ? `<div class="review-note">${{escapeHtml(status)}}${{message ? ` · ${{escapeHtml(message)}}` : ""}}</div>` : "";
       const reviewProgress = buildReviewProgressMarkup(stage, status, message);
+      const messages = Array.isArray(item.chat_messages) ? item.chat_messages : [];
+      const history = messages.length
+        ? messages.slice(-12).map((entry) => {{
+            const role = entry.role === "user" ? "user" : "koko";
+            const mode = "";
+            return `<div class="review-message ${{role}}">${{escapeHtml(entry.content || "")}}${{mode}}</div>`;
+          }}).join("")
+        : `<div class="review-message koko">告诉我哪里要改。</div>`;
+      const recheckDisabled = item.source_video_available ? "" : "disabled";
+      const recheckTitle = item.source_video_available ? "重新看视频后改稿" : "当前 source.mp4 不可用，不能重新看视频";
       return `
-        <details class="editor-disclosure" open>
-          <summary class="editor-summary">
-            <span class="editor-summary-title">复盘重做</span>
-          </summary>
-          <div class="review-shell" data-review-item="${{item.id}}">
-            <div class="review-chat-log">
-              <div class="review-message koko">直接用自然语言告诉 Koko 哪里理解错了。你可以说“漏掉煤气没关”这种小问题，也可以说“整个故事主轴错了”。</div>
-              ${{item.review_feedback ? `<div class="review-message user">${{escapeHtml(item.review_feedback)}}</div>` : ""}}
-              ${{item.review_message ? `<div class="review-message koko">${{escapeHtml(item.review_message)}}</div>` : ""}}
-            </div>
-            <div class="review-mode-toggle" role="radiogroup" aria-label="复盘模式">
-              <label class="review-mode-option">
-                <input type="radio" name="review-mode-${{item.id}}" value="partial" ${{reviewMode !== "full" ? "checked" : ""}} ${{status === "running" ? "disabled" : ""}}>
-                <span>部分错误</span>
-              </label>
-              <label class="review-mode-option">
-                <input type="radio" name="review-mode-${{item.id}}" value="full" ${{reviewMode === "full" ? "checked" : ""}} ${{status === "running" ? "disabled" : ""}}>
-                <span>完全错误</span>
-              </label>
-            </div>
-            ${{editedBadge.replace("Manual edits exist", "已有人工修改")}}
-            ${{reviewedBadge.replace("Reviewed version active", "当前是复盘版本")}}
-            ${{reviewProgress}}
-            ${{reviewState}}
-            <textarea class="editor-textarea" data-review-feedback placeholder="像聊天一样说：这里不是煤气没关，是锅烧糊了；或者：整个主轴错了，应该是丈夫撒谎被拆穿。">${{escapeHtml(feedback)}}</textarea>
-            <div class="link-row">
-              <button class="action-link primary" type="button" data-run-review="${{item.id}}">${{status === "running" ? "复盘中..." : "发送给 Koko 修改"}}</button>
+        <div class="review-shell" data-review-item="${{item.id}}" data-chat-mode="minor">
+          <div class="koko-chat-head">
+            <div class="koko-chat-avatar">K</div>
+            <div>
+              <div class="koko-chat-title">Koko 修稿助手</div>
             </div>
           </div>
-        </details>
+          <div class="review-chat-log" data-chat-log="${{item.id}}">
+            ${{history}}
+            ${{item.review_feedback ? `<div class="review-message user">${{escapeHtml(item.review_feedback)}}</div>` : ""}}
+            ${{item.review_message ? `<div class="review-message koko">${{escapeHtml(item.review_message)}}</div>` : ""}}
+          </div>
+          <div class="review-mode-toggle" aria-label="Koko 修稿模式">
+            <button class="chat-mode-option active" type="button" data-chat-mode-choice="minor">小修</button>
+            <button class="chat-mode-option" type="button" data-chat-mode-choice="major">大改</button>
+            <button class="chat-mode-option" type="button" data-chat-mode-choice="recheck" title="${{escapeHtml(recheckTitle)}}" ${{recheckDisabled}}>重新看视频</button>
+          </div>
+          ${{editedBadge.replace("Manual edits exist", "已有人工修改")}}
+          ${{reviewedBadge.replace("Reviewed version active", "当前是复盘版本")}}
+          ${{reviewProgress}}
+          ${{reviewState}}
+          <div class="chat-compose">
+            <textarea class="editor-textarea" data-review-feedback data-chat-message placeholder="直接说哪里要改...">${{escapeHtml(feedback)}}</textarea>
+            <div class="link-row">
+              <button class="action-link primary" type="button" data-chat-edit="${{item.id}}">${{status === "running" ? "处理中..." : "发送给 Koko 修改"}}</button>
+            </div>
+          </div>
+        </div>
       `;
     }}
 
@@ -9660,6 +10370,33 @@ def studio_html() -> str:
     function collectItemEdits(itemId) {{
       const root = document.querySelector(`[data-editor-item="${{itemId}}"]`);
       if (!root) return null;
+      if (root.getAttribute("data-editor-mode") === "structured") {{
+        const collectInsights = (kind) => Array.from(root.querySelectorAll(`[data-insight-kind="${{kind}}"]`)).map((card) => {{
+          return {{
+            label: card.querySelector('[data-insight-field="label"]')?.value || "",
+            text: card.querySelector('[data-insight-field="text"]')?.value || "",
+          }};
+        }});
+        const rows = Array.from(root.querySelectorAll("[data-structured-row-index]")).map((rowCard, idx) => {{
+          return {{
+            original_index: Number(rowCard.getAttribute("data-row-original-index") || idx),
+            time: rowCard.querySelector('[data-row-field="time"]')?.value || "",
+            visual_content: rowCard.querySelector('[data-row-field="visual_content"]')?.value || "",
+            action: rowCard.querySelector('[data-row-field="action"]')?.value || "",
+            dialogue_or_audio: rowCard.querySelector('[data-row-field="dialogue_or_audio"]')?.value || "",
+            integrated_summary: "",
+          }};
+        }});
+        return {{
+          title: root.querySelector('[data-edit-field="title"]')?.value || "",
+          whole_video_summary: root.querySelector('[data-edit-field="whole_video_summary"]')?.value || "",
+          mechanism_reason: root.querySelector('[data-edit-field="mechanism_reason"]')?.value || "",
+          core_viral_points: collectInsights("core"),
+          replaceable_parts: collectInsights("replaceable"),
+          rows,
+          target_language: root.getAttribute("data-editor-lang") || "zh",
+        }};
+      }}
       const draft = root.querySelector("[data-editor-draft]")?.value || "";
       const sections = splitDraftSections(draft);
       let originalRows = [];
@@ -9689,7 +10426,38 @@ def studio_html() -> str:
     function collectReviewMode(itemId) {{
       const root = document.querySelector(`[data-review-item="${{itemId}}"]`);
       if (!root) return "partial";
+      const chatMode = root.getAttribute("data-chat-mode") || "";
+      if (chatMode === "recheck") return "full";
+      if (chatMode === "major") return "partial";
       return root.querySelector('input[name="review-mode-' + itemId + '"]:checked')?.value || "partial";
+    }}
+
+    function collectChatMode(itemId) {{
+      const root = document.querySelector(`[data-review-item="${{itemId}}"]`);
+      return root?.getAttribute("data-chat-mode") || "minor";
+    }}
+
+    function appendChatBubble(itemId, role, text, pending = false) {{
+      const log = document.querySelector(`[data-chat-log="${{itemId}}"]`);
+      if (!log) return null;
+      const firstDefault = log.querySelector(".review-message.koko");
+      if (firstDefault && firstDefault.textContent.trim() === "告诉我哪里要改。") {{
+        firstDefault.remove();
+      }}
+      const bubble = document.createElement("div");
+      bubble.className = `review-message ${{role === "user" ? "user" : "koko"}}`;
+      if (pending) bubble.setAttribute("data-chat-pending", "1");
+      bubble.textContent = text;
+      log.appendChild(bubble);
+      log.scrollTop = log.scrollHeight;
+      return bubble;
+    }}
+
+    function updatePendingChatBubble(itemId, text) {{
+      const bubble = document.querySelector(`[data-chat-log="${{itemId}}"] [data-chat-pending="1"]`);
+      if (!bubble) return;
+      bubble.textContent = text;
+      bubble.removeAttribute("data-chat-pending");
     }}
 
     async function persistItemEdits(itemId, mode, button) {{
@@ -9834,9 +10602,57 @@ def studio_html() -> str:
       }}
     }}
 
+    async function runKokoChatEdit(itemId, button) {{
+      const message = collectReviewFeedback(itemId).trim();
+      const mode = collectChatMode(itemId);
+      if (!message) {{
+        showToast("先说一句", "告诉 Koko 你想怎么改脚本。");
+        return;
+      }}
+      const root = document.querySelector(`[data-review-item="${{itemId}}"]`);
+      const input = root?.querySelector("[data-chat-message]");
+      appendChatBubble(itemId, "user", message);
+      appendChatBubble(itemId, "koko", mode === "recheck" ? "我去重新看视频..." : "我在改稿...", true);
+      if (input) input.value = "";
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = mode === "recheck" ? "复盘中..." : "修稿中...";
+      try {{
+        const response = await fetch(`/api/items/${{itemId}}/chat-edit`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ message, mode }}),
+        }});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Koko edit failed");
+        if (data.job_id) {{
+          activeJobId = data.job_id;
+          activeReviewItemId = itemId;
+          reviewTracker[itemId] = "running";
+          updatePendingChatBubble(itemId, "已经进入复盘流程。");
+          pollJob(data.job_id);
+          return;
+        }}
+        updatePendingChatBubble(itemId, data.message || "已修改，正在刷新脚本。");
+        showToast("Koko 已修改", data.message || "脚本已经刷新。");
+        if (activeJobId) {{
+          pollJob(activeJobId);
+        }} else {{
+          window.location.reload();
+        }}
+      }} catch (error) {{
+        const errorText = String(error.message || error);
+        updatePendingChatBubble(itemId, "这次没改成功：" + errorText);
+        showToast("Koko 修改失败", errorText);
+        if (input) input.value = message;
+        button.disabled = false;
+        button.textContent = original;
+      }}
+    }}
+
     function renderItemCard(item, idx, open = false) {{
       const title = escapeHtml(item.title || `视频 ${{idx + 1}}`);
-      const editor = buildEditorMarkup(item);
+      const primaryEditor = buildPrimaryEditorMarkup(item);
       const review = buildReviewMarkup(item);
       const libraryConfirm = buildLibraryConfirmMarkup(item);
       const toggleButton = item.display_language === "pt"
@@ -9846,16 +10662,28 @@ def studio_html() -> str:
         (item.zh_docx_url || item.pt_docx_url) ? `<button class="action-link" type="button" data-open-export-modal="${{escapeHtml(item.zh_docx_url || "")}}" data-open-export-modal-pt="${{escapeHtml(item.pt_docx_url || "")}}">导出脚本</button>` : "",
         toggleButton,
       ].join("");
-      const previewUrl = versionedResultUrl(item.html_url, item);
-      const previewSlot = previewUrl
-        ? `<div class="item-preview-slot" data-preview-item-id="${{item.id}}" data-preview-url="${{escapeHtml(previewUrl)}}"></div>`
-        : "";
-      const sourceVideoUrl = versionedResultUrl(`/results/${{item.id}}/source.mp4`, item);
+      const sourceVideoUrl = versionedResultUrl(item.source_video_url || "", item);
+      const sourceVideoInner = item.source_video_available && sourceVideoUrl
+        ? `
+            <video class="source-video-frame" data-source-video="${{item.id}}" controls playsinline preload="metadata" src="${{escapeHtml(sourceVideoUrl)}}"></video>
+            <div class="source-video-status" data-source-video-status="${{item.id}}">原视频用于对照脚本。点击下方时间线，或脚本表时间，可跳到对应片段。</div>
+          `
+        : `
+            <div class="source-video-empty">
+              <div>
+                原视频不可用
+              </div>
+            </div>
+            <div class="source-video-status" data-source-video-status="${{item.id}}">${{item.video_url ? `<a class="inline-link" href="${{escapeHtml(item.video_url)}}" target="_blank" rel="noreferrer">打开原链接</a>` : "暂无链接"}}</div>
+          `;
       const sourceVideo = item.status === "completed"
         ? `
-          <video class="source-video-frame" data-source-video="${{item.id}}" controls playsinline preload="metadata" src="${{escapeHtml(sourceVideoUrl)}}"></video>
-          <div class="source-video-status" data-source-video-status="${{item.id}}">原视频用于对照脚本。点击下方时间线，或左侧脚本表时间，可跳到对应片段。</div>
-          ${{buildVideoTimelineMarkup(item)}}
+          <div class="video-verify-layout">
+            <div>
+              ${{sourceVideoInner}}
+            </div>
+            ${{item.source_video_available ? buildVideoTimelineMarkup(item) : ""}}
+          </div>
         `
         : "";
       const error = item.error ? `<code>${{escapeHtml(item.error)}}</code>` : "";
@@ -9868,32 +10696,30 @@ def studio_html() -> str:
           <div class="item-body">
             ${{item.status === "completed" ? `
               <div class="result-workbench">
-                <section class="workbench-pane script-preview-pane">
-                  <h4>脚本分析</h4>
-                  <div class="workbench-pane-note">这里直接展示拆解出来的 HTML。脚本表时间会尽量标记成可点击；中间视频下方也会生成稳定的时间线按钮。</div>
-                  ${{previewSlot || `<div class="review-note">脚本预览还没有生成。</div>`}}
-                </section>
-                <section class="workbench-pane video-verify-pane">
-                  <h4>原视频验证</h4>
-                  <div class="workbench-pane-note">用原视频校验 Koko 的理解是否准确。源视频确认入库后会清理，未入库会保留约 2 天。</div>
-                  ${{sourceVideo}}
-                </section>
-                <aside class="workbench-pane ops-pane">
-                  <div class="ops-section">
-                    <div class="ops-section-title">复盘修改</div>
-                    ${{review}}
+                <div class="result-main">
+                  <div class="primary-review-strip" aria-label="编辑脚本和参考视频">
+                    <section class="workbench-pane editable-script-pane">
+                      <h4>可编辑脚本</h4>
+                      <div class="workbench-pane-note">这里是当前脚本 JSON 的整稿编辑版，格式贴近最终 HTML。先在这里直接改，再保存重建脚本。</div>
+                      ${{primaryEditor}}
+                    </section>
                   </div>
-                  <div class="ops-section">
-                    <div class="ops-section-title">整稿编辑</div>
-                    ${{editor}}
-                  </div>
-                  <div class="ops-section">
-                    <div class="ops-section-title">后续操作</div>
-                    <div class="link-row">${{links}}</div>
-                  </div>
-                  <div class="ops-section final-action">
-                    ${{libraryConfirm}}
-                  </div>
+                  <aside class="workbench-pane ops-pane">
+                    <div class="ops-section">
+                      <div class="ops-section-title">后续操作</div>
+                      <div class="link-row">${{links}}</div>
+                    </div>
+                    <div class="ops-section final-action">
+                      ${{libraryConfirm}}
+                    </div>
+                  </aside>
+                </div>
+                <aside class="workbench-pane assistant-sidebar" aria-label="Koko 修稿助手">
+                  <section class="assistant-video-block">
+                    <h4>参考视频</h4>
+                    ${{sourceVideo}}
+                  </section>
+                  ${{review}}
                 </aside>
               </div>
             ` : `
@@ -10694,6 +11520,21 @@ def studio_html() -> str:
       const saveBtn = event.target.closest("[data-save-edits]");
       if (saveBtn) {{
         persistItemEdits(saveBtn.getAttribute("data-save-edits"), "save", saveBtn);
+        return;
+      }}
+      const chatModeBtn = event.target.closest("[data-chat-mode-choice]");
+      if (chatModeBtn) {{
+        const root = chatModeBtn.closest("[data-review-item]");
+        if (root) {{
+          root.setAttribute("data-chat-mode", chatModeBtn.getAttribute("data-chat-mode-choice") || "minor");
+          root.querySelectorAll("[data-chat-mode-choice]").forEach((button) => button.classList.remove("active"));
+          chatModeBtn.classList.add("active");
+        }}
+        return;
+      }}
+      const chatEditBtn = event.target.closest("[data-chat-edit]");
+      if (chatEditBtn) {{
+        runKokoChatEdit(chatEditBtn.getAttribute("data-chat-edit"), chatEditBtn);
         return;
       }}
       const reviewBtn = event.target.closest("[data-run-review]");
@@ -12550,6 +13391,28 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": result}, status=400)
                 return
             self.send_json({"ok": True, "job_id": result, "item_id": item_id}, status=202)
+            return
+        chat_edit_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/chat-edit", parsed.path)
+        if chat_edit_match:
+            item_id = chat_edit_match.group(1)
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            mode = str(payload.get("mode") or payload.get("edit_mode") or "minor").strip().lower()
+            if mode in {"recheck", "full", "video"}:
+                ok, result = start_review_job(item_id, payload.get("message") or "", REVIEW_MODE_FULL)
+                if not ok:
+                    self.send_json({"error": result}, status=400)
+                    return
+                self.send_json({"ok": True, "job_id": result, "item_id": item_id, "mode": "recheck"}, status=202)
+                return
+            ok, result = run_chat_script_edit(item_id, payload.get("message") or "", mode)
+            if not ok:
+                self.send_json({"error": result}, status=400)
+                return
+            self.send_json({"ok": True, **result})
             return
         if parsed.path == "/api/library/batch-delete":
             try:
