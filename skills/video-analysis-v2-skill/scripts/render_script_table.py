@@ -113,6 +113,13 @@ def render(data: dict, base_dir: Path, locale: str = "zh") -> str:
         f'<div class="card"><h2>{esc(copy["summary_title"])}</h2>'
         f'<div class="summary">{esc(data.get("whole_video_summary", ""))}</div></div>'
     )
+    storyboard_cover = str(data.get("storyboard_cover_url") or "").strip()
+    storyboard_card = (
+        f'<div class="card"><h2>{"分解示意图" if locale == "zh" else "Capa em storyboard"}</h2>'
+        f'<div class="video-frame-wrap"><img class="video-frame" src="{esc(storyboard_cover)}" alt=""></div></div>'
+        if storyboard_cover
+        else ""
+    )
     table_card = (
         f'<div class="card"><h2>{esc(copy["table_title"])}</h2><table class="script-table"><thead><tr>'
         f"<th>{esc(copy['time_col'])}</th><th>{esc(copy['visual_col'])}</th><th>{esc(copy['action_col'])}</th><th>{esc(copy['dialogue_col'])}</th>"
@@ -124,7 +131,7 @@ def render(data: dict, base_dir: Path, locale: str = "zh") -> str:
         template.replace("{{ title }}", esc(title))
         .replace("{{ title_card }}", title_card)
         .replace("{{ summary_card }}", summary_card)
-        .replace("{{ video_card }}", "")
+        .replace("{{ video_card }}", storyboard_card)
         .replace("{{ core_viral_points_card }}", "")
         .replace("{{ replaceable_parts_card }}", render_insight_card(copy["replaceable_title"], data.get("replaceable_parts"), locale))
         .replace("{{ table_card }}", table_card)

@@ -683,6 +683,8 @@ def is_retryable_model_error(text: str) -> bool:
             "TIMED OUT",
             "REMOTE END CLOSED CONNECTION WITHOUT RESPONSE",
             "EOF OCCURRED",
+            "INCOMPLETEREAD",
+            "READ OPERATION TIMED OUT",
             "CONNECTION RESET",
             "BROKEN PIPE",
             "NO PARSEABLE JSON OBJECT FOUND",

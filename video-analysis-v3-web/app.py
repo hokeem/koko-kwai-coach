@@ -144,8 +144,16 @@ MODEL_CANDIDATES = parse_model_candidates(
     ",".join(STABLE_VIDEO_MODELS),
     os.environ.get("VIDEO_ANALYSIS_MODEL", ""),
 )
+IMAGE_MODEL_CANDIDATES = parse_model_candidates(
+    "gemini-3.1-flash-image,gemini-2.5-flash-image",
+    os.environ.get("VIDEO_ANALYSIS_IMAGE_MODEL", ""),
+)
 BEIJING_TZ = timezone(timedelta(hours=8))
 SOURCE_VIDEO_NAME = "source.mp4"
+STORYBOARD_PROMPT_FILE = "storyboard_prompt.txt"
+STORYBOARD_METADATA_FILE = "storyboard_cover.json"
+STORYBOARD_PREVIEW_BASENAME = "storyboard_preview"
+STORYBOARD_COVER_BASENAME = "storyboard_cover"
 RAW_ARTIFACT_NAMES = {
     "primary_analysis_raw_gemini.json",
     "v2_local_raw_gemini.json",
@@ -3195,10 +3203,42 @@ def append_library_entry(entry: dict[str, Any]) -> bool:
         return save_library_entries(entries[:500])
 
 
+def load_storyboard_state(item_id: str) -> dict[str, Any]:
+    if not item_id:
+        return {}
+    output_dir = RESULTS_ROOT / item_id
+    state = read_json(output_dir / STORYBOARD_METADATA_FILE) or {}
+    preview_name = str(state.get("preview_name") or "").strip()
+    cover_name = str(state.get("cover_name") or "").strip()
+    prompt_text = str(state.get("prompt") or "").strip()
+    preview_url = f"/results/{item_id}/{preview_name}" if preview_name and (output_dir / preview_name).exists() else ""
+    cover_url = f"/results/{item_id}/{cover_name}" if cover_name and (output_dir / cover_name).exists() else ""
+    return {
+        "storyboard_prompt": prompt_text,
+        "storyboard_preview_url": preview_url,
+        "storyboard_cover_url": cover_url,
+        "storyboard_updated_at": state.get("updated_at") or "",
+    }
+
+
+def save_storyboard_state(item_id: str, **changes: Any) -> dict[str, Any]:
+    output_dir = RESULTS_ROOT / item_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / STORYBOARD_METADATA_FILE
+    state = read_json(path) or {}
+    state.update(changes)
+    state["updated_at"] = now_iso()
+    write_json_atomic(path, state)
+    return load_storyboard_state(item_id)
+
+
 def library_preview_image_url(entry_id: str, script_json: dict[str, Any] | None = None, output_dir: Path | None = None) -> str:
     if not entry_id:
         return ""
     output_dir = output_dir or (RESULTS_ROOT / entry_id)
+    storyboard_state = load_storyboard_state(entry_id)
+    if storyboard_state.get("storyboard_cover_url"):
+        return str(storyboard_state.get("storyboard_cover_url"))
     script_json = script_json or read_json(output_dir / "script_table.json") or read_json(output_dir / "analysis_result.json") or {}
     for row in script_json.get("rows") or []:
         for key in ("start_frame", "end_frame"):
@@ -4980,6 +5020,7 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
     item_id = str(item.get("id") or "").strip()
     source_video_path = RESULTS_ROOT / item_id / SOURCE_VIDEO_NAME if item_id else Path()
     source_video_available = bool(item_id and source_video_path.exists())
+    storyboard_state = load_storyboard_state(item_id) if item_id else {}
     return {
         "id": item.get("id"),
         "index": item.get("index"),
@@ -5020,6 +5061,10 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "in_library": bool(item.get("saved_to_library_at")) or library_entry_exists(str(item.get("id") or "")),
         "source_video_available": source_video_available,
         "source_video_url": f"/results/{item_id}/{SOURCE_VIDEO_NAME}" if source_video_available else "",
+        "storyboard_prompt": item.get("storyboard_prompt") or storyboard_state.get("storyboard_prompt") or "",
+        "storyboard_preview_url": item.get("storyboard_preview_url") or storyboard_state.get("storyboard_preview_url") or "",
+        "storyboard_cover_url": item.get("storyboard_cover_url") or storyboard_state.get("storyboard_cover_url") or "",
+        "storyboard_updated_at": item.get("storyboard_updated_at") or storyboard_state.get("storyboard_updated_at") or "",
     }
 
 
@@ -5730,6 +5775,111 @@ def run_chat_text_json_prompt(payload: dict[str, Any], prompt: str) -> tuple[dic
     raise RuntimeError(f"chat script edit failed across models {tried}: {last_error}") from last_error
 
 
+STORYBOARD_IMAGE_PROMPT_PREFIX = """你是 Koko 的分镜示意图生成助手。
+
+请把输入的短视频脚本整理成一张“分镜稿 / storyboard sheet”风格的示意图，要求：
+- 黑白灰铅笔草图风格，像手绘分镜稿，不要彩色，不要照片质感
+- 白色纸面背景，深灰色线稿，构图干净
+- 一张图里排成 6 格到 8 格矩形分镜，像影视前期的分镜板
+- 每格表现脚本里的一个关键动作节点，人物姿态和场景关系要清楚
+- 整体重点是“拍摄准备感”，让人一眼看懂场景、人物、动作
+- 不要做成海报，不要 UI，不要写大段文字，不要水印，不要品牌字
+- 允许极少量非常轻的镜头编号感，但不要出现密集文字
+- 画面以连续叙事为主，保留夸张表情和关键动作
+"""
+
+
+def guess_extension_from_mime(mime_type: str) -> str:
+    value = str(mime_type or "").strip().lower()
+    if value == "image/jpeg":
+        return ".jpg"
+    if value == "image/webp":
+        return ".webp"
+    return ".png"
+
+
+def build_storyboard_prompt(script_json: dict[str, Any], extra_instruction: str = "") -> str:
+    rows = choose_script_rows(script_json)[:8]
+    beats = []
+    for idx, row in enumerate(rows, 1):
+        beats.append(
+            f"{idx}. 时间={fill_text(row.get('time'), '')}；场景={fill_text(row.get('visual_content'))}；动作={fill_text(row.get('action'))}"
+        )
+    title = fill_text(script_json.get("title"), "视频脚本")
+    summary = fill_text(script_json.get("whole_video_summary"), "无")
+    prompt = [
+        STORYBOARD_IMAGE_PROMPT_PREFIX.strip(),
+        "",
+        f"标题：{title}",
+        f"整体梗概：{summary}",
+        "关键分镜：",
+        "\n".join(beats) if beats else "1. 按标题和梗概生成 6 格连续分镜。",
+        "",
+        "请输出一张适合作为脚本封面的分镜示意图。",
+    ]
+    extra = str(extra_instruction or "").strip()
+    if extra:
+        prompt.extend(["", f"额外修改要求：{extra}"])
+    return "\n".join(prompt).strip()
+
+
+def extract_inline_image_from_gemini_response(payload: dict[str, Any]) -> tuple[bytes, str]:
+    for candidate in payload.get("candidates") or []:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            inline = part.get("inlineData") or part.get("inline_data") or {}
+            data = inline.get("data")
+            if not data:
+                continue
+            mime_type = str(inline.get("mimeType") or inline.get("mime_type") or "image/png")
+            return base64.b64decode(data), mime_type
+    raise RuntimeError("Gemini image response did not contain inline image data.")
+
+
+def run_single_gemini_image_prompt(prompt: str, model: str) -> tuple[bytes, str, dict[str, Any]]:
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+    }
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
+    data = json.dumps(body).encode("utf-8")
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json", "x-goog-api-key": GOOGLE_API_KEY},
+            )
+            with urllib.request.urlopen(req, timeout=CHAT_EDIT_HTTP_TIMEOUT_SEC) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+                image_bytes, mime_type = extract_inline_image_from_gemini_response(raw)
+                return image_bytes, mime_type, raw
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            last_error = RuntimeError(f"Gemini image HTTP {exc.code}: {detail}")
+            if exc.code in {400, 404}:
+                break
+        except Exception as exc:
+            last_error = exc
+        if attempt < 2:
+            time.sleep(min(2 * attempt, 6))
+    raise RuntimeError(str(last_error or "Gemini image request failed."))
+
+
+def run_gemini_image_prompt(prompt: str) -> tuple[bytes, str, dict[str, Any], str]:
+    last_error: Exception | None = None
+    tried: list[str] = []
+    for model in IMAGE_MODEL_CANDIDATES:
+        tried.append(model)
+        try:
+            image_bytes, mime_type, raw = run_single_gemini_image_prompt(prompt, model)
+            return image_bytes, mime_type, raw, model
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"storyboard image generation failed across models {tried}: {last_error}") from last_error
+
+
 def run_chat_script_edit(item_id: str, message: str, edit_mode: str = "minor") -> tuple[bool, str | dict[str, Any]]:
     context = find_item_context(item_id)
     if not context:
@@ -5807,6 +5957,139 @@ def run_chat_script_edit(item_id: str, message: str, edit_mode: str = "minor") -
         error_message = friendly_error(str(exc))
         append_item_chat_message(parent_job_id, item_index, "assistant", f"这次没改成功：{error_message}", mode=mode, error=True)
         return False, error_message
+
+
+def generate_storyboard_preview(item_id: str, prompt_override: str = "") -> dict[str, Any]:
+    context = find_item_context(item_id)
+    if not context:
+        raise RuntimeError("Script item not found.")
+    parent_job_id, item_index, item = context
+    if item.get("status") != "completed" or not item.get("result_json"):
+        raise RuntimeError("Only completed scripts can generate storyboard covers.")
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("Missing GOOGLE_API_KEY for storyboard generation.")
+    output_dir = RESULTS_ROOT / item_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    script_json = item.get("zh_result_json") or item.get("result_json") or {}
+    prompt = str(prompt_override or "").strip() or build_storyboard_prompt(script_json)
+    image_bytes, mime_type, raw, model = run_gemini_image_prompt(prompt)
+    preview_name = STORYBOARD_PREVIEW_BASENAME + guess_extension_from_mime(mime_type)
+    preview_path = output_dir / preview_name
+    preview_path.write_bytes(image_bytes)
+    (output_dir / "storyboard_image_raw_gemini.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / STORYBOARD_PROMPT_FILE).write_text(prompt, encoding="utf-8")
+    state = save_storyboard_state(item_id, prompt=prompt, preview_name=preview_name, model=model)
+    update_job_item(
+        parent_job_id,
+        item_index,
+        storyboard_prompt=state.get("storyboard_prompt") or prompt,
+        storyboard_preview_url=state.get("storyboard_preview_url") or f"/results/{item_id}/{preview_name}",
+        storyboard_updated_at=state.get("storyboard_updated_at") or now_iso(),
+    )
+    with job_lock:
+        refreshed = jobs[parent_job_id]["items"][item_index]
+    return public_item_view(refreshed)
+
+
+def apply_storyboard_cover_to_scripts(parent_job_id: str, item_index: int, item_id: str, cover_url: str) -> dict[str, Any]:
+    output_dir = RESULTS_ROOT / item_id
+    with job_lock:
+        item = jobs[parent_job_id]["items"][item_index]
+        display_language = item.get("display_language") or "zh"
+        zh_script = json.loads(json.dumps(item.get("zh_result_json") or item.get("result_json") or {}, ensure_ascii=False))
+        pt_script = json.loads(json.dumps(item.get("pt_result_json") or {}, ensure_ascii=False)) if item.get("pt_result_json") else {}
+    zh_script["storyboard_cover_url"] = cover_url
+    zh_variant = generate_script_variant_outputs(output_dir, item_id, zh_script, item.get("video_url") or "", locale="zh")
+    update_payload: dict[str, Any] = {
+        "zh_result_json": zh_variant["script_json"],
+        "zh_html_url": zh_variant["html_url"],
+        "zh_docx_url": zh_variant["docx_url"],
+    }
+    if display_language != "pt":
+        update_payload.update(
+            result_json=zh_variant["script_json"],
+            html_url=zh_variant["html_url"],
+            docx_url=zh_variant["docx_url"],
+            title=zh_variant["script_json"].get("title") or item.get("title") or "",
+        )
+    if pt_script:
+        pt_script["storyboard_cover_url"] = cover_url
+        pt_variant = generate_script_variant_outputs(output_dir, item_id, pt_script, item.get("video_url") or "", locale="pt")
+        update_payload.update(
+            pt_result_json=pt_variant["script_json"],
+            pt_html_url=pt_variant["html_url"],
+            pt_docx_url=pt_variant["docx_url"],
+        )
+        if display_language == "pt":
+            update_payload.update(
+                result_json=pt_variant["script_json"],
+                html_url=pt_variant["html_url"],
+                docx_url=pt_variant["docx_url"],
+                title=pt_variant["script_json"].get("title") or item.get("title") or "",
+            )
+    update_job_item(parent_job_id, item_index, **update_payload)
+    with job_lock:
+        refreshed = jobs[parent_job_id]["items"][item_index]
+        job = jobs.get(parent_job_id)
+        if job and (job.get("id") == item_id or len(job.get("items") or []) == 1):
+            job["zh_result_json"] = refreshed.get("zh_result_json")
+            job["zh_html_url"] = refreshed.get("zh_html_url")
+            job["zh_docx_url"] = refreshed.get("zh_docx_url")
+            job["pt_result_json"] = refreshed.get("pt_result_json")
+            job["pt_html_url"] = refreshed.get("pt_html_url")
+            job["pt_docx_url"] = refreshed.get("pt_docx_url")
+            job["result_json"] = refreshed.get("result_json")
+            job["html_url"] = refreshed.get("html_url")
+            job["docx_url"] = refreshed.get("docx_url")
+            job["title"] = refreshed.get("title") or job.get("title") or ""
+            save_jobs()
+    return public_item_view(refreshed)
+
+
+def confirm_storyboard_cover(item_id: str) -> dict[str, Any]:
+    context = find_item_context(item_id)
+    if not context:
+        raise RuntimeError("Script item not found.")
+    parent_job_id, item_index, item = context
+    preview_url = str(item.get("storyboard_preview_url") or load_storyboard_state(item_id).get("storyboard_preview_url") or "").strip()
+    if not preview_url:
+        raise RuntimeError("请先生成分解示意图。")
+    preview_name = Path(urllib.parse.urlparse(preview_url).path).name
+    preview_path = RESULTS_ROOT / item_id / preview_name
+    if not preview_path.exists():
+        raise RuntimeError("当前示意图文件不存在，请重新生成。")
+    cover_name = STORYBOARD_COVER_BASENAME + preview_path.suffix.lower()
+    cover_path = RESULTS_ROOT / item_id / cover_name
+    if preview_path != cover_path:
+        shutil.copyfile(preview_path, cover_path)
+    state = save_storyboard_state(item_id, cover_name=cover_name)
+    cover_url = state.get("storyboard_cover_url") or f"/results/{item_id}/{cover_name}"
+    refreshed = apply_storyboard_cover_to_scripts(parent_job_id, item_index, item_id, cover_url)
+    update_job_item(
+        parent_job_id,
+        item_index,
+        storyboard_prompt=state.get("storyboard_prompt") or item.get("storyboard_prompt") or "",
+        storyboard_preview_url=state.get("storyboard_preview_url") or preview_url,
+        storyboard_cover_url=cover_url,
+        storyboard_updated_at=state.get("storyboard_updated_at") or now_iso(),
+    )
+    with job_lock:
+        final_item = jobs[parent_job_id]["items"][item_index]
+    if final_item.get("saved_to_library_at") or library_entry_exists(item_id):
+        persist_library_entry(parent_job_id, final_item, use_llm=False)
+    return public_item_view(final_item)
+
+
+def ensure_storyboard_cover_ready(item_id: str) -> dict[str, Any]:
+    context = find_item_context(item_id)
+    if not context:
+        raise RuntimeError("Script item not found.")
+    _, _, item = context
+    cover_url = str(item.get("storyboard_cover_url") or load_storyboard_state(item_id).get("storyboard_cover_url") or "").strip()
+    if cover_url:
+        return public_item_view(item)
+    generate_storyboard_preview(item_id, str(item.get("storyboard_prompt") or "").strip())
+    return confirm_storyboard_cover(item_id)
 
 
 def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True) -> bool:
@@ -6013,7 +6296,7 @@ def regenerate_item_outputs(
         pt_script = translate_script_to_portuguese(
             json.loads(json.dumps(script_json or {}, ensure_ascii=False)),
             GOOGLE_API_KEY,
-            unique_models(*MODEL_CANDIDATES),
+            unique_models(*STABLE_VIDEO_MODELS, *MODEL_CANDIDATES, *PRIMARY_FALLBACK_MODELS, *SUPPLEMENT_FALLBACK_MODELS),
         )
         pt_variant = generate_script_variant_outputs(output_dir, item_id, pt_script, video_url, locale="pt")
         with job_lock:
@@ -6035,6 +6318,8 @@ def regenerate_item_outputs(
             "title": pt_variant["script_json"].get("title") or "Roteiro do vídeo",
             "updated_at": now_iso(),
         }
+        if persist_library:
+            update_payload["saved_to_library_at"] = now_iso()
         update_job_item(parent_job_id, item_index, **update_payload)
         with job_lock:
             job = jobs.get(parent_job_id)
@@ -8598,6 +8883,38 @@ def studio_html() -> str:
       gap: 10px;
       align-items: center;
     }}
+    .storyboard-panel {{
+      display: grid;
+      gap: 14px;
+    }}
+    .storyboard-preview-wrap {{
+      border: 1px solid rgba(255,130,0,.16);
+      border-radius: 16px;
+      overflow: hidden;
+      background: rgba(255,255,255,.92);
+    }}
+    .storyboard-preview {{
+      display: block;
+      width: 100%;
+      background: #fff;
+    }}
+    .storyboard-empty {{
+      border: 1px dashed rgba(255,130,0,.22);
+      border-radius: 16px;
+      padding: 18px;
+      font-size: 13px;
+      line-height: 1.7;
+      color: #935F14;
+      background: rgba(255,248,238,.6);
+    }}
+    .storyboard-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }}
+    .storyboard-prompt {{
+      min-height: 110px;
+    }}
     .structured-table-wrap {{
       overflow-x: auto;
       border: 1px solid #d9f0fb;
@@ -10193,6 +10510,21 @@ def studio_html() -> str:
       }}).join("\\n");
     }}
 
+    function buildStoryboardPrompt(script) {{
+      const rows = normalizeRows(script).slice(0, 8);
+      const beats = rows.map((row, idx) => {{
+        return `${{idx + 1}}. 时间=${{normalizedText(row.time, "")}}；场景=${{normalizedText(row.visual_content)}}；动作=${{normalizedText(row.action)}}`;
+      }}).join("\\n");
+      return [
+        "请把这份短视频脚本画成黑白灰铅笔分镜稿风格的示意图。",
+        "要求：白底纸面、手绘线稿、6到8格矩形分镜、非彩色、非照片、不要海报感、不要大段文字。",
+        `标题：${{normalizedText(script.title, "视频脚本")}}`,
+        `整体梗概：${{normalizedText(script.whole_video_summary)}}`,
+        "关键分镜：",
+        beats || "1. 按标题和梗概生成 6 格连续分镜。",
+      ].join("\\n");
+    }}
+
     function formatScriptDraft(item, script) {{
       const rows = normalizeRows(script);
       const mechanismReason = (((script.mechanism || {{}}).reason) || "");
@@ -10331,6 +10663,8 @@ def studio_html() -> str:
       const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
       const mechanismReason = (((script.mechanism || {{}}).reason) || "");
       const replacementOptions = normalizeInsightItems(script.replaceable_parts).slice(0, 8);
+      const storyboardPrompt = normalizedText(item.storyboard_prompt || buildStoryboardPrompt(script), "");
+      const storyboardPreviewUrl = versionedResultUrl(item.storyboard_preview_url || item.storyboard_cover_url || "", item);
       const normalizeReplacementPlan = (label, text) => {{
         const cleanLabel = normalizedText(label, "替换元素");
         const cleanText = normalizedText(text, "");
@@ -10411,6 +10745,19 @@ def studio_html() -> str:
                 </thead>
                 <tbody>${{rowEditors}}</tbody>
               </table>
+            </div>
+          </section>
+          <section class="structured-editor-section">
+            <h5>生成分解示意图</h5>
+            <div class="storyboard-panel">
+              ${{storyboardPreviewUrl
+                ? `<div class="storyboard-preview-wrap"><img class="storyboard-preview" src="${{escapeHtml(storyboardPreviewUrl)}}" alt="分解示意图"></div>`
+                : `<div class="storyboard-empty">这里会生成分镜稿风格的示意图。默认会根据当前脚本表自动写提示词，你也可以先改下面这段要求，再重新生成。</div>`}}
+              <textarea class="structured-editor-textarea storyboard-prompt" data-storyboard-prompt="${{item.id}}">${{escapeHtml(storyboardPrompt)}}</textarea>
+              <div class="storyboard-actions">
+                <button class="action-link primary" type="button" data-generate-storyboard="${{item.id}}">${{storyboardPreviewUrl ? "重新生成示意图" : "生成示意图"}}</button>
+                <button class="action-link" type="button" data-confirm-storyboard="${{item.id}}" ${{storyboardPreviewUrl ? "" : "disabled"}}>设为脚本封面</button>
+              </div>
             </div>
           </section>
           <input type="hidden" data-edit-field="mechanism_reason" value="${{escapeHtml(normalizedText(mechanismReason))}}">
@@ -10845,6 +11192,66 @@ def studio_html() -> str:
           button.disabled = false;
         }});
         if (trigger) trigger.textContent = original;
+      }}
+    }}
+
+    async function generateStoryboard(itemId, trigger) {{
+      const promptField = document.querySelector(`[data-storyboard-prompt="${{itemId}}"]`);
+      const prompt = String(promptField?.value || "").trim();
+      const original = trigger ? trigger.textContent : "";
+      if (trigger) {{
+        trigger.disabled = true;
+        trigger.textContent = "生成中...";
+      }}
+      try {{
+        const response = await fetch(`/api/items/${{itemId}}/storyboard`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ prompt }}),
+        }});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Storyboard generation failed");
+        showToast("示意图已生成", "已经按当前脚本生成新的分镜示意图。");
+        if (activeJobId) {{
+          pollJob(activeJobId);
+        }} else {{
+          window.location.reload();
+        }}
+      }} catch (error) {{
+        showToast("生成失败", String(error.message || error));
+        if (trigger) {{
+          trigger.disabled = false;
+          trigger.textContent = original;
+        }}
+      }}
+    }}
+
+    async function confirmStoryboard(itemId, trigger) {{
+      const original = trigger ? trigger.textContent : "";
+      if (trigger) {{
+        trigger.disabled = true;
+        trigger.textContent = "确认中...";
+      }}
+      try {{
+        const response = await fetch(`/api/items/${{itemId}}/storyboard/confirm`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{}}),
+        }});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Storyboard confirm failed");
+        showToast("封面已更新", "这张分镜示意图已经作为脚本封面使用。");
+        if (activeJobId) {{
+          pollJob(activeJobId);
+        }} else {{
+          window.location.reload();
+        }}
+      }} catch (error) {{
+        showToast("确认失败", String(error.message || error));
+        if (trigger) {{
+          trigger.disabled = false;
+          trigger.textContent = original;
+        }}
       }}
     }}
 
@@ -11750,6 +12157,16 @@ def studio_html() -> str:
         const itemId = customReplacementBtn.getAttribute("data-apply-custom-replacement");
         const input = document.querySelector(`[data-custom-replacement="${{itemId}}"]`);
         applyReplacementPlan(itemId, "自定义替换方案", input?.value || "", customReplacementBtn);
+        return;
+      }}
+      const storyboardBtn = event.target.closest("[data-generate-storyboard]");
+      if (storyboardBtn) {{
+        generateStoryboard(storyboardBtn.getAttribute("data-generate-storyboard"), storyboardBtn);
+        return;
+      }}
+      const confirmStoryboardBtn = event.target.closest("[data-confirm-storyboard]");
+      if (confirmStoryboardBtn) {{
+        confirmStoryboard(confirmStoryboardBtn.getAttribute("data-confirm-storyboard"), confirmStoryboardBtn);
         return;
       }}
       const reviewBtn = event.target.closest("[data-run-review]");
@@ -13567,8 +13984,23 @@ class AppHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "Only completed scripts can be added to the library."}, status=400)
                     return
                 try:
-                    if persist_library_entry(parent_job_id, item, use_llm=False):
-                        update_job_item(parent_job_id, item_index, saved_to_library_at=now_iso())
+                    ensure_storyboard_cover_ready(item_id)
+                    refreshed_context = find_item_context(item_id)
+                    if not refreshed_context:
+                        raise RuntimeError("Script item not found.")
+                    parent_job_id, item_index, item = refreshed_context
+                    base_script = item.get("zh_result_json") or item.get("result_json") or {}
+                    updated_item = regenerate_item_outputs(
+                        parent_job_id,
+                        item_index,
+                        item_id,
+                        item.get("video_url") or "",
+                        base_script,
+                        persist_library=True,
+                        target_language="pt",
+                    )
+                    if updated_item.get("saved_to_library_at"):
+                        update_job_item(parent_job_id, item_index, saved_to_library_at=updated_item.get("saved_to_library_at"))
                     with job_lock:
                         updated_item = public_item_view(jobs[parent_job_id]["items"][item_index])
                 except Exception as exc:
@@ -13579,19 +14011,86 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 target_language = str(payload.get("target_language") or item.get("display_language") or "zh").strip().lower()
                 updated_script = apply_script_edits(item.get("result_json") or {}, payload)
-                updated_item = regenerate_item_outputs(
-                    parent_job_id,
-                    item_index,
-                    item_id,
-                    item.get("video_url") or "",
-                    updated_script,
-                    persist_library=(action == "save-to-library"),
-                    target_language=target_language,
-                )
+                if action == "save-to-library":
+                    if target_language == "pt":
+                        pt_item = regenerate_item_outputs(
+                            parent_job_id,
+                            item_index,
+                            item_id,
+                            item.get("video_url") or "",
+                            updated_script,
+                            persist_library=False,
+                            target_language="pt",
+                        )
+                        ensure_storyboard_cover_ready(item_id)
+                        refreshed_context = find_item_context(item_id)
+                        if not refreshed_context:
+                            raise RuntimeError("Script item not found.")
+                        parent_job_id, item_index, item = refreshed_context
+                        updated_item = regenerate_item_outputs(
+                            parent_job_id,
+                            item_index,
+                            item_id,
+                            item.get("video_url") or "",
+                            item.get("pt_result_json") or pt_item.get("pt_result_json") or item.get("result_json") or {},
+                            persist_library=True,
+                            target_language="pt",
+                        )
+                    else:
+                        regenerate_item_outputs(
+                            parent_job_id,
+                            item_index,
+                            item_id,
+                            item.get("video_url") or "",
+                            updated_script,
+                            persist_library=False,
+                            target_language="zh",
+                        )
+                        ensure_storyboard_cover_ready(item_id)
+                        refreshed_context = find_item_context(item_id)
+                        if not refreshed_context:
+                            raise RuntimeError("Script item not found.")
+                        parent_job_id, item_index, item = refreshed_context
+                        updated_item = regenerate_item_outputs(
+                            parent_job_id,
+                            item_index,
+                            item_id,
+                            item.get("video_url") or "",
+                            item.get("zh_result_json") or item.get("result_json") or {},
+                            persist_library=True,
+                            target_language="pt",
+                        )
+                else:
+                    updated_item = regenerate_item_outputs(
+                        parent_job_id,
+                        item_index,
+                        item_id,
+                        item.get("video_url") or "",
+                        updated_script,
+                        persist_library=False,
+                        target_language=target_language,
+                    )
             except Exception as exc:
                 self.send_json({"error": friendly_error(str(exc))}, status=500)
                 return
             self.send_json({"ok": True, "item": updated_item, "saved_to_library": action == "save-to-library"})
+            return
+        storyboard_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/storyboard(?:/(confirm))?", parsed.path)
+        if storyboard_match:
+            item_id, confirm_action = storyboard_match.groups()
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                payload = {}
+            try:
+                if confirm_action:
+                    updated_item = confirm_storyboard_cover(item_id)
+                else:
+                    updated_item = generate_storyboard_preview(item_id, str((payload or {}).get("prompt") or "").strip())
+            except Exception as exc:
+                self.send_json({"error": friendly_error(str(exc))}, status=500)
+                return
+            self.send_json({"ok": True, "item": updated_item})
             return
         review_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/review", parsed.path)
         if review_match:
