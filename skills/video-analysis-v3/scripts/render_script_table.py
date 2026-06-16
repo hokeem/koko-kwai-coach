@@ -184,16 +184,10 @@ def main() -> int:
 <td>{esc(seg_audio(seg))}</td>
 </tr>""")
 
-    core_fallback = [
-        ("机制爆点", "先确认可见动作，再追问隐藏道具机制，避免停留在表面观察。"),
-        ("人性动机", "整蛊/关系段子要拆出受害者为什么会相信、为什么会行动。"),
-        ("反转证据", "结尾必须有可见证据支撑反转，例如标记出现、钱掉出、道具暴露。"),
-    ]
     replace_fallback = [
-        ("诱饵", "钱、礼物、手机、红包、优惠券等。"),
-        ("机关", "露底瓶、假盖、双层杯、藏钱口袋、可擦标记。"),
-        ("关系", "情侣、夫妻、朋友、路人、老板员工。"),
-        ("场景", "厨房、街头、柜台、车内、办公室等单场景。"),
+        ("办公室误会版", "把原人物关系替换成老板和员工，把场景替换成办公室，用工作任务误会推动同样的反差和结尾落点。"),
+        ("家庭厨房版", "把场景替换成厨房，把核心道具替换成锅碗瓢盆，让冲突围绕家务分工或做饭误会展开。"),
+        ("邻里街坊版", "把人物替换成邻居/路人，把冲突放到公共空间，用围观和误解制造同结构反转。"),
     ]
 
     meta_extra = f" · Audio information score: {esc(audio_score)}/10" if audio_score not in (None, "") else ""
@@ -230,8 +224,7 @@ def main() -> int:
  <div class="card"><h1>视频总结归纳 + 脚本表</h1><div class="meta">Route: {esc(route)}{meta_extra} · Analysis status: {esc(score)}<br>视频链接：<a href="{esc(source)}">{esc(source)}</a></div></div>
  <div class="card"><h2>视频整体内容总结</h2><div class="summary">{esc(summary)}</div></div>
  <div class="card"><h2>脚本表</h2><table class="script-table"><thead><tr><th>时间</th><th>画面内容</th><th>动作</th><th>关键对白/旁白</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
- <div class="card"><h2>核心爆点</h2>{list_cards(story.get('core_points') or [], core_fallback)}</div>
- <div class="card"><h2>可替换部分</h2>{list_cards(story.get('replaceable_parts') or [], replace_fallback)}</div>
+ <div class="card"><h2>替换方案</h2>{list_cards(story.get('replaceable_parts') or data.get('replaceable_parts') or [], replace_fallback)}</div>
  {render_verification(story)}
  {render_audit(data)}
  {render_observations(data)}

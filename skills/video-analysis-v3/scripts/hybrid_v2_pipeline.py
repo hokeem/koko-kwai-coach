@@ -48,8 +48,8 @@ PRIMARY_PROMPT = """你是一个严格遵循 video-analysis-v2-sop 的短视频�
 - 必须覆盖整条视频，而不是只写前面一小段
 - `whole_video_summary` 必须是完整自然语言总结，并且要说清楚背后的故事原因/情绪原因/关系原因
 - `dialogue_or_audio` 必须是中文直译，只翻译，不改写，不润色，不换说法
-- `核心爆点` 必须解释为什么这个视频成立，不只是复述剧情
-- `可替换部分` 必须给出同结构替换点
+- 不再面向前端输出“核心爆点”展示内容；如果保留 `core_viral_points` 字段，仅用于兼容旧结构，可以留空。
+- `replaceable_parts` 必须给出可直接套用的替换方案，不是建议；每一项都要说明替换成什么人物/场景/道具/冲突，以及替换后故事主轴怎么变。
 - `rows` 必须写成脚本库分镜表：`visual_content` 只写拍摄准备信息（地点/场景、在场人物、必要道具），`action` 写具体调度/表情/动作推进，`dialogue_or_audio` 按说话人分行
 - 先判断稳定可见人物数量；如果出现多个同性可见人物，先用 `男性A/男性B/女性A/女性B/儿童A` 这类占位标签，不要直接合并成人物关系
 - 只有在音频和画面都强支持时，才允许把 `男性A` 升级成丈夫/哥哥/朋友等关系角色
@@ -65,11 +65,9 @@ PRIMARY_PROMPT = """你是一个严格遵循 video-analysis-v2-sop 的短视频�
   "audio_information_score": "0/10 到 10/10",
   "source_url": "原视频链接",
   "whole_video_summary": "完整自然语言总结，必须写出故事背后的原因和关系机制",
-  "core_viral_points": [
-    {"label": "核心点标题", "text": "为什么成立"}
-  ],
+  "core_viral_points": [],
   "replaceable_parts": [
-    {"label": "可替换项", "text": "替换说明"}
+    {"label": "替换方案名", "text": "直接可执行的替换方案：把哪些人物/场景/道具/冲突替换成什么，并说明替换后的故事主轴。"}
   ],
   "rows": [
     {
@@ -191,7 +189,8 @@ REFINE_PROMPT = """你是最后的 v2 成品整理器。
 - `whole_video_summary` 要像成熟脚本编辑写的“剧情概述”，重点写：起因 -> 推进 -> 关键证据/对质 -> 最终落点。总结必须落在具体事件和最终结果上，而不是抽象拔高成“揭示了复杂关系/社会判断/人性弱点”这类空泛句。
 - `whole_video_summary` 允许写背后原因，但必须嵌在具体剧情里，例如“丈夫为了维护面子而选择相信妻子”，而不是另起一句空泛说教。
 - 如果人物关系有强证据支持，在 `title` 和 `whole_video_summary` 里优先使用自然角色称呼（如丈夫/妻子/邻居），可读性优先；只有证据不足时才保留 `男性A/女性A`。
-- `core_viral_points` 不能只是复述剧情，要写“为什么这个点成立”。优先写反差、错位、掩饰、打脸、误会、面子、防守、权力变化、关系翻转这些机制，而不是抽象夸赞。
+- 不再面向前端输出“核心爆点”；`core_viral_points` 可留空以兼容旧结构。
+- `replaceable_parts` 必须是可直接点击套用的替换方案，不能只写“可以替换场景/人物”这种建议。
 - `mechanism.items[*].text` 也要尽量具体，不要写成空泛议论文。尤其 `背后原因` 必须落在这条视频里具体的人物心理和关系机制上。
 - 如果旧结果里已经出现过“揭示了……复杂关系”“反映了人性的弱点”“社会判断之间的复杂关系”这类抽象收束，请改写成更具体的剧情落点和人物动机。
 - `rows` 必须写成脚本库分镜表，不是观察报告：
@@ -207,11 +206,9 @@ REFINE_PROMPT = """你是最后的 v2 成品整理器。
   "audio_information_score": "0/10 到 10/10",
   "source_url": "原视频链接",
   "whole_video_summary": "一到两段自然语言总结",
-  "core_viral_points": [
-    {"label": "核心点标题", "text": "为什么成立"}
-  ],
+  "core_viral_points": [],
   "replaceable_parts": [
-    {"label": "可替换项", "text": "替换说明"}
+    {"label": "替换方案名", "text": "直接可执行的替换方案"}
   ],
   "rows": [
     {
@@ -329,8 +326,8 @@ V2_LOCAL_PROMPT = """你是一个严格按 video-analysis-v2-sop 执行的第二
   "audio_information_score": "0/10 到 10/10",
   "source_url": "原视频链接",
   "whole_video_summary": "按起因-经过-结果写出的完整候选总结",
-  "core_viral_points": [{"label": "核心点标题", "text": "为什么成立"}],
-  "replaceable_parts": [{"label": "可替换项", "text": "替换说明"}],
+  "core_viral_points": [],
+  "replaceable_parts": [{"label": "替换方案名", "text": "直接可执行的替换方案"}],
   "rows": [
     {
       "source_url": "原视频链接",

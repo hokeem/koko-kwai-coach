@@ -2508,7 +2508,7 @@ CONTENT_TYPE_CLASSIFY_PROMPT = f"""你是一个短视频脚本分类器。
 1. 标题
 2. 故事梗概（whole_video_summary）
 3. 包袱机制原因
-4. 核心爆点
+4. 可选的替换方案
 5. 可选的路由说明
 
 你的任务不是改写脚本，而是根据“最终语义”从固定分类白名单里选一个最合适的类型。
@@ -2554,7 +2554,6 @@ def classify_content_type_with_llm(
         "title": script.get("title") or "",
         "whole_video_summary": script.get("whole_video_summary") or "",
         "mechanism_reason": ((script.get("mechanism") or {}).get("reason") or ""),
-        "core_viral_points": script.get("core_viral_points") or [],
         "replaceable_parts": script.get("replaceable_parts") or [],
         "routing": {
             "primary_type": routing.get("primary_type") or "",
@@ -2710,6 +2709,21 @@ def fill_text(value: Any, fallback: str = "无") -> str:
     return text if text else fallback
 
 
+def normalize_replaceable_parts(value: Any, fallback: list[dict[str, str]] | None = None) -> list[dict[str, str]]:
+    items = value if isinstance(value, list) else []
+    normalized = [
+        {
+            "label": fill_text((item or {}).get("label") or (item or {}).get("title") or (item or {}).get("name"), "替换方案"),
+            "text": fill_text((item or {}).get("text") or (item or {}).get("description") or (item or {}).get("value"), "无"),
+        }
+        for item in items
+        if isinstance(item, dict)
+    ]
+    if normalized:
+        return normalized[:8]
+    return json.loads(json.dumps(fallback or [{"label": "替换方案", "text": "无"}], ensure_ascii=False))
+
+
 HEAVY_REVIEW_FAILURE_LAYERS = {
     "story_spine",
     "primary_analysis",
@@ -2724,14 +2738,12 @@ REVIEW_SCRIPT_KEYS = [
     "audio_information_score",
     "source_url",
     "whole_video_summary",
-    "core_viral_points",
     "replaceable_parts",
     "rows",
     "mechanism",
 ]
 REVIEW_CORE_CHANGE_KEYS = [
     "whole_video_summary",
-    "core_viral_points",
     "rows",
     "mechanism",
 ]
@@ -2882,7 +2894,8 @@ REVIEW_REFINE_PROMPT = """你是一个“复盘重做”脚本整理器。
 - `whole_video_summary` 要按“起因 -> 推进 -> 对质/证据 -> 最终落点”来写，重点落在具体剧情和最终结果，不要用抽象的“揭示了复杂关系/人性弱点/社会判断”来替代真正的结局描述。
 - 背后原因可以写，但必须嵌在具体人物动机里，例如“他为了维护面子选择否认真相”，而不是另起一段空泛说教。
 - 如果人物关系在复盘后已经足够稳定，`title` 和 `whole_video_summary` 优先用自然角色称呼（丈夫/妻子/邻居等），不要为了机械一致性继续保留 `男性A/女性A`。
-- `core_viral_points` 要写“为什么成立”，不能只是再讲一遍剧情。优先写反差、打脸、掩饰、错位、面子、防守、关系翻转等机制。
+- 不再输出“核心爆点”展示内容；如果历史结构里保留 core_viral_points，可以留空或保持兼容，但不要依赖它作为最终展示部分。
+- `replaceable_parts` 必须写成可以直接套用的替换方案，不是建议。每一项都要包含“替换成什么人物/场景/道具/冲突”和“替换后脚本主轴如何变化”。
 - `mechanism.items[*].text` 继续保持具体，尤其 `背后原因` 必须落在这条视频里的真实人物心理和关系机制上。
 - 如果旧版本里有空泛的抽象收束句，请在复盘版里收掉，改成更具体的剧情归纳和结局描述。
 
@@ -2893,11 +2906,8 @@ REVIEW_REFINE_PROMPT = """你是一个“复盘重做”脚本整理器。
   "audio_information_score": "0/10 到 10/10",
   "source_url": "原视频链接",
   "whole_video_summary": "纠偏后的完整总结",
-  "core_viral_points": [
-    {"label": "核心点标题", "text": "为什么成立"}
-  ],
   "replaceable_parts": [
-    {"label": "可替换项", "text": "替换说明"}
+    {"label": "替换方案名", "text": "直接可执行的替换方案：把原脚本中的哪些人物/场景/道具/冲突替换成什么，并说明替换后的故事主轴。"}
   ],
   "rows": [
     {
@@ -2928,7 +2938,7 @@ PARTIAL_REVIEW_REFINE_PROMPT = REVIEW_REFINE_PROMPT + """
 本次模式：部分错误。
 
 人类反馈指出的是“当前脚本大体方向可用，但漏掉/误判了一个关键点”。你必须以 current_script 为基础做全局修订：
-- 重点修正人类指出的核心错误点，并让这个纠偏贯穿 title、whole_video_summary、core_viral_points、rows、mechanism
+- 重点修正人类指出的核心错误点，并让这个纠偏贯穿 title、whole_video_summary、replaceable_parts、rows、mechanism
 - 允许保留旧脚本里仍然正确的时间段、图片引用、分镜顺序和视觉字段
 - 不要只改标题，不要只改概述，不要返回局部补丁
 - 输出必须是完整 v2 script_table.json 同格式对象
@@ -2940,7 +2950,7 @@ FULL_REVIEW_REFINE_PROMPT = REVIEW_REFINE_PROMPT + """
 本次模式：完全错误。
 
 人类反馈指出的是“当前故事主轴或核心理解整体错误”。你必须把 review_video_recheck 当作新的高优先级证据来重建脚本：
-- title、whole_video_summary、core_viral_points、rows、mechanism 都要围绕新的故事主轴重新整理
+- title、whole_video_summary、replaceable_parts、rows、mechanism 都要围绕新的故事主轴重新整理
 - 可以保留 confirmed 的时间段和图片引用，但不要沿用旧故事主轴
 - 如果回看证据不充分，要明确采用更保守的剧情表达，不要把不确定内容写死
 - 输出必须是完整 v2 script_table.json 同格式对象
@@ -2953,13 +2963,14 @@ CHAT_SCRIPT_EDIT_PROMPT = """你是 Koko 的脚本修稿助手，负责根据用
 1. current_script：当前已经生成的完整 script_table.json
 2. user_message：用户这一次想让你修改的内容
 3. conversation：同一条脚本的历史修稿对话
-4. edit_mode：minor 或 major
+4. edit_mode：minor、major 或 replace
 
 你的权限边界：
 - 只能修改当前脚本 JSON 内容，不要修改文件名、任务状态、视频文件或脚本库状态
-- 可以全局修改 title、whole_video_summary、core_viral_points、replaceable_parts、rows、mechanism
-- 如果用户只指出一个小问题，也要让这个纠正自然贯穿相关标题、总结、爆点和分镜，不要只机械改一个词
+- 可以全局修改 title、whole_video_summary、replaceable_parts、rows、mechanism
+- 如果用户只指出一个小问题，也要让这个纠正自然贯穿相关标题、总结、替换方案和分镜，不要只机械改一个词
 - 如果用户要求大改，要以 current_script 为基础重组故事主轴，但不要假装重新看过视频
+- 如果 edit_mode 是 replace，说明用户选择了一个替换方案。你必须把这个替换方案当作新的创作约束，直接重写 title、whole_video_summary、replaceable_parts、rows、mechanism，让整份脚本变成替换后的新版本；不要只解释方案。
 - 如果用户的问题需要重新看视频才能确认，请在 assistant_message 里说明“需要重新看视频”，并仍然尽量做保守文本修订
 - 不要删除 rows 里的图片引用或时间顺序
 - `dialogue_or_audio` 必须保持中文 1:1 直译风格：只翻译，不改写，不润色，不概括，不补解释，不合并句子
@@ -2977,11 +2988,8 @@ CHAT_SCRIPT_EDIT_PROMPT = """你是 Koko 的脚本修稿助手，负责根据用
     "audio_information_score": "保留或修正后的分数",
     "source_url": "原视频链接",
     "whole_video_summary": "修改后的完整总结",
-    "core_viral_points": [
-      {"label": "核心点标题", "text": "为什么成立"}
-    ],
     "replaceable_parts": [
-      {"label": "可替换项", "text": "替换说明"}
+      {"label": "替换方案名", "text": "直接可执行的替换方案"}
     ],
     "rows": [
       {
@@ -3004,6 +3012,30 @@ CHAT_SCRIPT_EDIT_PROMPT = """你是 Koko 的脚本修稿助手，负责根据用
       ]
     }
   }
+}
+"""
+
+
+REPLACEMENT_PLAN_REFRESH_PROMPT = """你是 Koko 的脚本替换方案生成器。
+
+你会收到一份已经存在的短视频脚本 JSON。你的任务不是重写整份脚本，而是基于当前最新脚本内容，重新整理“替换方案”。
+
+要求：
+- 只输出 `replaceable_parts`
+- 每一项都必须是“可以直接拿去改整份脚本”的替换方案，不是泛泛建议
+- 要明确写出替换成什么人物、场景、道具、冲突，以及替换后故事主轴会怎么变化
+- 必须和当前脚本标题、整体梗概、分镜脚本保持一致，不能沿用旧主轴
+- 尽量给 3 条，最多 5 条
+- 用中文输出
+
+输出严格 JSON：
+{
+  "replaceable_parts": [
+    {
+      "label": "替换方案名",
+      "text": "直接可执行的替换方案"
+    }
+  ]
 }
 """
 
@@ -5709,7 +5741,7 @@ def run_chat_script_edit(item_id: str, message: str, edit_mode: str = "minor") -
     if not user_message:
         return False, "请先告诉 Koko 你想改哪里。"
     mode = str(edit_mode or "minor").strip().lower()
-    if mode not in {"minor", "major"}:
+    if mode not in {"minor", "major", "replace"}:
         mode = "minor"
     if not GOOGLE_API_KEY:
         return False, "Missing GOOGLE_API_KEY for Koko edit."
@@ -5936,6 +5968,36 @@ def apply_script_edits(script: dict[str, Any], payload: dict[str, Any]) -> dict[
     return edited
 
 
+def refresh_replaceable_parts(script_json: dict[str, Any]) -> dict[str, Any]:
+    refreshed = json.loads(json.dumps(script_json or {}, ensure_ascii=False))
+    existing = normalize_replaceable_parts(refreshed.get("replaceable_parts"))
+    if not GOOGLE_API_KEY or run_text_json_prompt_with_fallback is None:
+        refreshed["replaceable_parts"] = existing
+        return refreshed
+    payload = {
+        "title": refreshed.get("title") or "",
+        "whole_video_summary": refreshed.get("whole_video_summary") or "",
+        "mechanism": refreshed.get("mechanism") or {},
+        "rows": choose_script_rows(refreshed),
+        "existing_replaceable_parts": existing,
+    }
+    try:
+        result, _, _ = run_text_json_prompt_with_fallback(
+            payload,
+            GOOGLE_API_KEY,
+            unique_models(*MODEL_CANDIDATES, *PRIMARY_FALLBACK_MODELS, *SUPPLEMENT_FALLBACK_MODELS),
+            REPLACEMENT_PLAN_REFRESH_PROMPT,
+            "replacement plan refresh",
+        )
+        refreshed["replaceable_parts"] = normalize_replaceable_parts(
+            (result or {}).get("replaceable_parts"),
+            fallback=existing,
+        )
+    except Exception:
+        refreshed["replaceable_parts"] = existing
+    return refreshed
+
+
 def regenerate_item_outputs(
     parent_job_id: str,
     item_index: int,
@@ -5984,8 +6046,11 @@ def regenerate_item_outputs(
             persist_library_entry(parent_job_id, item, use_llm=False)
         return public_item_view(item)
 
+    script_json = refresh_replaceable_parts(
+        json.loads(json.dumps(script_json or {}, ensure_ascii=False))
+    )
     script_json = enforce_chinese_dialogue_translation(
-        json.loads(json.dumps(script_json or {}, ensure_ascii=False)),
+        script_json,
         GOOGLE_API_KEY,
         unique_models(*MODEL_CANDIDATES),
     )
@@ -6258,7 +6323,7 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
         if not review_script_changed(current_script, merged_script, REVIEW_SCRIPT_KEYS):
             raise RuntimeError("复盘重做没有生成任何脚本变更，请补充更具体的错误点。")
         if not review_script_changed(current_script, merged_script, REVIEW_CORE_CHANGE_KEYS):
-            raise RuntimeError("复盘重做只产生了标题或轻微变化，没有改动概述、核心爆点、分镜或机制。")
+            raise RuntimeError("复盘重做只产生了标题或轻微变化，没有改动概述、替换方案、分镜或机制。")
         merged_script = enforce_chinese_dialogue_translation(
             merged_script,
             GOOGLE_API_KEY,
@@ -8475,6 +8540,64 @@ def studio_html() -> str:
       min-height: 42px;
       font-weight: 900;
     }}
+    .replacement-picker {{
+      display: grid;
+      gap: 12px;
+    }}
+    .replacement-option-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }}
+    .replacement-option {{
+      appearance: none;
+      border: 1px solid rgba(255,130,0,.18);
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(255,248,238,.95), rgba(255,255,255,.92));
+      color: #111827;
+      padding: 12px;
+      text-align: left;
+      cursor: pointer;
+      min-height: 116px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+    }}
+    .replacement-option:hover {{
+      transform: translateY(-1px);
+      border-color: rgba(255,130,0,.36);
+      box-shadow: 0 10px 24px rgba(249,115,0,.12);
+    }}
+    .replacement-option:disabled {{
+      opacity: .58;
+      cursor: wait;
+      transform: none;
+    }}
+    .replacement-option strong {{
+      color: #FF8200;
+      font-size: 15px;
+      line-height: 1.35;
+    }}
+    .replacement-option span {{
+      color: #4b5563;
+      font-size: 13px;
+      line-height: 1.55;
+    }}
+    .replacement-empty {{
+      border: 1px dashed rgba(255,130,0,.24);
+      border-radius: 14px;
+      padding: 14px;
+      color: #FF8200;
+      background: rgba(255,248,238,.66);
+      font-weight: 800;
+    }}
+    .replacement-custom {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }}
     .structured-table-wrap {{
       overflow-x: auto;
       border: 1px solid #d9f0fb;
@@ -10092,10 +10215,7 @@ def studio_html() -> str:
         "机制说明：",
         normalizedText(mechanismReason),
         "",
-        "核心爆点：",
-        formatInsightDraft(script.core_viral_points),
-        "",
-        "可替换部分：",
+        "替换方案：",
         formatInsightDraft(script.replaceable_parts),
         "",
         "脚本表：",
@@ -10108,7 +10228,7 @@ def studio_html() -> str:
       const order = [];
       let current = "";
       String(text || "").split(/\\r?\\n/).forEach((line) => {{
-        const match = line.match(/^\\s*(标题|整体梗概|机制说明|核心爆点|可替换部分|脚本表)\\s*[:：]\\s*$/);
+        const match = line.match(/^\\s*(标题|整体梗概|机制说明|替换方案|可替换部分|脚本表)\\s*[:：]\\s*$/);
         if (match) {{
           current = match[1];
           if (!sections[current]) {{
@@ -10129,11 +10249,11 @@ def studio_html() -> str:
         const parts = cleaned.split(/[:：]/);
         if (parts.length >= 2) {{
           return {{
-            label: normalizedText(parts.shift(), "要点"),
+            label: normalizedText(parts.shift(), "替换方案"),
             text: normalizedText(parts.join("："), "无"),
           }};
         }}
-        return {{ label: "要点", text: normalizedText(cleaned, "无") }};
+        return {{ label: "替换方案", text: normalizedText(cleaned, "无") }};
       }});
     }}
 
@@ -10210,6 +10330,28 @@ def studio_html() -> str:
       const script = item.result_json || {{}};
       const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
       const mechanismReason = (((script.mechanism || {{}}).reason) || "");
+      const replacementOptions = normalizeInsightItems(script.replaceable_parts).slice(0, 8);
+      const normalizeReplacementPlan = (label, text) => {{
+        const cleanLabel = normalizedText(label, "替换元素");
+        const cleanText = normalizedText(text, "");
+        if (!cleanText) return `把原脚本中的${{cleanLabel}}替换成新的同结构元素，并保持原有冲突推进和结尾落点。`;
+        if (/替换成|替换为|换成|改成/.test(cleanText) && !/可以|可根据|可替换|可将|可把/.test(cleanText)) return cleanText;
+        return `把原脚本中的${{cleanLabel}}替换为：${{cleanText}}`;
+      }};
+      const summarizeReplacementPlan = (label, text) => {{
+        const cleanLabel = normalizedText(label, "这部分");
+        const cleanText = normalizedText(text, "");
+        if (!cleanText) return `把${{cleanLabel}}换成新的设定`;
+        let match = cleanText.match(/将(.+?)替换(?:成|为)(.+?)(?:[，。；]|$)/);
+        if (match) return `把${{normalizedText(match[1], cleanLabel)}}换成${{normalizedText(match[2], "新的设定")}}`;
+        match = cleanText.match(/把(.+?)(?:替换(?:成|为)|换成|改成)(.+?)(?:[，。；]|$)/);
+        if (match) return `把${{normalizedText(match[1], cleanLabel)}}换成${{normalizedText(match[2], "新的设定")}}`;
+        match = cleanText.match(/从(.+?)到(.+?)(?:[，。；]|$)/);
+        if (match) return `把${{normalizedText(match[1], cleanLabel)}}换成${{normalizedText(match[2], "新的设定")}}`;
+        const firstClause = cleanText.split(/[。；]/)[0].trim();
+        if (/换成|替换成|替换为|改成/.test(firstClause)) return firstClause;
+        return `把${{cleanLabel}}换成${{firstClause.replace(/^具体方案[:：]?/, "").trim() || "新的设定"}}`;
+      }};
       const renderInsightEditors = (items, kind) => {{
         return normalizeInsightItems(items).map((point, idx) => `
           <div class="structured-insight" data-insight-kind="${{kind}}" data-insight-index="${{idx}}">
@@ -10218,6 +10360,19 @@ def studio_html() -> str:
           </div>
         `).join("");
       }};
+      const replacementCards = replacementOptions.length
+        ? replacementOptions.map((point, idx) => {{
+            const label = normalizedText(point.label || point.title || point.name, `替换方案 ${{idx + 1}}`);
+            const text = normalizeReplacementPlan(label, point.text || point.description || point.value);
+            const preview = summarizeReplacementPlan(label, text);
+            return `
+              <button class="replacement-option" type="button" data-apply-replacement="${{item.id}}" data-replacement-label="${{escapeHtml(label)}}" data-replacement-text="${{escapeHtml(text)}}">
+                <strong>${{escapeHtml(label)}}</strong>
+                <span>${{escapeHtml(preview)}}</span>
+              </button>
+            `;
+          }}).join("")
+        : `<div class="replacement-empty">暂无可直接套用的替换方案，可以在下方自己输入。</div>`;
       const rows = normalizeRows(script);
       const rowEditors = rows.map((row, idx) => `
         <tr data-structured-row-index="${{idx}}" data-row-original-index="${{idx}}">
@@ -10238,12 +10393,14 @@ def studio_html() -> str:
             <textarea class="structured-editor-textarea" data-edit-field="whole_video_summary">${{escapeHtml(normalizedText(script.whole_video_summary))}}</textarea>
           </section>
           <section class="structured-editor-section">
-            <h5>核心爆点</h5>
-            <div class="structured-insight-grid">${{renderInsightEditors(script.core_viral_points, "core")}}</div>
-          </section>
-          <section class="structured-editor-section">
-            <h5>可替换部分</h5>
-            <div class="structured-insight-grid">${{renderInsightEditors(script.replaceable_parts, "replaceable")}}</div>
+            <h5>替换方案</h5>
+            <div class="replacement-picker" data-replacement-picker="${{item.id}}">
+              <div class="replacement-option-grid">${{replacementCards}}</div>
+              <div class="replacement-custom">
+                <input class="structured-editor-input" data-custom-replacement="${{item.id}}" placeholder="也可以自己输入一个替换方案，例如：把丈夫换成老板，把厨房换成办公室">
+                <button class="action-link primary" type="button" data-apply-custom-replacement="${{item.id}}">应用替换方案</button>
+              </div>
+            </div>
           </section>
           <section class="structured-editor-section">
             <h5>脚本表</h5>
@@ -10377,6 +10534,7 @@ def studio_html() -> str:
             text: card.querySelector('[data-insight-field="text"]')?.value || "",
           }};
         }});
+        const replaceableParts = collectInsights("replaceable");
         const rows = Array.from(root.querySelectorAll("[data-structured-row-index]")).map((rowCard, idx) => {{
           return {{
             original_index: Number(rowCard.getAttribute("data-row-original-index") || idx),
@@ -10387,15 +10545,15 @@ def studio_html() -> str:
             integrated_summary: "",
           }};
         }});
-        return {{
+        const payload = {{
           title: root.querySelector('[data-edit-field="title"]')?.value || "",
           whole_video_summary: root.querySelector('[data-edit-field="whole_video_summary"]')?.value || "",
           mechanism_reason: root.querySelector('[data-edit-field="mechanism_reason"]')?.value || "",
-          core_viral_points: collectInsights("core"),
-          replaceable_parts: collectInsights("replaceable"),
           rows,
           target_language: root.getAttribute("data-editor-lang") || "zh",
         }};
+        if (replaceableParts.length) payload.replaceable_parts = replaceableParts;
+        return payload;
       }}
       const draft = root.querySelector("[data-editor-draft]")?.value || "";
       const sections = splitDraftSections(draft);
@@ -10410,8 +10568,7 @@ def studio_html() -> str:
         title: textOf("标题"),
         whole_video_summary: textOf("整体梗概"),
         mechanism_reason: textOf("机制说明"),
-        core_viral_points: parseInsightDraft(textOf("核心爆点")),
-        replaceable_parts: parseInsightDraft(textOf("可替换部分")),
+        replaceable_parts: parseInsightDraft(textOf("替换方案") || textOf("可替换部分")),
         rows: parseScriptRowsDraft(textOf("脚本表"), originalRows),
         target_language: root.getAttribute("data-editor-lang") || "zh",
       }};
@@ -10647,6 +10804,47 @@ def studio_html() -> str:
         if (input) input.value = message;
         button.disabled = false;
         button.textContent = original;
+      }}
+    }}
+
+    async function applyReplacementPlan(itemId, label, planText, trigger) {{
+      const title = normalizedText(label || "替换方案", "替换方案");
+      const text = normalizedText(planText || "", "");
+      if (!text) {{
+        showToast("先写替换方案", "请选择一个方案，或自己输入一个替换方案。");
+        return;
+      }}
+      const message = `按这个替换方案直接全局改写整份脚本：${{title}}。具体方案：${{text}}`;
+      const original = trigger ? trigger.textContent : "";
+      document.querySelectorAll(`[data-apply-replacement="${{itemId}}"], [data-apply-custom-replacement="${{itemId}}"]`).forEach((button) => {{
+        button.disabled = true;
+      }});
+      if (trigger) trigger.textContent = "替换中...";
+      appendChatBubble(itemId, "user", message);
+      appendChatBubble(itemId, "koko", "我按这个替换方案改整份脚本...", true);
+      try {{
+        const response = await fetch(`/api/items/${{itemId}}/chat-edit`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ message, mode: "replace" }}),
+        }});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Replacement edit failed");
+        updatePendingChatBubble(itemId, data.message || "已按替换方案改好脚本。");
+        showToast("替换方案已应用", data.message || "脚本已经刷新。");
+        if (activeJobId) {{
+          pollJob(activeJobId);
+        }} else {{
+          window.location.reload();
+        }}
+      }} catch (error) {{
+        const errorText = String(error.message || error);
+        updatePendingChatBubble(itemId, "这次没改成功：" + errorText);
+        showToast("替换失败", errorText);
+        document.querySelectorAll(`[data-apply-replacement="${{itemId}}"], [data-apply-custom-replacement="${{itemId}}"]`).forEach((button) => {{
+          button.disabled = false;
+        }});
+        if (trigger) trigger.textContent = original;
       }}
     }}
 
@@ -11535,6 +11733,23 @@ def studio_html() -> str:
       const chatEditBtn = event.target.closest("[data-chat-edit]");
       if (chatEditBtn) {{
         runKokoChatEdit(chatEditBtn.getAttribute("data-chat-edit"), chatEditBtn);
+        return;
+      }}
+      const replacementBtn = event.target.closest("[data-apply-replacement]");
+      if (replacementBtn) {{
+        applyReplacementPlan(
+          replacementBtn.getAttribute("data-apply-replacement"),
+          replacementBtn.getAttribute("data-replacement-label") || "",
+          replacementBtn.getAttribute("data-replacement-text") || "",
+          replacementBtn
+        );
+        return;
+      }}
+      const customReplacementBtn = event.target.closest("[data-apply-custom-replacement]");
+      if (customReplacementBtn) {{
+        const itemId = customReplacementBtn.getAttribute("data-apply-custom-replacement");
+        const input = document.querySelector(`[data-custom-replacement="${{itemId}}"]`);
+        applyReplacementPlan(itemId, "自定义替换方案", input?.value || "", customReplacementBtn);
         return;
       }}
       const reviewBtn = event.target.closest("[data-run-review]");
