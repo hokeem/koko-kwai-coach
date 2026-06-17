@@ -7,11 +7,13 @@ import base64
 import csv
 import errno
 import html
+import http.client
 import io
 import json
 import os
 import re
 import shutil
+import secrets
 import subprocess
 import sys
 import threading
@@ -89,6 +91,10 @@ CREATOR_SYNC_META_FILE = DATA_ROOT / "creator_sync_meta.json"
 CREATOR_LIBRARY_SOURCE_URL = os.environ.get("CREATOR_LIBRARY_SOURCE_URL", "https://koko-kwai-coach.onrender.com/api/library")
 CREATOR_LIBRARY_SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
 CREATOR_CENTER_SYNC_URL = os.environ.get("CREATOR_CENTER_SYNC_URL", "https://koko-fpml.onrender.com/api/creator/sync-library")
+CREATOR_CENTER_BASE_URL = os.environ.get("CREATOR_CENTER_BASE_URL", "https://koko-fpml.onrender.com").rstrip("/")
+CREATOR_ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
+CREATOR_ADMIN_AUTH_COOKIE = "koko_creator_admin_auth"
+CREATOR_REMOTE_ADMIN_COOKIE = "koko_creator_admin"
 FILTER_JOBS_FILE = DATA_ROOT / "filter_jobs.json"
 FILTER_CACHE_ROOT = DATA_ROOT / "filter_cache"
 VISION_MODELS_DIR = DATA_ROOT / "vision_models"
@@ -4720,6 +4726,51 @@ def has_error_case_access(handler: BaseHTTPRequestHandler) -> bool:
     return cookies.get(ERROR_CASE_AUTH_COOKIE) == "1"
 
 
+def has_creator_admin_access(handler: BaseHTTPRequestHandler) -> bool:
+    cookies = parse_cookie_header(handler.headers.get("Cookie", ""))
+    token = urllib.parse.unquote(cookies.get(CREATOR_ADMIN_AUTH_COOKIE) or "")
+    return bool(token) and secrets.compare_digest(token, CREATOR_ADMIN_PASSWORD)
+
+
+def creator_admin_remote_json(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+    if not path.startswith("/"):
+        path = "/" + path
+    data = None if method.upper() == "GET" else json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        CREATOR_CENTER_BASE_URL + path,
+        data=data,
+        method=method.upper(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept-Encoding": "identity",
+            "Connection": "close",
+            "User-Agent": "KokoCreatorOps/1.0",
+            "Cookie": f"{CREATOR_REMOTE_ADMIN_COOKIE}={urllib.parse.quote(CREATOR_ADMIN_PASSWORD)}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=35) as response:
+            raw = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="ignore")
+            status = int(getattr(response, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode(exc.headers.get_content_charset() or "utf-8", errors="ignore")
+        status = int(exc.code or 500)
+    except http.client.IncompleteRead as exc:
+        raw = bytes(exc.partial or b"").decode("utf-8", errors="ignore")
+        status = 502
+        if not raw.strip().endswith(("}", "]")):
+            return status, {"ok": False, "error": "Creator admin response was interrupted. Please retry."}
+    except Exception as exc:
+        return 502, {"ok": False, "error": friendly_error(str(exc))}
+    try:
+        data_obj = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        data_obj = {"error": raw.strip() or "Creator admin returned a non-JSON response."}
+    if not isinstance(data_obj, dict):
+        data_obj = {"response": data_obj}
+    return status, data_obj
+
+
 def error_cases_login_html(error_message: str = "") -> str:
     message_html = f"<div class='login-error'>{html_escape(error_message)}</div>" if error_message else ""
     return f"""<!doctype html>
@@ -7264,6 +7315,7 @@ def page_html() -> str:
           <a href="/studio">Studio</a>
           <a href="/studio#split-panel">Preview</a>
           <a href="/library">Library</a>
+          <a href="/creator-admin">Creator Ops</a>
           <a href="/stats">Stats</a>
         </div>
       </div>
@@ -9668,6 +9720,7 @@ def studio_html() -> str:
         <a class="studio-tab-link" href="#translate-panel" data-panel-target="translate-panel"><span class="studio-tab-icon">◉</span><span>葡语转译</span></a>
         <a class="studio-tab-link" href="#stats-panel" data-panel-target="stats-panel"><span class="studio-tab-icon">▥</span><span>数据看板</span></a>
         <a class="studio-tab-link" href="/library"><span class="studio-tab-icon">☰</span><span>脚本库</span></a>
+        <a class="studio-tab-link" href="/creator-admin"><span class="studio-tab-icon">★</span><span>Creator 运营</span></a>
       </nav>
       <div class="studio-side-meta">
         <strong>给运营看的内容中台</strong>
@@ -12875,6 +12928,31 @@ def library_html() -> str:
 </html>"""
 
 
+def creator_admin_html() -> str:
+    template = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Koko Creator 运营后台</title><style>
+@import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
+*{{box-sizing:border-box;font-family:'Readex Pro',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}body{{margin:0;min-height:100vh;background:radial-gradient(circle at 8% 8%,rgba(255,130,0,.34),transparent 30%),linear-gradient(180deg,#ffbf75 0%,#fff4e8 42%,#fff 100%);color:#1f1f1f}}button,input,textarea,select{{font:inherit}}.shell{{width:min(1240px,100%);margin:0 auto;padding:24px}}.panel{{border:1px solid rgba(255,255,255,.78);border-radius:34px;background:rgba(255,255,255,.62);box-shadow:0 28px 80px rgba(249,115,0,.16);backdrop-filter:blur(22px);padding:24px}}.top{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}}.kicker{{display:inline-flex;border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.72);color:#ff8200;font-size:12px;font-weight:800}}h1{{margin:14px 0 8px;font-size:clamp(34px,6vw,64px);line-height:.95;letter-spacing:-.05em;color:#ff8200}}.copy{{margin:0;color:#99520f;line-height:1.6;font-weight:650}}.nav{{display:flex;gap:10px;flex-wrap:wrap}}a.btn,button{{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(255,130,0,.24);border-radius:999px;min-height:42px;padding:0 15px;background:rgba(255,255,255,.76);color:#ff8200;font-weight:850;text-decoration:none;cursor:pointer}}button.primary{{border-color:#ff8200;background:#ff8200;color:#fff}}button.danger{{color:#c9481e}}button:disabled{{opacity:.52;cursor:not-allowed}}.toolbar{{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;margin:24px 0 14px}}input,textarea,select{{width:100%;border:1px solid rgba(255,130,0,.22);border-radius:16px;background:rgba(255,255,255,.84);padding:12px 14px;outline:none;color:#1f1f1f}}textarea{{min-height:96px;resize:vertical}}.status{{min-height:22px;color:#99520f;font-size:13px;font-weight:800}}.grid{{display:grid;gap:12px;margin-top:12px}}.card{{display:grid;grid-template-columns:34px 92px 1fr auto;gap:12px;align-items:center;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.74);padding:12px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.card img{{width:92px;aspect-ratio:9/16;border-radius:14px;object-fit:cover;background:#2a1d16}}.card h3{{margin:0 0 7px;font-size:18px;line-height:1.28;color:#1f1f1f}}.card p{{margin:0;color:#6f737a;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}.meta{{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}}.pill{{border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:5px 9px;color:#ff8200;background:#fff7f0;font-size:12px;font-weight:800}}.pill.off{{color:#777;background:#f3f3f3;border-color:#ddd}}.actions{{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}}.login{{min-height:100vh;display:grid;place-items:center;padding:20px}}.login form,.modal-card{{width:min(520px,100%);border:1px solid rgba(255,130,0,.20);border-radius:30px;background:rgba(255,255,255,.78);padding:24px;box-shadow:0 24px 60px rgba(249,115,0,.18);backdrop-filter:blur(20px)}}.login h1{{text-align:center;font-size:42px}}.modal{{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(47,27,9,.42);padding:14px;z-index:20}}.modal.open{{display:flex}}.modal-card{{max-height:92vh;overflow:auto;background:#fffaf5}}.modal-card h2{{margin:0 0 14px;color:#ff8200}}.fields{{display:grid;gap:10px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.modal-actions{{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-wrap:wrap}}.empty{{padding:28px;border:1px dashed rgba(255,130,0,.34);border-radius:20px;text-align:center;color:#99520f;background:rgba(255,255,255,.72)}}@media(max-width:820px){{.toolbar{{grid-template-columns:1fr}}.card{{grid-template-columns:28px 76px 1fr}}.card img{{width:76px}}.actions{{grid-column:2/4;justify-content:flex-start}}.row{{grid-template-columns:1fr}}}}
+</style></head><body><main id="app"></main><div class="modal" id="edit-modal"><form class="modal-card" id="edit-form"><h2>编辑 Creator 脚本</h2><div class="fields"><input name="title" placeholder="标题"><textarea name="summary" placeholder="摘要"></textarea><div class="row"><select name="content_type"></select><label style="display:flex;align-items:center;gap:8px;color:#99520f;font-weight:850"><input name="published" type="checkbox" style="width:auto">上架到 Creator 前台</label></div><input name="video_url" placeholder="视频链接"><input name="cover_url" placeholder="封面链接"><input name="html_url" placeholder="HTML 链接"><input name="zh_html_url" placeholder="中文 HTML 链接"></div><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存</button></div></form></div><script>
+const labels=["待分类","骗子","偷奸耍滑","整蛊","夫妻吵架","夫妻欺骗","夫妻算计","妻管严","赖账","撬墙角","夫妻出轨","夫妻整蛊","偷吃东西","夫妻关系","整蛊恶搞","骗局反转","赖账/金钱冲突","偷吃/偷懒/耍小聪明","热门"];let entries=[];let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");
+function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}}[c]))}}
+async function api(url,opts={{}}){{const r=await fetch(url,{{headers:{{"Content-Type":"application/json"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}
+function loginView(msg=""){{app.innerHTML=`<section class="login"><form id="login-form"><span class="kicker">Koko 内部后台</span><h1>Creator 运营后台</h1><p class="copy">这里管理创作者前台展示的脚本、标签、上下架和同步。</p><input name="password" type="password" placeholder="后台密码" autofocus style="margin-top:16px"><button class="primary" style="width:100%;margin-top:12px" type="submit">进入后台</button><p class="status">${{esc(msg)}}</p></form></section>`}}
+function adminView(){{app.innerHTML=`<section class="shell"><div class="panel"><div class="top"><div><span class="kicker">Koko Creator Operations</span><h1>Creator 运营后台</h1><p class="copy">在 Koko 主平台里管理创作者前台脚本。这里的修改会写入 Creator 覆盖层，不破坏原始脚本库。</p></div><div class="nav"><a class="btn" href="/studio">内容中台</a><a class="btn" href="/library">脚本库</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a><button class="primary" id="sync-now" type="button">立刻同步 Creator</button></div></div><div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="list" class="grid"></div></div></section>`;document.querySelector("#search").addEventListener("input",renderList);document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#sync-now").addEventListener("click",syncNow);document.querySelector("#logout").addEventListener("click",logout);renderList()}}
+function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();if(!q)return entries;return entries.filter(e=>[e.title,e.summary,e.content_type,e.video_url].join(" ").toLowerCase().includes(q))}}
+function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}list.innerHTML=rows.map(e=>`<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span><span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span>${{e.overridden?`<span class="pill">已运营修改</span>`:""}}</div></div><div class="actions"><button type="button" data-edit="${{esc(e.entry_id)}}">编辑</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`).join("")}}
+async function loadEntries(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载中...");const d=await api("/api/creator-admin/scripts");entries=d.entries||[];adminView();document.querySelector("#status").textContent=`共 ${{entries.length}} 条 Creator 脚本`}}catch(e){{loginView(e.message)}}}}
+function openEdit(id){{editing=entries.find(e=>e.entry_id===id);if(!editing)return;form.title.value=editing.title||"";form.summary.value=editing.summary||"";form.content_type.innerHTML=labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("");form.content_type.value=editing.content_type||"待分类";form.published.checked=!!editing.published;form.video_url.value=editing.video_url||"";form.cover_url.value=editing.cover_url||"";form.html_url.value=editing.html_url||"";form.zh_html_url.value=editing.zh_html_url||"";modal.classList.add("open")}}
+async function saveEdit(ev){{ev.preventDefault();if(!editing)return;const payload=Object.fromEntries(new FormData(form).entries());payload.published=form.published.checked;await api(`/api/creator-admin/scripts/${{editing.entry_id}}`,{{method:"POST",body:JSON.stringify(payload)}});modal.classList.remove("open");await loadEntries()}}
+async function togglePublish(id){{const e=entries.find(x=>x.entry_id===id);if(!e)return;await api(`/api/creator-admin/scripts/${{id}}`,{{method:"POST",body:JSON.stringify({{published:!e.published}})}});await loadEntries()}}
+async function bulkDelete(){{const ids=[...document.querySelectorAll("[data-pick]:checked")].map(x=>x.dataset.pick);if(!ids.length)return alert("请先选择脚本");if(!confirm(`确定从 Creator 运营后台删除 ${{ids.length}} 条脚本吗？`))return;await api("/api/creator-admin/bulk-delete",{{method:"POST",body:JSON.stringify({{entry_ids:ids}})}});await loadEntries()}}
+async function syncNow(){{const s=document.querySelector("#status");s.textContent="同步中...";const d=await api("/api/creator-admin/sync",{{method:"POST",body:"{}"}});await loadEntries();alert(`Creator 已同步：${{d.entries_count||"-"}} 条脚本`)}}
+async function logout(){{await api("/creator-admin/logout",{{method:"POST",body:"{}"}}).catch(()=>null);location.reload()}}
+document.addEventListener("submit",async e=>{{if(e.target.id==="login-form"){{e.preventDefault();try{{await api("/creator-admin/login",{{method:"POST",body:JSON.stringify({{password:new FormData(e.target).get("password")}})}});await loadEntries()}}catch(err){{loginView(err.message)}}}}}});
+document.addEventListener("click",e=>{{const edit=e.target.closest("[data-edit]");if(edit)openEdit(edit.dataset.edit);const toggle=e.target.closest("[data-toggle]");if(toggle)togglePublish(toggle.dataset.toggle)}});document.querySelector("#edit-cancel").addEventListener("click",()=>modal.classList.remove("open"));form.addEventListener("submit",saveEdit);loadEntries();
+</script></body></html>"""
+    return template.replace("{{", "{").replace("}}", "}").replace("__CREATOR_BASE__", CREATOR_CENTER_BASE_URL)
+
+
 CREATOR_QUESTIONS = [
     {
         "id": "people",
@@ -13774,6 +13852,16 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/library":
             self.send_html(library_html())
             return
+        if parsed.path == "/creator-admin":
+            self.send_html(creator_admin_html())
+            return
+        if parsed.path == "/api/creator-admin/scripts":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            status, payload = creator_admin_remote_json("/api/admin/scripts?limit=160")
+            self.send_json(payload, status=status)
+            return
         if parsed.path == "/creator-portal":
             if not is_local_creator_portal_request(self):
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -13940,6 +14028,13 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return
+        if parsed.path == "/creator-admin":
+            body = creator_admin_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return
         if parsed.path == "/creator-portal":
             if not is_local_creator_portal_request(self):
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -13973,6 +14068,53 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/creator-admin/login":
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                payload = {}
+            password = str(payload.get("password") or "")
+            if not secrets.compare_digest(password, CREATOR_ADMIN_PASSWORD):
+                self.send_json({"error": "Creator 运营后台密码不正确。"}, status=401)
+                return
+            cookie = f"{CREATOR_ADMIN_AUTH_COOKIE}={urllib.parse.quote(CREATOR_ADMIN_PASSWORD)}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax"
+            self.send_json({"ok": True}, headers=[("Set-Cookie", cookie)])
+            return
+        if parsed.path == "/creator-admin/logout":
+            self.send_json({"ok": True}, headers=[("Set-Cookie", f"{CREATOR_ADMIN_AUTH_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")])
+            return
+        if parsed.path == "/api/creator-admin/sync":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            result = trigger_creator_center_sync()
+            self.send_json(result, status=200 if result.get("ok") else 502)
+            return
+        if parsed.path == "/api/creator-admin/bulk-delete":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            status, result = creator_admin_remote_json("/api/admin/scripts/bulk-delete", method="POST", payload=payload)
+            self.send_json(result, status=status)
+            return
+        creator_admin_update_match = re.fullmatch(r"/api/creator-admin/scripts/([0-9a-f]{32})", parsed.path)
+        if creator_admin_update_match:
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            status, result = creator_admin_remote_json(f"/api/admin/scripts/{creator_admin_update_match.group(1)}", method="POST", payload=payload)
+            self.send_json(result, status=status)
+            return
         if parsed.path == "/api/creator/submissions":
             if not is_local_creator_portal_request(self):
                 self.send_error(HTTPStatus.NOT_FOUND)
