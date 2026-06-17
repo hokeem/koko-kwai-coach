@@ -88,6 +88,7 @@ CREATOR_SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
 CREATOR_SYNC_META_FILE = DATA_ROOT / "creator_sync_meta.json"
 CREATOR_LIBRARY_SOURCE_URL = os.environ.get("CREATOR_LIBRARY_SOURCE_URL", "https://koko-kwai-coach.onrender.com/api/library")
 CREATOR_LIBRARY_SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
+CREATOR_CENTER_SYNC_URL = os.environ.get("CREATOR_CENTER_SYNC_URL", "https://koko-fpml.onrender.com/api/creator/sync-library")
 FILTER_JOBS_FILE = DATA_ROOT / "filter_jobs.json"
 FILTER_CACHE_ROOT = DATA_ROOT / "filter_cache"
 VISION_MODELS_DIR = DATA_ROOT / "vision_models"
@@ -12385,6 +12386,7 @@ def library_html() -> str:
       -webkit-backdrop-filter: blur(14px);
     }}
     .action-link-danger {{ color:#F97300; }}
+    .action-link.primary {{ background:#FF8200; border-color:#FF8200; color:#fff; }}
     .home-link {{ color:#FF8200; text-decoration:none; font-weight:700; }}
     .confirm-overlay {{
       position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
@@ -12418,6 +12420,7 @@ def library_html() -> str:
       </div>
       <div class="library-toolbar">
         <div class="bulk-actions">
+          <button class="action-link primary" id="creator-sync-now" type="button">立刻同步创作者中心</button>
           <button class="action-link" id="bulk-mode-toggle" type="button">批量删除</button>
           <button class="action-link action-link-danger" id="bulk-delete-approve" type="button" hidden disabled>删除选中 0</button>
           <button class="action-link" id="bulk-cancel" type="button" hidden>取消</button>
@@ -12483,6 +12486,7 @@ def library_html() -> str:
     const contentTypeSelect = document.getElementById("content-type-select");
     const contentTypeCancel = document.getElementById("content-type-cancel");
     const contentTypeSave = document.getElementById("content-type-save");
+    const creatorSyncNow = document.getElementById("creator-sync-now");
     const bulkModeToggle = document.getElementById("bulk-mode-toggle");
     const bulkDeleteApprove = document.getElementById("bulk-delete-approve");
     const bulkCancel = document.getElementById("bulk-cancel");
@@ -12639,6 +12643,31 @@ def library_html() -> str:
 
     if (contentFilter) {{
       contentFilter.addEventListener("change", applyLibraryFilter);
+    }}
+
+    if (creatorSyncNow) {{
+      creatorSyncNow.addEventListener("click", async () => {{
+        const originalText = creatorSyncNow.textContent;
+        creatorSyncNow.textContent = "同步中...";
+        creatorSyncNow.disabled = true;
+        try {{
+          const response = await fetch("/api/library/sync-creator-center", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ force: true }}),
+          }});
+          const data = await response.json();
+          if (!response.ok || data.ok === false) throw new Error(data.error || "同步失败");
+          creatorSyncNow.textContent = "已同步";
+          alert(`创作者中心已同步。当前脚本数：${{data.entries_count || "-"}}`);
+          setTimeout(() => {{ creatorSyncNow.textContent = originalText; }}, 1600);
+        }} catch (error) {{
+          alert(`同步创作者中心失败：${{error.message || error}}`);
+          creatorSyncNow.textContent = originalText;
+        }} finally {{
+          creatorSyncNow.disabled = false;
+        }}
+      }});
     }}
 
     if (bulkModeToggle) {{
@@ -13040,6 +13069,30 @@ def sync_creator_online_library_if_needed(*, force: bool = False) -> dict[str, A
         }
         write_json_atomic(CREATOR_SYNC_META_FILE, meta)
         return meta
+
+
+def trigger_creator_center_sync() -> dict[str, Any]:
+    target_url = str(CREATOR_CENTER_SYNC_URL or "").strip()
+    if not target_url:
+        return {"ok": False, "error": "CREATOR_CENTER_SYNC_URL is not configured."}
+    try:
+        request = urllib.request.Request(
+            target_url,
+            data=b"{}",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "KokoScriptLibrary/1.0",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="ignore")
+        payload = json.loads(raw) if raw.strip() else {}
+        if not isinstance(payload, dict):
+            payload = {"response": payload}
+        return {"ok": True, "target_url": target_url, **payload}
+    except Exception as exc:
+        return {"ok": False, "target_url": target_url, "error": friendly_error(str(exc))}
 
 
 def creator_abs_url(url: object, base_url: str) -> str:
@@ -14158,6 +14211,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Library entry not found."}, status=404)
                 return
             self.send_json({"ok": True, "entry": updated})
+            return
+        if parsed.path == "/api/library/sync-creator-center":
+            result = trigger_creator_center_sync()
+            self.send_json(result, status=200 if result.get("ok") else 502)
             return
         if parsed.path != "/api/jobs":
             if parsed.path == "/api/translation-jobs":
