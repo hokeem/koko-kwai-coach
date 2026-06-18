@@ -18,7 +18,7 @@ LOCALE_COPY = {
         "default_title": "视频总结归纳 + 脚本表",
         "source_link": "视频链接",
         "summary_title": "视频整体内容总结",
-        "core_points_title": "",
+        "core_points_title": "核心爆点",
         "replaceable_title": "替换方案",
         "table_title": "脚本表",
         "time_col": "时间",
@@ -33,7 +33,7 @@ LOCALE_COPY = {
         "default_title": "Resumo do vídeo + Tabela do roteiro",
         "source_link": "Link do vídeo",
         "summary_title": "Resumo geral do vídeo",
-        "core_points_title": "",
+        "core_points_title": "Pontos-chave",
         "replaceable_title": "Planos de substituição",
         "table_title": "Tabela do roteiro",
         "time_col": "Tempo",
@@ -132,7 +132,7 @@ def render(data: dict, base_dir: Path, locale: str = "zh") -> str:
         .replace("{{ title_card }}", title_card)
         .replace("{{ summary_card }}", summary_card)
         .replace("{{ video_card }}", storyboard_card)
-        .replace("{{ core_viral_points_card }}", "")
+        .replace("{{ core_viral_points_card }}", render_insight_card(copy["core_points_title"], data.get("core_viral_points"), locale))
         .replace("{{ replaceable_parts_card }}", render_insight_card(copy["replaceable_title"], data.get("replaceable_parts"), locale))
         .replace("{{ table_card }}", table_card)
     )

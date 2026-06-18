@@ -2909,7 +2909,7 @@ REVIEW_REFINE_PROMPT = """你是一个“复盘重做”脚本整理器。
 - `whole_video_summary` 要按“起因 -> 推进 -> 对质/证据 -> 最终落点”来写，重点落在具体剧情和最终结果，不要用抽象的“揭示了复杂关系/人性弱点/社会判断”来替代真正的结局描述。
 - 背后原因可以写，但必须嵌在具体人物动机里，例如“他为了维护面子选择否认真相”，而不是另起一段空泛说教。
 - 如果人物关系在复盘后已经足够稳定，`title` 和 `whole_video_summary` 优先用自然角色称呼（丈夫/妻子/邻居等），不要为了机械一致性继续保留 `男性A/女性A`。
-- 不再输出“核心爆点”展示内容；如果历史结构里保留 core_viral_points，可以留空或保持兼容，但不要依赖它作为最终展示部分。
+- `core_viral_points` 重新保留，但要用新的简洁格式来写：每一项都是一句能直接说明“这条视频为什么成立/为什么抓人”的短爆点，不要写成长报告。
 - `replaceable_parts` 必须写成可以直接套用的替换方案，不是建议。每一项都要包含“替换成什么人物/场景/道具/冲突”和“替换后脚本主轴如何变化”。
 - `mechanism.items[*].text` 继续保持具体，尤其 `背后原因` 必须落在这条视频里的真实人物心理和关系机制上。
 - 如果旧版本里有空泛的抽象收束句，请在复盘版里收掉，改成更具体的剧情归纳和结局描述。
@@ -10601,6 +10601,9 @@ def studio_html() -> str:
         "机制说明：",
         normalizedText(mechanismReason),
         "",
+        "核心爆点：",
+        formatInsightDraft(script.core_viral_points),
+        "",
         "替换方案：",
         formatInsightDraft(script.replaceable_parts),
         "",
@@ -10614,7 +10617,7 @@ def studio_html() -> str:
       const order = [];
       let current = "";
       String(text || "").split(/\\r?\\n/).forEach((line) => {{
-        const match = line.match(/^\\s*(标题|整体梗概|机制说明|替换方案|可替换部分|脚本表)\\s*[:：]\\s*$/);
+        const match = line.match(/^\\s*(标题|整体梗概|机制说明|核心爆点|替换方案|可替换部分|脚本表)\\s*[:：]\\s*$/);
         if (match) {{
           current = match[1];
           if (!sections[current]) {{
@@ -10635,11 +10638,11 @@ def studio_html() -> str:
         const parts = cleaned.split(/[:：]/);
         if (parts.length >= 2) {{
           return {{
-            label: normalizedText(parts.shift(), "替换方案"),
+            label: normalizedText(parts.shift(), "要点"),
             text: normalizedText(parts.join("："), "无"),
           }};
         }}
-        return {{ label: "替换方案", text: normalizedText(cleaned, "无") }};
+        return {{ label: "要点", text: normalizedText(cleaned, "无") }};
       }});
     }}
 
@@ -10716,6 +10719,7 @@ def studio_html() -> str:
       const script = item.result_json || {{}};
       const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
       const mechanismReason = (((script.mechanism || {{}}).reason) || "");
+      const corePointCards = normalizeInsightItems(script.core_viral_points);
       const replacementOptions = normalizeInsightItems(script.replaceable_parts).slice(0, 8);
       const storyboardPrompt = normalizedText(item.storyboard_prompt || buildStoryboardPrompt(script), "");
       const storyboardPreviewUrl = versionedResultUrl(item.storyboard_preview_url || item.storyboard_cover_url || "", item);
@@ -10779,6 +10783,10 @@ def studio_html() -> str:
           <section class="structured-editor-section">
             <h5>视频整体内容总结</h5>
             <textarea class="structured-editor-textarea" data-edit-field="whole_video_summary">${{escapeHtml(normalizedText(script.whole_video_summary))}}</textarea>
+          </section>
+          <section class="structured-editor-section">
+            <h5>核心爆点</h5>
+            <div class="structured-insight-grid">${{renderInsightEditors(corePointCards, "core")}}</div>
           </section>
           <section class="structured-editor-section">
             <h5>替换方案</h5>
@@ -10935,6 +10943,7 @@ def studio_html() -> str:
             text: card.querySelector('[data-insight-field="text"]')?.value || "",
           }};
         }});
+        const coreViralPoints = collectInsights("core");
         const replaceableParts = collectInsights("replaceable");
         const rows = Array.from(root.querySelectorAll("[data-structured-row-index]")).map((rowCard, idx) => {{
           return {{
@@ -10953,6 +10962,7 @@ def studio_html() -> str:
           rows,
           target_language: root.getAttribute("data-editor-lang") || "zh",
         }};
+        if (coreViralPoints.length) payload.core_viral_points = coreViralPoints;
         if (replaceableParts.length) payload.replaceable_parts = replaceableParts;
         return payload;
       }}
@@ -10965,13 +10975,14 @@ def studio_html() -> str:
         originalRows = [];
       }}
       const textOf = (name) => (sections[name] || []).join("\\n").trim();
-      return {{
-        title: textOf("标题"),
-        whole_video_summary: textOf("整体梗概"),
-        mechanism_reason: textOf("机制说明"),
-        replaceable_parts: parseInsightDraft(textOf("替换方案") || textOf("可替换部分")),
-        rows: parseScriptRowsDraft(textOf("脚本表"), originalRows),
-        target_language: root.getAttribute("data-editor-lang") || "zh",
+        return {{
+          title: textOf("标题"),
+          whole_video_summary: textOf("整体梗概"),
+          mechanism_reason: textOf("机制说明"),
+          core_viral_points: parseInsightDraft(textOf("核心爆点")),
+          replaceable_parts: parseInsightDraft(textOf("替换方案") || textOf("可替换部分")),
+          rows: parseScriptRowsDraft(textOf("脚本表"), originalRows),
+          target_language: root.getAttribute("data-editor-lang") || "zh",
       }};
     }}
 
