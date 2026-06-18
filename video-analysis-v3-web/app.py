@@ -5832,6 +5832,7 @@ STORYBOARD_IMAGE_PROMPT_PREFIX = """你是 Koko 的分镜示意图生成助手�
 请把输入的短视频脚本整理成一张“分镜稿 / storyboard sheet”风格的示意图，要求：
 - 黑白灰铅笔草图风格，像手绘分镜稿，不要彩色，不要照片质感
 - 白色纸面背景，深灰色线稿，构图干净
+- 最终成图固定为 1:1 正方形
 - 一张图里排成 6 格到 8 格矩形分镜，像影视前期的分镜板
 - 每格表现脚本里的一个关键动作节点，人物姿态和场景关系要清楚
 - 整体重点是“拍摄准备感”，让人一眼看懂场景、人物、动作
@@ -8945,10 +8946,15 @@ def studio_html() -> str:
       border-radius: 16px;
       overflow: hidden;
       background: rgba(255,255,255,.92);
+      aspect-ratio: 1 / 1;
+      display: grid;
+      place-items: center;
     }}
     .storyboard-preview {{
       display: block;
       width: 100%;
+      height: 100%;
+      object-fit: cover;
       background: #fff;
     }}
     .storyboard-empty {{
@@ -10571,7 +10577,7 @@ def studio_html() -> str:
       }}).join("\\n");
       return [
         "请把这份短视频脚本画成黑白灰铅笔分镜稿风格的示意图。",
-        "要求：白底纸面、手绘线稿、6到8格矩形分镜、非彩色、非照片、不要海报感、不要大段文字。",
+        "要求：固定 1:1 正方形，白底纸面、手绘线稿、6到8格矩形分镜、非彩色、非照片、不要海报感、不要大段文字。",
         `标题：${{normalizedText(script.title, "视频脚本")}}`,
         `整体梗概：${{normalizedText(script.whole_video_summary)}}`,
         "关键分镜：",
