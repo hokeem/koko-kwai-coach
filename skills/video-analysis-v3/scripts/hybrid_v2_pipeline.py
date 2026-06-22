@@ -65,7 +65,10 @@ PRIMARY_PROMPT = """你是一个严格遵循 video-analysis-v2-sop 的短视频�
   "audio_information_score": "0/10 到 10/10",
   "source_url": "原视频链接",
   "whole_video_summary": "完整自然语言总结，必须写出故事背后的原因和关系机制",
-  "core_viral_points": [],
+  "core_viral_points": [
+    {"label": "反差点", "text": "人物的认真反应和实际真相之间形成强反差，观众会立刻被勾住。"},
+    {"label": "包袱落点", "text": "前面铺垫出的紧张感，最后却落到一个生活化的小原因上，形成好笑落差。"}
+  ],
   "replaceable_parts": [
     {"label": "替换方案名", "text": "直接可执行的替换方案：把哪些人物/场景/道具/冲突替换成什么，并说明替换后的故事主轴。"}
   ],
@@ -206,7 +209,10 @@ REFINE_PROMPT = """你是最后的 v2 成品整理器。
   "audio_information_score": "0/10 到 10/10",
   "source_url": "原视频链接",
   "whole_video_summary": "一到两段自然语言总结",
-  "core_viral_points": [],
+  "core_viral_points": [
+    {"label": "冲突钩子", "text": "人物一开场就进入不对劲的状态，观众会马上想知道后面为什么会这样。"},
+    {"label": "结局反转", "text": "视频把观众往严重方向带，最后却用轻巧真相翻回来，包袱成立。"}
+  ],
   "replaceable_parts": [
     {"label": "替换方案名", "text": "直接可执行的替换方案"}
   ],

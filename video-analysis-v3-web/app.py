@@ -2739,6 +2739,21 @@ def normalize_replaceable_parts(value: Any, fallback: list[dict[str, str]] | Non
     return json.loads(json.dumps(fallback or [{"label": "替换方案", "text": "无"}], ensure_ascii=False))
 
 
+def normalize_core_viral_points(value: Any, fallback: list[dict[str, str]] | None = None) -> list[dict[str, str]]:
+    items = value if isinstance(value, list) else []
+    normalized = [
+        {
+            "label": fill_text((item or {}).get("label") or (item or {}).get("title") or (item or {}).get("name"), "爆点"),
+            "text": fill_text((item or {}).get("text") or (item or {}).get("description") or (item or {}).get("value"), "无"),
+        }
+        for item in items
+        if isinstance(item, dict) and str((item or {}).get("text") or (item or {}).get("description") or (item or {}).get("value") or "").strip()
+    ]
+    if normalized:
+        return normalized[:8]
+    return json.loads(json.dumps(fallback or [], ensure_ascii=False))
+
+
 HEAVY_REVIEW_FAILURE_LAYERS = {
     "story_spine",
     "primary_analysis",
@@ -3049,6 +3064,31 @@ REPLACEMENT_PLAN_REFRESH_PROMPT = """你是 Koko 的脚本替换方案生成器�
     {
       "label": "替换方案名",
       "text": "直接可执行的替换方案"
+    }
+  ]
+}
+"""
+
+
+CORE_VIRAL_POINTS_REFRESH_PROMPT = """你是 Koko 的短视频爆点整理助手。
+
+你会收到一份已经存在的短视频脚本 JSON。你的任务不是重写整份脚本，而是基于当前最新脚本内容，重新整理“核心爆点”。
+
+要求：
+- 只输出 `core_viral_points`
+- 每一项都必须是短句式爆点，不要写成长段分析
+- 要直接说明这条视频为什么抓人、反差点在哪、笑点/冲突为什么成立
+- 每项尽量一句话说完
+- 结合当前标题、整体梗概、分镜脚本来写，不能沿用旧主轴
+- 尽量给 3 条，最多 5 条
+- 用中文输出
+
+输出严格 JSON：
+{
+  "core_viral_points": [
+    {
+      "label": "爆点名",
+      "text": "一句短爆点"
     }
   ]
 }
@@ -6334,6 +6374,36 @@ def refresh_replaceable_parts(script_json: dict[str, Any]) -> dict[str, Any]:
     return refreshed
 
 
+def refresh_core_viral_points(script_json: dict[str, Any]) -> dict[str, Any]:
+    refreshed = json.loads(json.dumps(script_json or {}, ensure_ascii=False))
+    existing = normalize_core_viral_points(refreshed.get("core_viral_points"))
+    if not GOOGLE_API_KEY or run_text_json_prompt_with_fallback is None:
+        refreshed["core_viral_points"] = existing
+        return refreshed
+    payload = {
+        "title": refreshed.get("title") or "",
+        "whole_video_summary": refreshed.get("whole_video_summary") or "",
+        "mechanism": refreshed.get("mechanism") or {},
+        "rows": choose_script_rows(refreshed),
+        "existing_core_viral_points": existing,
+    }
+    try:
+        result, _, _ = run_text_json_prompt_with_fallback(
+            payload,
+            GOOGLE_API_KEY,
+            unique_models(*MODEL_CANDIDATES, *PRIMARY_FALLBACK_MODELS, *SUPPLEMENT_FALLBACK_MODELS),
+            CORE_VIRAL_POINTS_REFRESH_PROMPT,
+            "core viral points refresh",
+        )
+        refreshed["core_viral_points"] = normalize_core_viral_points(
+            (result or {}).get("core_viral_points"),
+            fallback=existing,
+        )
+    except Exception:
+        refreshed["core_viral_points"] = existing
+    return refreshed
+
+
 def regenerate_item_outputs(
     parent_job_id: str,
     item_index: int,
@@ -6384,9 +6454,10 @@ def regenerate_item_outputs(
             persist_library_entry(parent_job_id, item, use_llm=False)
         return public_item_view(item)
 
-    script_json = refresh_replaceable_parts(
+    script_json = refresh_core_viral_points(
         json.loads(json.dumps(script_json or {}, ensure_ascii=False))
     )
+    script_json = refresh_replaceable_parts(script_json)
     script_json = enforce_chinese_dialogue_translation(
         script_json,
         GOOGLE_API_KEY,
@@ -10557,9 +10628,9 @@ def studio_html() -> str:
       return text || fallback;
     }}
 
-    function normalizeInsightItems(value) {{
+    function normalizeInsightItems(value, fallbackItems = [{{ label: "要点", text: "无" }}]) {{
       if (Array.isArray(value) && value.length) return value;
-      return [{{ label: "要点", text: "无" }}];
+      return fallbackItems;
     }}
 
     function formatInsightDraft(items) {{
@@ -10725,7 +10796,7 @@ def studio_html() -> str:
       const script = item.result_json || {{}};
       const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
       const mechanismReason = (((script.mechanism || {{}}).reason) || "");
-      const corePointCards = normalizeInsightItems(script.core_viral_points);
+      const corePointCards = normalizeInsightItems(script.core_viral_points, []);
       const replacementOptions = normalizeInsightItems(script.replaceable_parts).slice(0, 8);
       const storyboardPrompt = normalizedText(item.storyboard_prompt || buildStoryboardPrompt(script), "");
       const storyboardPreviewUrl = versionedResultUrl(item.storyboard_preview_url || item.storyboard_cover_url || "", item);
