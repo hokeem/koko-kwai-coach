@@ -14004,7 +14004,13 @@ class AppHandler(BaseHTTPRequestHandler):
             if not has_creator_admin_access(self):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
                 return
-            status, payload = creator_admin_remote_json("/api/admin/scripts?limit=160")
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                limit = max(1, min(500, int((query.get("limit") or ["500"])[0] or "500")))
+            except Exception:
+                limit = 500
+            search = urllib.parse.urlencode({"limit": limit})
+            status, payload = creator_admin_remote_json(f"/api/admin/scripts?{search}")
             self.send_json(payload, status=status)
             return
         if parsed.path == "/api/creator-admin/creators":
