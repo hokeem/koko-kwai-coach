@@ -5880,10 +5880,56 @@ STORYBOARD_IMAGE_PROMPT_PREFIX = """你是 Koko 的分镜示意图生成助手�
 - 一张图里排成 6 格到 8 格矩形分镜，像影视前期的分镜板
 - 每格表现脚本里的一个关键动作节点，人物姿态和场景关系要清楚
 - 整体重点是“拍摄准备感”，让人一眼看懂场景、人物、动作
-- 不要做成海报，不要 UI，不要写大段文字，不要水印，不要品牌字
-- 允许极少量非常轻的镜头编号感，但不要出现密集文字
+- 不要做成海报，不要 UI，不要水印，不要品牌字
+- 画面里不要出现任何文字、字幕、标题、编号、logo 或水印
 - 画面以连续叙事为主，保留夸张表情和关键动作
 """
+
+
+STORYBOARD_PROMPT_GUARDRAILS = """固定硬性条件，必须保留且不能被其他要求覆盖：
+- 固定 1:1 正方形构图
+- 白底纸面
+- 黑白灰手绘线稿 / 铅笔草图风格
+- 多格子的矩形分镜，像 storyboard sheet
+- 非彩色，非照片，非海报，非 UI
+- 不要带任何文字、字幕、标题、编号、logo 或水印
+"""
+
+
+STORYBOARD_PROMPT_DRAFT_PROMPT = """你是 Koko 的短剧分镜生图提示词助手。
+
+你会收到一份短视频脚本 JSON，可能已经被运营人员手动修改过。请基于最新脚本，写一段可以直接给生图模型使用的分镜示意图提示词。
+
+目标：
+- 让图片像“分镜稿 / storyboard sheet”，用于给创作者理解拍摄节奏。
+- 提示词必须围绕脚本里最新的标题、整体梗概、脚本表动作节点。
+- 每格只描述画面和动作，不要要求生成任何文字。
+
+硬性要求：
+1. 只输出 JSON，不要 Markdown。
+2. JSON 只有一个字段：`prompt`。
+3. `prompt` 可以中文写，但要清晰、可执行。
+4. 必须包含这些不可变条件：固定 1:1 正方形、白底纸面、手绘线稿、多格子的矩形分镜、非彩色、非照片、不要带任何文字。
+5. 不要生成海报式封面，不要大标题，不要 UI，不要 logo。
+
+输出格式：
+{
+  "prompt": "完整生图提示词"
+}
+"""
+
+
+def enforce_storyboard_prompt_guardrails(prompt: str) -> str:
+    body = str(prompt or "").strip()
+    if not body:
+        body = STORYBOARD_IMAGE_PROMPT_PREFIX.strip()
+    banned_text_clause = "画面里不要出现任何文字、字幕、标题、编号、logo 或水印。"
+    if banned_text_clause not in body:
+        body = f"{body}\n\n{banned_text_clause}"
+    guardrails = STORYBOARD_PROMPT_GUARDRAILS.strip()
+    if guardrails not in body:
+        body = f"{guardrails}\n\n{body}"
+    return body.strip()
 
 
 def guess_extension_from_mime(mime_type: str) -> str:
@@ -5917,7 +5963,33 @@ def build_storyboard_prompt(script_json: dict[str, Any], extra_instruction: str 
     extra = str(extra_instruction or "").strip()
     if extra:
         prompt.extend(["", f"额外修改要求：{extra}"])
-    return "\n".join(prompt).strip()
+    return enforce_storyboard_prompt_guardrails("\n".join(prompt).strip())
+
+
+def generate_storyboard_prompt_from_script(script_json: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    fallback = build_storyboard_prompt(script_json)
+    if not GOOGLE_API_KEY or run_text_json_prompt_with_fallback is None:
+        return fallback, {}, "fallback"
+    payload = {
+        "title": script_json.get("title") or "",
+        "whole_video_summary": script_json.get("whole_video_summary") or "",
+        "core_viral_points": script_json.get("core_viral_points") or [],
+        "replaceable_parts": script_json.get("replaceable_parts") or [],
+        "rows": choose_script_rows(script_json)[:8],
+        "fixed_guardrails": STORYBOARD_PROMPT_GUARDRAILS,
+    }
+    try:
+        result, raw, model = run_text_json_prompt_with_fallback(
+            payload,
+            GOOGLE_API_KEY,
+            unique_models(*MODEL_CANDIDATES, *PRIMARY_FALLBACK_MODELS, *SUPPLEMENT_FALLBACK_MODELS),
+            STORYBOARD_PROMPT_DRAFT_PROMPT,
+            "storyboard prompt draft",
+        )
+        prompt = enforce_storyboard_prompt_guardrails(str((result or {}).get("prompt") or "").strip() or fallback)
+        return prompt, raw if isinstance(raw, dict) else {}, model
+    except Exception:
+        return fallback, {}, "fallback"
 
 
 def extract_inline_image_from_gemini_response(payload: dict[str, Any]) -> tuple[bytes, str]:
@@ -6068,7 +6140,7 @@ def generate_storyboard_preview(item_id: str, prompt_override: str = "") -> dict
     output_dir = RESULTS_ROOT / item_id
     output_dir.mkdir(parents=True, exist_ok=True)
     script_json = item.get("zh_result_json") or item.get("result_json") or {}
-    prompt = str(prompt_override or "").strip() or build_storyboard_prompt(script_json)
+    prompt = enforce_storyboard_prompt_guardrails(str(prompt_override or "").strip() or build_storyboard_prompt(script_json))
     image_bytes, mime_type, raw, model = run_gemini_image_prompt(prompt)
     preview_name = STORYBOARD_PREVIEW_BASENAME + guess_extension_from_mime(mime_type)
     preview_path = output_dir / preview_name
@@ -6086,6 +6158,35 @@ def generate_storyboard_preview(item_id: str, prompt_override: str = "") -> dict
     with job_lock:
         refreshed = jobs[parent_job_id]["items"][item_index]
     return public_item_view(refreshed)
+
+
+def generate_storyboard_prompt_for_item(item_id: str, edits_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    context = find_item_context(item_id)
+    if not context:
+        raise RuntimeError("Script item not found.")
+    parent_job_id, item_index, item = context
+    if item.get("status") != "completed" or not item.get("result_json"):
+        raise RuntimeError("Only completed scripts can generate storyboard prompts.")
+    output_dir = RESULTS_ROOT / item_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_script = item.get("result_json") or {}
+    script_json = apply_script_edits(base_script, edits_payload or {}) if isinstance(edits_payload, dict) and edits_payload else base_script
+    prompt, raw, model = generate_storyboard_prompt_from_script(script_json)
+    (output_dir / STORYBOARD_PROMPT_FILE).write_text(prompt, encoding="utf-8")
+    if raw:
+        (output_dir / "storyboard_prompt_raw_gemini.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    state = save_storyboard_state(item_id, prompt=prompt, model=model)
+    update_job_item(
+        parent_job_id,
+        item_index,
+        storyboard_prompt=state.get("storyboard_prompt") or prompt,
+        storyboard_updated_at=state.get("storyboard_updated_at") or now_iso(),
+    )
+    with job_lock:
+        refreshed = jobs[parent_job_id]["items"][item_index]
+    view = public_item_view(refreshed)
+    view["storyboard_prompt"] = prompt
+    return view
 
 
 def apply_storyboard_cover_to_scripts(parent_job_id: str, item_index: int, item_id: str, cover_url: str) -> dict[str, Any]:
@@ -10652,7 +10753,7 @@ def studio_html() -> str:
       }}).join("\\n");
       return [
         "请把这份短视频脚本画成黑白灰铅笔分镜稿风格的示意图。",
-        "要求：固定 1:1 正方形，白底纸面、手绘线稿、6到8格矩形分镜、非彩色、非照片、不要海报感、不要大段文字。",
+        "固定硬性条件：固定 1:1 正方形，白底纸面，手绘线稿，多格子的矩形分镜，非彩色，非照片，不要海报感，不要带任何文字、字幕、标题、编号、logo 或水印。",
         `标题：${{normalizedText(script.title, "视频脚本")}}`,
         `整体梗概：${{normalizedText(script.whole_video_summary)}}`,
         "关键分镜：",
@@ -10767,9 +10868,9 @@ def studio_html() -> str:
         <div class="library-confirm-card" data-library-confirm-card="${{item.id}}">
           <div class="library-confirm-copy">
             <div class="library-confirm-title">确认入库</div>
-            <div class="library-confirm-note">脚本生成后不会自动进入脚本库。确认这个版本可用后，再点击按钮手动入库。</div>
+            <div class="library-confirm-note">确认这个版本可用后，Koko 会自动生成全葡语版本并写入脚本库。</div>
           </div>
-          <button class="action-link primary" type="button" data-confirm-library="${{item.id}}">确认入库</button>
+          <button class="action-link primary" type="button" data-confirm-library="${{item.id}}">转葡语并入库</button>
         </div>
       `;
     }}
@@ -10788,7 +10889,7 @@ def studio_html() -> str:
             <textarea class="editor-textarea editor-draft-textarea" data-editor-draft spellcheck="false">${{escapeHtml(draft)}}</textarea>
             <div class="link-row">
               <button class="action-link" type="button" data-save-edits="${{item.id}}">保存修改</button>
-              <button class="action-link primary" type="button" data-save-library="${{item.id}}">保存修改并确认入库</button>
+              <button class="action-link primary" type="button" data-save-library="${{item.id}}">保存修改并转葡语入库</button>
             </div>
           </div>
         </details>
@@ -10801,30 +10902,8 @@ def studio_html() -> str:
       const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
       const mechanismReason = (((script.mechanism || {{}}).reason) || "");
       const corePointCards = normalizeInsightItems(script.core_viral_points, []);
-      const replacementOptions = normalizeInsightItems(script.replaceable_parts).slice(0, 8);
       const storyboardPrompt = normalizedText(item.storyboard_prompt || buildStoryboardPrompt(script), "");
       const storyboardPreviewUrl = versionedResultUrl(item.storyboard_preview_url || item.storyboard_cover_url || "", item);
-      const normalizeReplacementPlan = (label, text) => {{
-        const cleanLabel = normalizedText(label, "替换元素");
-        const cleanText = normalizedText(text, "");
-        if (!cleanText) return `把原脚本中的${{cleanLabel}}替换成新的同结构元素，并保持原有冲突推进和结尾落点。`;
-        if (/替换成|替换为|换成|改成/.test(cleanText) && !/可以|可根据|可替换|可将|可把/.test(cleanText)) return cleanText;
-        return `把原脚本中的${{cleanLabel}}替换为：${{cleanText}}`;
-      }};
-      const summarizeReplacementPlan = (label, text) => {{
-        const cleanLabel = normalizedText(label, "这部分");
-        const cleanText = normalizedText(text, "");
-        if (!cleanText) return `把${{cleanLabel}}换成新的设定`;
-        let match = cleanText.match(/将(.+?)替换(?:成|为)(.+?)(?:[，。；]|$)/);
-        if (match) return `把${{normalizedText(match[1], cleanLabel)}}换成${{normalizedText(match[2], "新的设定")}}`;
-        match = cleanText.match(/把(.+?)(?:替换(?:成|为)|换成|改成)(.+?)(?:[，。；]|$)/);
-        if (match) return `把${{normalizedText(match[1], cleanLabel)}}换成${{normalizedText(match[2], "新的设定")}}`;
-        match = cleanText.match(/从(.+?)到(.+?)(?:[，。；]|$)/);
-        if (match) return `把${{normalizedText(match[1], cleanLabel)}}换成${{normalizedText(match[2], "新的设定")}}`;
-        const firstClause = cleanText.split(/[。；]/)[0].trim();
-        if (/换成|替换成|替换为|改成/.test(firstClause)) return firstClause;
-        return `把${{cleanLabel}}换成${{firstClause.replace(/^具体方案[:：]?/, "").trim() || "新的设定"}}`;
-      }};
       const renderInsightEditors = (items, kind) => {{
         return normalizeInsightItems(items).map((point, idx) => `
           <div class="structured-insight" data-insight-kind="${{kind}}" data-insight-index="${{idx}}">
@@ -10833,19 +10912,6 @@ def studio_html() -> str:
           </div>
         `).join("");
       }};
-      const replacementCards = replacementOptions.length
-        ? replacementOptions.map((point, idx) => {{
-            const label = normalizedText(point.label || point.title || point.name, `替换方案 ${{idx + 1}}`);
-            const text = normalizeReplacementPlan(label, point.text || point.description || point.value);
-            const preview = summarizeReplacementPlan(label, text);
-            return `
-              <button class="replacement-option" type="button" data-apply-replacement="${{item.id}}" data-replacement-label="${{escapeHtml(label)}}" data-replacement-text="${{escapeHtml(text)}}">
-                <strong>${{escapeHtml(label)}}</strong>
-                <span>${{escapeHtml(preview)}}</span>
-              </button>
-            `;
-          }}).join("")
-        : `<div class="replacement-empty">暂无可直接套用的替换方案，可以在下方自己输入。</div>`;
       const rows = normalizeRows(script);
       const rowEditors = rows.map((row, idx) => `
         <tr data-structured-row-index="${{idx}}" data-row-original-index="${{idx}}">
@@ -10871,13 +10937,7 @@ def studio_html() -> str:
           </section>
           <section class="structured-editor-section">
             <h5>替换方案</h5>
-            <div class="replacement-picker" data-replacement-picker="${{item.id}}">
-              <div class="replacement-option-grid">${{replacementCards}}</div>
-              <div class="replacement-custom">
-                <input class="structured-editor-input" data-custom-replacement="${{item.id}}" placeholder="也可以自己输入一个替换方案，例如：把丈夫换成老板，把厨房换成办公室">
-                <button class="action-link primary" type="button" data-apply-custom-replacement="${{item.id}}">应用替换方案</button>
-              </div>
-            </div>
+            <div class="structured-insight-grid">${{renderInsightEditors(script.replaceable_parts, "replaceable")}}</div>
           </section>
           <section class="structured-editor-section">
             <h5>脚本表</h5>
@@ -10898,6 +10958,7 @@ def studio_html() -> str:
                 : `<div class="storyboard-empty">这里会生成分镜稿风格的示意图。默认会根据当前脚本表自动写提示词，你也可以先改下面这段要求，再重新生成。</div>`}}
               <textarea class="structured-editor-textarea storyboard-prompt" data-storyboard-prompt="${{item.id}}">${{escapeHtml(storyboardPrompt)}}</textarea>
               <div class="storyboard-actions">
+                <button class="action-link" type="button" data-generate-storyboard-prompt="${{item.id}}">生成生图提示词</button>
                 <button class="action-link primary" type="button" data-generate-storyboard="${{item.id}}">${{storyboardPreviewUrl ? "重新生成示意图" : "生成示意图"}}</button>
                 <button class="action-link" type="button" data-confirm-storyboard="${{item.id}}" ${{storyboardPreviewUrl ? "" : "disabled"}}>设为脚本封面</button>
               </div>
@@ -10906,7 +10967,7 @@ def studio_html() -> str:
           <input type="hidden" data-edit-field="mechanism_reason" value="${{escapeHtml(normalizedText(mechanismReason))}}">
           <div class="link-row structured-editor-actions">
             <button class="action-link primary" type="button" data-save-edits="${{item.id}}">保存当前编辑</button>
-            <button class="action-link" type="button" data-save-library="${{item.id}}">保存并确认入库</button>
+            <button class="action-link" type="button" data-save-library="${{item.id}}">保存并转葡语入库</button>
           </div>
         </div>
       `;
@@ -11300,44 +11361,31 @@ def studio_html() -> str:
       }}
     }}
 
-    async function applyReplacementPlan(itemId, label, planText, trigger) {{
-      const title = normalizedText(label || "替换方案", "替换方案");
-      const text = normalizedText(planText || "", "");
-      if (!text) {{
-        showToast("先写替换方案", "请选择一个方案，或自己输入一个替换方案。");
-        return;
-      }}
-      const message = `按这个替换方案直接全局改写整份脚本：${{title}}。具体方案：${{text}}`;
+    async function generateStoryboardPrompt(itemId, trigger) {{
+      const payload = collectItemEdits(itemId) || {{}};
       const original = trigger ? trigger.textContent : "";
-      document.querySelectorAll(`[data-apply-replacement="${{itemId}}"], [data-apply-custom-replacement="${{itemId}}"]`).forEach((button) => {{
-        button.disabled = true;
-      }});
-      if (trigger) trigger.textContent = "替换中...";
-      appendChatBubble(itemId, "user", message);
-      appendChatBubble(itemId, "koko", "我按这个替换方案改整份脚本...", true);
+      if (trigger) {{
+        trigger.disabled = true;
+        trigger.textContent = "生成中...";
+      }}
       try {{
-        const response = await fetch(`/api/items/${{itemId}}/chat-edit`, {{
+        const response = await fetch(`/api/items/${{itemId}}/storyboard/prompt`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ message, mode: "replace" }}),
+          body: JSON.stringify(payload),
         }});
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Replacement edit failed");
-        updatePendingChatBubble(itemId, data.message || "已按替换方案改好脚本。");
-        showToast("替换方案已应用", data.message || "脚本已经刷新。");
-        if (activeJobId) {{
-          pollJob(activeJobId);
-        }} else {{
-          window.location.reload();
-        }}
+        if (!response.ok) throw new Error(data.error || "Storyboard prompt generation failed");
+        const promptField = document.querySelector(`[data-storyboard-prompt="${{itemId}}"]`);
+        if (promptField) promptField.value = data.item?.storyboard_prompt || data.storyboard_prompt || "";
+        showToast("提示词已生成", "已经根据当前最新脚本生成生图提示词。");
       }} catch (error) {{
-        const errorText = String(error.message || error);
-        updatePendingChatBubble(itemId, "这次没改成功：" + errorText);
-        showToast("替换失败", errorText);
-        document.querySelectorAll(`[data-apply-replacement="${{itemId}}"], [data-apply-custom-replacement="${{itemId}}"]`).forEach((button) => {{
-          button.disabled = false;
-        }});
-        if (trigger) trigger.textContent = original;
+        showToast("提示词生成失败", String(error.message || error));
+      }} finally {{
+        if (trigger) {{
+          trigger.disabled = false;
+          trigger.textContent = original;
+        }}
       }}
     }}
 
@@ -12288,21 +12336,9 @@ def studio_html() -> str:
         runKokoChatEdit(chatEditBtn.getAttribute("data-chat-edit"), chatEditBtn);
         return;
       }}
-      const replacementBtn = event.target.closest("[data-apply-replacement]");
-      if (replacementBtn) {{
-        applyReplacementPlan(
-          replacementBtn.getAttribute("data-apply-replacement"),
-          replacementBtn.getAttribute("data-replacement-label") || "",
-          replacementBtn.getAttribute("data-replacement-text") || "",
-          replacementBtn
-        );
-        return;
-      }}
-      const customReplacementBtn = event.target.closest("[data-apply-custom-replacement]");
-      if (customReplacementBtn) {{
-        const itemId = customReplacementBtn.getAttribute("data-apply-custom-replacement");
-        const input = document.querySelector(`[data-custom-replacement="${{itemId}}"]`);
-        applyReplacementPlan(itemId, "自定义替换方案", input?.value || "", customReplacementBtn);
+      const storyboardPromptBtn = event.target.closest("[data-generate-storyboard-prompt]");
+      if (storyboardPromptBtn) {{
+        generateStoryboardPrompt(storyboardPromptBtn.getAttribute("data-generate-storyboard-prompt"), storyboardPromptBtn);
         return;
       }}
       const storyboardBtn = event.target.closest("[data-generate-storyboard]");
@@ -14424,6 +14460,20 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": friendly_error(str(exc))}, status=500)
                 return
             self.send_json({"ok": True, "item": updated_item, "saved_to_library": action == "save-to-library"})
+            return
+        storyboard_prompt_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/storyboard/prompt", parsed.path)
+        if storyboard_prompt_match:
+            item_id = storyboard_prompt_match.group(1)
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                payload = {}
+            try:
+                updated_item = generate_storyboard_prompt_for_item(item_id, payload if isinstance(payload, dict) else {})
+            except Exception as exc:
+                self.send_json({"error": friendly_error(str(exc))}, status=500)
+                return
+            self.send_json({"ok": True, "item": updated_item, "storyboard_prompt": updated_item.get("storyboard_prompt") or ""})
             return
         storyboard_match = re.fullmatch(r"/api/items/([0-9a-f]{32})/storyboard(?:/(confirm))?", parsed.path)
         if storyboard_match:
