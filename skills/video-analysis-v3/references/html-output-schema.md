@@ -2,6 +2,8 @@
 
 The final `script_table.html` must be standalone and viewable without external network access.
 
+This output is also the upstream authoring format for Koko Creator. It should read like a concise shooting script package, not like a model analysis report.
+
 ## Style target
 
 The required public format is the uploaded light-card template, not the old dark v2 table.
@@ -26,7 +28,7 @@ V3 is an observation-first pipeline with local story/mechanism synthesis.
 
 Important distinction:
 
-- Public output: concise Chinese script report in the uploaded template.
+- Public output: concise Chinese creator-facing script package in the uploaded template.
 - Process artifacts: story chaining, skepticism, `allowed_claims`, `blocked_claims`, object conflicts, mechanism hypotheses, `verification_windows`, and raw Gemini observations.
 - Process artifacts may appear only in collapsed appendices or JSON, never as the main report.
 
@@ -51,13 +53,15 @@ Rules:
 - It may include likely story interpretation if supported by observations and verification.
 - It must preserve uncertainty for hidden mechanisms.
 - It must not assert hidden actions, intent, or object structure as fact without evidence.
+- It should usually be one compact paragraph, preferably 60-120 Chinese characters, written as 起因 -> 推进 -> 结果/包袱.
+- It must not end with abstract commentary such as `揭示复杂关系`, `反映人性`, or `社会判断`.
 
 ### 3. 核心爆点
 
-Use 2–4 insight cards. Each card has:
+Use 1–3 insight cards. Each card has:
 
 - short title
-- concise explanation
+- concise one-sentence explanation
 
 For 整蛊/魔术/关系博弈 videos, cards should usually include some of:
 
@@ -69,10 +73,10 @@ For 整蛊/魔术/关系博弈 videos, cards should usually include some of:
 
 ### 4. 可替换部分
 
-Use 3–5 insight cards. Each card has:
+Use 1–3 insight cards. Each card has:
 
 - replaceable element title
-- examples or substitution logic
+- examples or substitution logic that can be reused directly by a creator
 
 Typical replaceable elements:
 
@@ -92,8 +96,8 @@ Main public table columns must be exactly:
 Column mapping:
 
 - `时间`: story/action beat range, such as `00:00-00:15` or `00:40-Final`.
-- `画面内容`: short filming prep note only: location/scene, people present, necessary props. Avoid camera analysis, action chains, emotion, dialogue, or plot summary.
-- `动作`: concrete staging, gestures, facial expressions, emotional shift, and how the beat advances the joke/story.
+- `画面内容`: short filming prep note only: location/scene, people present, necessary props. Target under 24 Chinese characters. Avoid camera analysis, action chains, emotion, dialogue, or plot summary.
+- `动作`: concrete staging, gestures, facial expressions, emotional shift, and how the beat advances the joke/story. Keep each row compact enough for mobile display.
 - `关键对白/旁白`: faithful Chinese translation/transcription when audio is available. Preserve speaker labels and line breaks. If not clear, write: `无明确对白/旁白，主要靠画面动作推进。`
 
 ## Collapsed appendices

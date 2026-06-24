@@ -4,6 +4,8 @@
 
 Define the fixed final deliverable for `video-analysis-v2-skill`. This file is the single source of truth for `script_table.json`, `script_table.html`, and the user-facing table layout.
 
+Koko now uses this output as the upstream source for Koko Creator. The deliverable must therefore be a concise creator-facing script package, not a long analysis report.
+
 The HTML format is based on the provided sample file `script_table (15).html`.
 
 ## Required Files
@@ -31,7 +33,7 @@ Use this shape for `script_table.json`:
   "route": "audio-sop",
   "audio_information_score": "9/10",
   "source_url": "https://example.com/video",
-  "whole_video_summary": "一到两句话总结整条视频。",
+  "whole_video_summary": "一段简洁剧情概述：起因 -> 推进 -> 结果/包袱。",
   "core_viral_points": [
     {
       "label": "极致的对比与讽刺",
@@ -67,7 +69,15 @@ Use this shape for `script_table.json`:
 }
 ```
 
-`core_viral_points` and `replaceable_parts` are required. If a video is weak, still write the best available hypothesis and mark uncertainty in the text.
+`core_viral_points` and `replaceable_parts` are required, but they must stay short. If a video is weak, still write the best available hypothesis and mark uncertainty in the text.
+
+Creator-readiness limits:
+
+- `whole_video_summary`: preferably 60-120 Chinese characters. It should explain the story, not judge it.
+- `core_viral_points`: 1-3 items, one short hook per item.
+- `replaceable_parts`: 1-3 practical replacement elements, not broad suggestions.
+- `rows`: usually 5-8 story/action beats for a short video.
+- Avoid abstract endings such as `揭示了复杂关系`, `反映了人性的弱点`, or `引发社会思考`.
 
 For non-comedy videos, omit `mechanism` unless the video has a clear twist, reveal, payoff, emotional reversal, persuasion mechanism, or before-after structure worth explaining.
 
@@ -112,7 +122,7 @@ Always inspect these dimensions:
 Writing rules:
 
 - Use concrete labels, such as `身份转换`, `三段式递进`, `极致对比`, `日常代入感`, `结尾明牌`.
-- Explain the mechanism behind the point.
+- Explain the mechanism behind the point in one short sentence.
 - Tie each point to evidence in the video: dialogue, action, visual reveal, relationship, or structure.
 - Avoid generic claims like `内容有趣` or `节奏很好` unless the specific reason is stated.
 
@@ -156,8 +166,8 @@ Use exactly these four columns in the final user-facing script table:
 Column rules:
 
 - `时间`: use `MM:SS-MM:SS`, `HH:MM:SS-HH:MM:SS`, or a story-beat range such as `00:40-Final`.
-- `画面内容`: keep it short like a filming prep note: location/scene, people present, and necessary props. Avoid camera analysis, action chains, emotion, dialogue, or plot summary.
-- `动作`: describe concrete staging, gestures, facial expressions, emotional shift, and what changes/progresses/is revealed in the beat.
+- `画面内容`: keep it short like a filming prep note: location/scene, people present, and necessary props. Target under 24 Chinese characters. Avoid camera analysis, action chains, emotion, dialogue, or plot summary.
+- `动作`: describe concrete staging, gestures, facial expressions, emotional shift, and what changes/progresses/is revealed in the beat. Keep each row compact enough for mobile display.
 - `关键对白/旁白`: provide faithful Chinese translation of spoken content. Preserve speaker labels and line breaks. Do not summarize or add interpretation here.
 
 ## Dialogue Rules

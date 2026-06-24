@@ -1,6 +1,6 @@
 ---
 name: video-analysis-v3
-description: Gemini-first short video analysis workflow for uploaded videos or public Xiaohongshu/Kwai/TikTok/Reels/video links. Use when analyzing, 拆解, 识别, or summarizing short videos and producing a Chinese HTML report with 视频整体内容总结, 核心爆点, 可替换部分, and 脚本表. V3 now treats Gemini as a dense evidence extractor, then runs a second LLM analysis stage over the evidence bundle before rendering the final script table.
+description: Gemini-first short video analysis workflow for uploaded videos or public Xiaohongshu/Kwai/TikTok/Reels/video links. Use when analyzing, 拆解, 识别, or summarizing short videos and producing a Koko Creator-ready script package with 视频整体内容总结, 核心爆点, 可替换部分, and 脚本表. V3 now treats Gemini as a dense evidence extractor, then runs a second LLM analysis stage over the evidence bundle before rendering the final script table.
 ---
 
 # Video Analysis V3
@@ -29,7 +29,7 @@ Gemini first produces a dense per-second evidence bundle. A second-stage LLM or 
    - `references/prank-mechanism-template.md` for 整蛊、magic、道具机关、换瓶、露底、掉包、钱/礼物诱饵.
 8. Audit logic gaps, object-identity conflicts, unsupported actions, hidden mechanisms, and invented claims.
 9. Create targeted `verification_windows` for suspicious mechanisms or fast/occluded actions.
-10. Render `script_table.html` in the standard light-card Chinese report format.
+10. Render `script_table.html` in the standard Koko Creator-ready light-card format.
 
 ## Required outputs
 
@@ -47,15 +47,24 @@ For each analysis, produce an output directory such as `tmp/video_analysis_v3/<i
 
 If the user asks to “发群里 / 给我看 / send it”, return or send the HTML artifact, not only local paths.
 
-## Final HTML contract
+## Final output contract
 
-The user-facing HTML must contain:
+The output is first used by Koko operators, then translated and synced into Koko Creator. Therefore the public script must be an authoring/publishing package, not a long analysis report.
+
+The user-facing HTML/JSON must contain:
 
 1. `视频总结归纳 + 脚本表` header card
 2. `视频整体内容总结`
 3. `核心爆点`
 4. `可替换部分`
 5. `脚本表`
+
+Creator-readiness rules:
+- `whole_video_summary`: one concise story paragraph, preferably 60-120 Chinese characters. Write 起因 -> 推进 -> 结果/包袱. Do not write abstract commentary such as “揭示了复杂关系/反映人性/社会判断”.
+- `core_viral_points`: 1-3 short cards. Each card is one direct hook, not a paragraph.
+- `replaceable_parts`: 1-3 directly reusable elements. Prefer labels like `人物关系`, `冲突事项`, `场景`, `道具/诱因`, `结尾反转`. Do not write broad suggestions.
+- `rows`: 5-8 beats for ordinary short videos. Each row should help a creator shoot the video, not audit the model.
+- Process artifacts must stay in JSON/collapsed appendices and must never be synced as Creator-facing content.
 
 The main script-breakdown table columns must be exactly:
 
@@ -64,9 +73,34 @@ The main script-breakdown table columns must be exactly:
 
 Script-table writing rules:
 - `时间`: split by story beat or action beat, not mechanically by every frame. Ranges like `00:00-00:15` and `00:40-Final` are acceptable.
-- `画面内容`: keep it short like a filming prep note: location/scene, people present, and necessary props. Do not put camera analysis, action chains, dialogue, emotion, or plot summary here.
-- `动作`: describe concrete staging, gestures, facial expressions, emotional change, and how the beat advances the joke/story.
+- `画面内容`: keep it short like a filming prep note: location/scene, people present, and necessary props. Target under 24 Chinese characters. Do not put camera analysis, action chains, dialogue, emotion, or plot summary here.
+- `动作`: describe concrete staging, gestures, facial expressions, emotional change, and how the beat advances the joke/story. Keep each beat compact enough for a mobile table.
 - `关键对白/旁白`: preserve speaker labels and line breaks whenever possible. If no reliable audio/subtitle exists, write `无明确对白/旁白，主要靠画面动作推进。`
+
+Good Creator-ready miniature example:
+
+```json
+{
+  "title": "妻子装病求照顾，丈夫看似体贴却在旁边摸鱼",
+  "whole_video_summary": "妻子装作身体不舒服，想让丈夫多关心自己。丈夫表面照顾她，实际一直分心玩手机，最后妻子发现真相并当场质问。",
+  "core_viral_points": [
+    {"label": "亲密关系反差", "text": "妻子需要照顾，丈夫却把关心做成敷衍。"},
+    {"label": "情绪递进", "text": "从撒娇求关注，到发现被忽略，再到当场爆发。"}
+  ],
+  "replaceable_parts": [
+    {"label": "冲突事项", "text": "装病可替换为做家务、等纪念日、等对方下班回家。"},
+    {"label": "结尾反转", "text": "丈夫摸鱼可替换为和朋友聊天、打游戏、偷吃东西。"}
+  ],
+  "rows": [
+    {
+      "time": "00:00-00:05",
+      "visual_content": "卧室门口；妻子；睡衣",
+      "action": "妻子扶着门框，表现虚弱，轻声叫丈夫过来。",
+      "dialogue_or_audio": "妻子：我不舒服，你能照顾我一下吗？"
+    }
+  ]
+}
+```
 
 Process artifacts such as `mechanism_hypotheses`, `verification_windows`, `allowed_claims`, `blocked_claims`, object conflicts, and raw Gemini observations may be retained in JSON or collapsed appendices, but must not become the main report.
 
