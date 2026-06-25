@@ -5877,7 +5877,9 @@ STORYBOARD_IMAGE_PROMPT_PREFIX = """你是 Koko 的分镜示意图生成助手�
 - 黑白灰铅笔草图风格，像手绘分镜稿，不要彩色，不要照片质感
 - 白色纸面背景，深灰色线稿，构图干净
 - 最终成图固定为 1:1 正方形
-- 一张图里排成 6 格到 8 格矩形分镜，像影视前期的分镜板
+- 一张图里固定排成 3 行 x 3 列，共 9 个等宽等高矩形分镜格，像影视前期的分镜板
+- 如果脚本关键动作少于 9 个，用空白环境格、道具格或过渡动作格补齐到 9 格；不要改变 3x3 网格
+- 如果脚本关键动作多于 9 个，合并相近动作，最终仍然只保留 9 格；不要改变 3x3 网格
 - 每格表现脚本里的一个关键动作节点，人物姿态和场景关系要清楚
 - 整体重点是“拍摄准备感”，让人一眼看懂场景、人物、动作
 - 不要做成海报，不要 UI，不要水印，不要品牌字
@@ -5890,7 +5892,8 @@ STORYBOARD_PROMPT_GUARDRAILS = """固定硬性条件，必须保留且不能被�
 - 固定 1:1 正方形构图
 - 白底纸面
 - 黑白灰手绘线稿 / 铅笔草图风格
-- 多格子的矩形分镜，像 storyboard sheet
+- 固定 3 行 x 3 列，共 9 个等宽等高矩形分镜格，像 storyboard sheet
+- 少于 9 个动作时用空白环境格、道具格或过渡动作格补齐；多于 9 个动作时合并动作；始终保持 3x3
 - 非彩色，非照片，非海报，非 UI
 - 不要带任何文字、字幕、标题、编号、logo 或水印
 """
@@ -5909,7 +5912,7 @@ STORYBOARD_PROMPT_DRAFT_PROMPT = """你是 Koko 的短剧分镜生图提示词�
 1. 只输出 JSON，不要 Markdown。
 2. JSON 只有一个字段：`prompt`。
 3. `prompt` 可以中文写，但要清晰、可执行。
-4. 必须包含这些不可变条件：固定 1:1 正方形、白底纸面、手绘线稿、多格子的矩形分镜、非彩色、非照片、不要带任何文字。
+4. 必须包含这些不可变条件：固定 1:1 正方形、白底纸面、手绘线稿、固定 3x3 九宫格分镜、非彩色、非照片、不要带任何文字。
 5. 不要生成海报式封面，不要大标题，不要 UI，不要 logo。
 
 输出格式：
@@ -5942,7 +5945,7 @@ def guess_extension_from_mime(mime_type: str) -> str:
 
 
 def build_storyboard_prompt(script_json: dict[str, Any], extra_instruction: str = "") -> str:
-    rows = choose_script_rows(script_json)[:8]
+    rows = choose_script_rows(script_json)[:9]
     beats = []
     for idx, row in enumerate(rows, 1):
         beats.append(
@@ -5956,7 +5959,7 @@ def build_storyboard_prompt(script_json: dict[str, Any], extra_instruction: str 
         f"标题：{title}",
         f"整体梗概：{summary}",
         "关键分镜：",
-        "\n".join(beats) if beats else "1. 按标题和梗概生成 6 格连续分镜。",
+        "\n".join(beats) if beats else "1. 按标题和梗概生成 9 格 3x3 连续分镜。",
         "",
         "请输出一张适合作为脚本封面的分镜示意图。",
     ]
@@ -5975,7 +5978,7 @@ def generate_storyboard_prompt_from_script(script_json: dict[str, Any]) -> tuple
         "whole_video_summary": script_json.get("whole_video_summary") or "",
         "core_viral_points": script_json.get("core_viral_points") or [],
         "replaceable_parts": script_json.get("replaceable_parts") or [],
-        "rows": choose_script_rows(script_json)[:8],
+        "rows": choose_script_rows(script_json)[:9],
         "fixed_guardrails": STORYBOARD_PROMPT_GUARDRAILS,
     }
     try:
@@ -10747,17 +10750,17 @@ def studio_html() -> str:
     }}
 
     function buildStoryboardPrompt(script) {{
-      const rows = normalizeRows(script).slice(0, 8);
+      const rows = normalizeRows(script).slice(0, 9);
       const beats = rows.map((row, idx) => {{
         return `${{idx + 1}}. 时间=${{normalizedText(row.time, "")}}；场景=${{normalizedText(row.visual_content)}}；动作=${{normalizedText(row.action)}}`;
       }}).join("\\n");
       return [
         "请把这份短视频脚本画成黑白灰铅笔分镜稿风格的示意图。",
-        "固定硬性条件：固定 1:1 正方形，白底纸面，手绘线稿，多格子的矩形分镜，非彩色，非照片，不要海报感，不要带任何文字、字幕、标题、编号、logo 或水印。",
+        "固定硬性条件：固定 1:1 正方形，白底纸面，手绘线稿，固定 3x3 九宫格分镜，非彩色，非照片，不要海报感，不要带任何文字、字幕、标题、编号、logo 或水印。",
         `标题：${{normalizedText(script.title, "视频脚本")}}`,
         `整体梗概：${{normalizedText(script.whole_video_summary)}}`,
         "关键分镜：",
-        beats || "1. 按标题和梗概生成 6 格连续分镜。",
+        beats || "1. 按标题和梗概生成 9 格 3x3 连续分镜。",
       ].join("\\n");
     }}
 
