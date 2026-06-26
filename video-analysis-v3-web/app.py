@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import csv
 import errno
+import hashlib
 import html
 import http.client
 import io
@@ -88,6 +89,8 @@ CREATOR_ONLINE_LIBRARY_FILE = DATA_ROOT / "creator_online_library.json"
 CREATOR_THUMBNAIL_CACHE_FILE = DATA_ROOT / "creator_thumbnail_cache.json"
 CREATOR_SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
 CREATOR_SYNC_META_FILE = DATA_ROOT / "creator_sync_meta.json"
+CREATOR_IMPORT_JOBS_FILE = DATA_ROOT / "creator_import_jobs.json"
+CREATOR_ADMIN_SCRIPTS_CACHE_FILE = DATA_ROOT / "creator_admin_scripts_cache.json"
 CREATOR_LIBRARY_SOURCE_URL = os.environ.get("CREATOR_LIBRARY_SOURCE_URL", "https://koko-kwai-coach.onrender.com/api/library")
 CREATOR_LIBRARY_SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
 CREATOR_CENTER_SYNC_URL = os.environ.get("CREATOR_CENTER_SYNC_URL", "https://koko-fpml.onrender.com/api/creator/sync-library")
@@ -1229,6 +1232,224 @@ def parse_xlsx_bytes(blob: bytes) -> str:
                     cells.append(value)
                 rows.append(cells)
     return text_from_tabular_rows(rows)
+
+
+def xlsx_col_to_index(ref: str) -> int:
+    letters = re.sub(r"[^A-Z]", "", str(ref or "").upper())
+    total = 0
+    for char in letters:
+        total = total * 26 + (ord(char) - ord("A") + 1)
+    return max(0, total - 1)
+
+
+def parse_xlsx_workbook_rows(blob: bytes) -> list[dict[str, Any]]:
+    ns = {
+        "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+        "docrel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    }
+    shared_strings: list[str] = []
+    sheets: list[tuple[str, str]] = []
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        names = set(archive.namelist())
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for si in root.findall("main:si", ns):
+                text_parts = [node.text or "" for node in si.findall(".//main:t", ns)]
+                shared_strings.append("".join(text_parts).strip())
+        rels: dict[str, str] = {}
+        if "xl/_rels/workbook.xml.rels" in names:
+            rel_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+            for rel in rel_root.findall("rel:Relationship", ns):
+                target = rel.attrib.get("Target") or ""
+                if target and not target.startswith("/"):
+                    target = "xl/" + target.lstrip("/")
+                rels[rel.attrib.get("Id") or ""] = target
+        if "xl/workbook.xml" in names:
+            wb_root = ET.fromstring(archive.read("xl/workbook.xml"))
+            for sheet in wb_root.findall(".//main:sheet", ns):
+                sheet_name = sheet.attrib.get("name") or "Sheet"
+                rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id") or ""
+                sheet_path = rels.get(rel_id) or ""
+                if sheet_path in names:
+                    sheets.append((sheet_name, sheet_path))
+        if not sheets:
+            sheets = [
+                (Path(name).stem, name)
+                for name in sorted(names)
+                if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
+            ]
+        parsed: list[dict[str, Any]] = []
+        for sheet_name, worksheet_name in sheets:
+            root = ET.fromstring(archive.read(worksheet_name))
+            rows: list[list[str]] = []
+            for row in root.findall(".//main:sheetData/main:row", ns):
+                cells: dict[int, str] = {}
+                for cell in row.findall("main:c", ns):
+                    col_index = xlsx_col_to_index(cell.attrib.get("r") or "")
+                    cell_type = cell.attrib.get("t", "")
+                    value_node = cell.find("main:v", ns)
+                    inline_node = cell.find("main:is", ns)
+                    value = ""
+                    if cell_type == "inlineStr" and inline_node is not None:
+                        value = "".join(node.text or "" for node in inline_node.findall(".//main:t", ns)).strip()
+                    elif value_node is not None and value_node.text is not None:
+                        raw_value = value_node.text.strip()
+                        if cell_type == "s":
+                            try:
+                                value = shared_strings[int(raw_value)]
+                            except Exception:
+                                value = raw_value
+                        else:
+                            value = raw_value
+                    cells[col_index] = value
+                width = max(cells.keys(), default=-1) + 1
+                rows.append([str(cells.get(idx, "") or "").strip() for idx in range(width)])
+            parsed.append({"sheet": sheet_name, "rows": rows})
+    return parsed
+
+
+def compact_cell_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def normalized_pt_label(value: object) -> str:
+    text = compact_cell_text(value).lower()
+    text = re.sub(r"[：:*()（）]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    replacements = str.maketrans("áàãâéêíóôõúç", "aaaaeeiooouc")
+    return text.translate(replacements)
+
+
+def row_cell(row: list[str], index: int) -> str:
+    return compact_cell_text(row[index]) if 0 <= index < len(row) else ""
+
+
+def row_value_after(row: list[str], index: int) -> str:
+    values = [compact_cell_text(cell) for cell in row[index + 1:] if compact_cell_text(cell)]
+    return " ".join(values).strip()
+
+
+def split_import_cards(text: str, fallback_label: str) -> list[dict[str, str]]:
+    chunks = [compact_cell_text(part) for part in re.split(r"(?=\d+\.\s*)", text or "") if compact_cell_text(part)]
+    cards: list[dict[str, str]] = []
+    for raw in chunks or [compact_cell_text(text)]:
+        item = re.sub(r"^\d+\.\s*", "", raw).strip()
+        if not item:
+            continue
+        if ":" in item:
+            label, body = item.split(":", 1)
+        elif "—" in item:
+            label, body = item.split("—", 1)
+        else:
+            words = item.split()
+            label = " ".join(words[:4]) or fallback_label
+            body = " ".join(words[4:]) or item
+        cards.append({"label": compact_cell_text(label)[:80] or fallback_label, "text": compact_cell_text(body) or item})
+    return cards[:6]
+
+
+def imported_title_from_summary(summary: str) -> str:
+    title = re.sub(r"^O vídeo\s+(mostra|começa|registra|apresenta)\s+", "", compact_cell_text(summary), flags=re.I)
+    return title[:112].rstrip(" ,.;") or "Roteiro importado"
+
+
+def parse_creator_script_tables_from_xlsx(blob: bytes) -> list[dict[str, Any]]:
+    workbook = parse_xlsx_workbook_rows(blob)
+    scripts: list[dict[str, Any]] = []
+    for sheet in workbook:
+        rows = sheet.get("rows") or []
+        r = 0
+        while r < len(rows):
+            row = rows[r]
+            start_col = next((idx for idx, cell in enumerate(row) if normalized_pt_label(cell) == "video original"), -1)
+            if start_col < 0:
+                r += 1
+                continue
+            metadata: dict[str, str] = {}
+            table_header_row = -1
+            table_cols: dict[str, int] = {}
+            cursor = r
+            while cursor < len(rows):
+                current = rows[cursor]
+                labels = [normalized_pt_label(cell) for cell in current]
+                if cursor > r and any(label == "video original" for label in labels):
+                    break
+                for idx, label in enumerate(labels):
+                    if label == "video original":
+                        metadata["video_url"] = row_value_after(current, idx)
+                    elif label == "conteudo principal":
+                        metadata["summary"] = row_value_after(current, idx)
+                    elif label == "pontos principais":
+                        metadata["points"] = row_value_after(current, idx)
+                    elif label.startswith("partes que podem ser adaptadas"):
+                        metadata["adaptable"] = row_value_after(current, idx)
+                if "tempo" in labels and any(label in {"imagem", "acoes"} or label.startswith("dialog") for label in labels):
+                    table_header_row = cursor
+                    for idx, label in enumerate(labels):
+                        if label == "tempo":
+                            table_cols["time"] = idx
+                        elif label == "imagem":
+                            table_cols["visual_content"] = idx
+                        elif label == "acoes":
+                            table_cols["action"] = idx
+                        elif label.startswith("dialog"):
+                            table_cols["dialogue"] = idx
+                    cursor += 1
+                    break
+                cursor += 1
+            if table_header_row < 0:
+                r += 1
+                continue
+            script_rows: list[dict[str, str]] = []
+            cursor = table_header_row + 1
+            while cursor < len(rows):
+                current = rows[cursor]
+                labels = [normalized_pt_label(cell) for cell in current]
+                if any(label == "video original" for label in labels):
+                    break
+                time_value = row_cell(current, table_cols.get("time", -1))
+                visual = row_cell(current, table_cols.get("visual_content", -1))
+                action = row_cell(current, table_cols.get("action", -1))
+                dialogue = row_cell(current, table_cols.get("dialogue", -1))
+                if not any([time_value, visual, action, dialogue]):
+                    cursor += 1
+                    continue
+                if normalized_pt_label(time_value) in {"tempo", "conteudo principal", "pontos principais"}:
+                    break
+                script_rows.append({
+                    "time": time_value,
+                    "visual_content": visual,
+                    "action": action,
+                    "dialogue": dialogue,
+                })
+                cursor += 1
+            if metadata.get("video_url") and metadata.get("summary") and script_rows:
+                stable_key = f"{metadata.get('video_url')}|{metadata.get('summary')}|{len(script_rows)}"
+                item_id = hashlib.md5(stable_key.encode("utf-8")).hexdigest()
+                summary = metadata.get("summary", "")
+                scripts.append({
+                    "id": item_id,
+                    "sheet": sheet.get("sheet") or "",
+                    "row": r + 1,
+                    "video_url": metadata.get("video_url", ""),
+                    "script": {
+                        "title": imported_title_from_summary(summary),
+                        "whole_video_summary": summary,
+                        "core_viral_points": split_import_cards(metadata.get("points", ""), "Ponto-chave"),
+                        "replaceable_parts": split_import_cards(metadata.get("adaptable", ""), "Plano de substituição"),
+                        "rows": script_rows,
+                    },
+                })
+            r = max(cursor, r + 1)
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in scripts:
+        if item["id"] in seen:
+            continue
+        deduped.append(item)
+        seen.add(item["id"])
+    return deduped
 
 
 def extract_urls_from_uploaded_file(filename: str, file_b64: str) -> list[str]:
@@ -3253,6 +3474,241 @@ def append_library_entry(entry: dict[str, Any]) -> bool:
         return save_library_entries(entries[:500])
 
 
+def append_creator_online_entry(entry: dict[str, Any]) -> bool:
+    with job_lock:
+        entries = read_json_file(CREATOR_ONLINE_LIBRARY_FILE, default=[])
+        if not isinstance(entries, list):
+            entries = []
+        entries = [existing for existing in entries if isinstance(existing, dict) and existing.get("entry_id") != entry.get("entry_id")]
+        entries.insert(0, entry)
+        write_json_atomic(CREATOR_ONLINE_LIBRARY_FILE, entries[:500])
+        return True
+
+
+def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
+    entry = payload.get("entry") if isinstance(payload.get("entry"), dict) else {}
+    entry_id = str(entry.get("entry_id") or payload.get("entry_id") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        raise ValueError("Invalid script id.")
+    script_json = payload.get("script_json") if isinstance(payload.get("script_json"), dict) else {}
+    html_content = str(payload.get("html_content") or "").strip()
+    if not html_content:
+        raise ValueError("Missing script HTML content.")
+    output_dir = RESULTS_ROOT / entry_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    html_path = output_dir / "script_table_pt.html"
+    html_path.write_text(html_content, encoding="utf-8")
+    if script_json:
+        write_json_atomic(output_dir / "script_table_pt.json", script_json)
+    cover_url = ""
+    cover_b64 = str(payload.get("cover_b64") or "").strip()
+    cover_mime = str(payload.get("cover_mime") or "image/png").strip()
+    if cover_b64:
+        if "," in cover_b64 and cover_b64.startswith("data:"):
+            cover_b64 = cover_b64.split(",", 1)[1]
+        cover_bytes = base64.b64decode(cover_b64)
+        cover_suffix = guess_extension_from_mime(cover_mime)
+        cover_name = STORYBOARD_COVER_BASENAME + cover_suffix
+        (output_dir / cover_name).write_bytes(cover_bytes)
+        preview_name = STORYBOARD_PREVIEW_BASENAME + cover_suffix
+        (output_dir / preview_name).write_bytes(cover_bytes)
+        save_storyboard_state(entry_id, preview_name=preview_name, cover_name=cover_name, model=str(payload.get("cover_model") or "imported"))
+        cover_url = f"/results/{entry_id}/{cover_name}"
+    imported_entry = {
+        "entry_id": entry_id,
+        "parent_job_id": str(entry.get("parent_job_id") or f"creator_import_{entry_id}"),
+        "created_at": str(entry.get("created_at") or now_iso()),
+        "saved_at": str(entry.get("saved_at") or now_iso()),
+        "video_url": str(entry.get("video_url") or payload.get("video_url") or ""),
+        "title": str(entry.get("title") or script_json.get("title") or "Roteiro importado"),
+        "content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
+        "content_type_source": str(entry.get("content_type_source") or "manual"),
+        "content_type_reasoning": str(entry.get("content_type_reasoning") or "Imported from Creator admin Excel."),
+        "content_type_confidence": str(entry.get("content_type_confidence") or "high"),
+        "whole_video_summary": str(entry.get("whole_video_summary") or script_json.get("whole_video_summary") or ""),
+        "html_url": f"/results/{entry_id}/script_table_pt.html",
+        "pt_html_url": f"/results/{entry_id}/script_table_pt.html",
+        "zh_html_url": f"/results/{entry_id}/script_table_pt.html",
+        "preview_image_url": cover_url,
+        "source": "creator_direct_import",
+        "published": bool(entry.get("published", True)),
+    }
+    append_creator_online_entry(imported_entry)
+    return {"ok": True, "entry": imported_entry, "share_url": f"/script/{entry_id}"}
+
+
+def load_creator_import_jobs() -> dict[str, Any]:
+    data = read_json_file(CREATOR_IMPORT_JOBS_FILE, default={})
+    return data if isinstance(data, dict) else {}
+
+
+def save_creator_import_jobs(data: dict[str, Any]) -> None:
+    write_json_atomic(CREATOR_IMPORT_JOBS_FILE, data)
+
+
+def update_creator_import_job(import_id: str, **changes: Any) -> dict[str, Any]:
+    with job_lock:
+        data = load_creator_import_jobs()
+        job = data.get(import_id) if isinstance(data.get(import_id), dict) else {}
+        job.update(changes)
+        job["updated_at"] = now_iso()
+        data[import_id] = job
+        save_creator_import_jobs(data)
+        return json.loads(json.dumps(job, ensure_ascii=False))
+
+
+def public_creator_import_job(import_id: str) -> dict[str, Any] | None:
+    job = load_creator_import_jobs().get(import_id)
+    return job if isinstance(job, dict) else None
+
+
+def imported_creator_entry(item_id: str, script_json: dict[str, Any], video_url: str, variant: dict[str, Any], *, content_type: str = DEFAULT_CONTENT_TYPE) -> dict[str, Any]:
+    content_type = content_type if content_type in ALLOWED_CONTENT_TYPES else DEFAULT_CONTENT_TYPE
+    return {
+        "entry_id": item_id,
+        "parent_job_id": f"creator_import_{item_id}",
+        "created_at": now_iso(),
+        "video_url": video_url,
+        "title": script_json.get("title") or "Roteiro importado",
+        "content_type": content_type,
+        "content_type_source": "manual",
+        "content_type_reasoning": "Imported from standard Portuguese Excel script table.",
+        "content_type_confidence": "high",
+        "whole_video_summary": script_json.get("whole_video_summary") or "",
+        "html_url": variant.get("html_url") or "",
+        "pt_html_url": variant.get("html_url") or "",
+        "pt_docx_url": variant.get("docx_url") or "",
+        "preview_image_url": library_preview_image_url(item_id, script_json, RESULTS_ROOT / item_id),
+        "source": "creator_excel_import",
+        "saved_at": now_iso(),
+    }
+
+
+def process_creator_import_job(import_id: str) -> None:
+    job = public_creator_import_job(import_id)
+    if not job:
+        return
+    scripts = job.get("scripts") if isinstance(job.get("scripts"), list) else []
+    results: list[dict[str, Any]] = []
+    imported_count = 0
+    failed_count = 0
+    update_creator_import_job(import_id, status="running", stage="importing", message="开始导入脚本", started_at=now_iso())
+    for idx, item in enumerate(scripts, start=1):
+        item_id = str(item.get("id") or uuid4().hex)
+        video_url = str(item.get("video_url") or "").strip()
+        script_json = json.loads(json.dumps(item.get("script") or {}, ensure_ascii=False))
+        item_result = {
+            "id": item_id,
+            "video_url": video_url,
+            "title": script_json.get("title") or "",
+            "sheet": item.get("sheet") or "",
+            "row": item.get("row") or "",
+            "status": "running",
+            "share_url": f"{CREATOR_CENTER_BASE_URL}/script/{item_id}",
+        }
+        results.append(item_result)
+        update_creator_import_job(
+            import_id,
+            current_index=idx,
+            imported_count=imported_count,
+            failed_count=failed_count,
+            results=results,
+            message=f"正在处理第 {idx}/{len(scripts)} 条：{script_json.get('title') or item_id}",
+        )
+        try:
+            output_dir = RESULTS_ROOT / item_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            script_json["display_language"] = "pt"
+            variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="pt")
+            image_error = ""
+            try:
+                prompt = enforce_storyboard_prompt_guardrails(build_storyboard_prompt(script_json))
+                image_bytes, mime_type, raw, model = run_gemini_image_prompt(prompt)
+                preview_name = STORYBOARD_PREVIEW_BASENAME + guess_extension_from_mime(mime_type)
+                preview_path = output_dir / preview_name
+                preview_path.write_bytes(image_bytes)
+                (output_dir / "storyboard_image_raw_gemini.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+                (output_dir / STORYBOARD_PROMPT_FILE).write_text(prompt, encoding="utf-8")
+                cover_name = STORYBOARD_COVER_BASENAME + preview_path.suffix.lower()
+                shutil.copyfile(preview_path, output_dir / cover_name)
+                save_storyboard_state(item_id, prompt=prompt, preview_name=preview_name, cover_name=cover_name, model=model)
+                script_json["storyboard_cover_url"] = f"/results/{item_id}/{cover_name}"
+                variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="pt")
+            except Exception as exc:
+                image_error = friendly_error(str(exc))
+            entry = imported_creator_entry(item_id, variant.get("script_json") or script_json, video_url, variant, content_type=str(job.get("content_type") or DEFAULT_CONTENT_TYPE))
+            append_library_entry(entry)
+            center_import = push_creator_import_to_center(entry, variant.get("script_json") or script_json, output_dir)
+            imported_count += 1
+            item_result.update(
+                status=("imported" if not image_error else "imported_without_image") if center_import.get("ok") else "local_imported_remote_failed",
+                html_url=entry.get("pt_html_url") or entry.get("html_url") or "",
+                preview_image_url=entry.get("preview_image_url") or "",
+                image_error=image_error,
+                center_import=center_import,
+            )
+        except Exception as exc:
+            failed_count += 1
+            item_result.update(status="failed", error=friendly_error(str(exc)))
+        update_creator_import_job(
+            import_id,
+            imported_count=imported_count,
+            failed_count=failed_count,
+            results=results,
+            message=f"已处理 {idx}/{len(scripts)} 条",
+        )
+    sync_result = trigger_creator_center_sync()
+    final_status = "completed" if imported_count and not failed_count else ("partial" if imported_count else "failed")
+    update_creator_import_job(
+        import_id,
+        status=final_status,
+        stage="completed",
+        completed_at=now_iso(),
+        imported_count=imported_count,
+        failed_count=failed_count,
+        results=results,
+        sync_result=sync_result,
+        message=f"导入完成：成功 {imported_count} 条，失败 {failed_count} 条。",
+    )
+
+
+def start_creator_excel_import(filename: str, file_b64: str, *, content_type: str = DEFAULT_CONTENT_TYPE) -> dict[str, Any]:
+    raw_b64 = str(file_b64 or "").strip()
+    if "," in raw_b64 and raw_b64.startswith("data:"):
+        raw_b64 = raw_b64.split(",", 1)[1]
+    if not raw_b64:
+        raise ValueError("请上传一个 Excel 文件。")
+    blob = base64.b64decode(raw_b64)
+    if not str(filename or "").lower().endswith(".xlsx"):
+        raise ValueError("目前只支持 .xlsx 格式。")
+    scripts = parse_creator_script_tables_from_xlsx(blob)
+    if not scripts:
+        raise ValueError("没有识别到标准脚本表。请确认包含 Vídeo original / Conteúdo principal / Pontos principais / Tempo / Imagem / Ações / Diálogos。")
+    import_id = uuid4().hex
+    job = {
+        "id": import_id,
+        "filename": filename,
+        "status": "queued",
+        "stage": "queued",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "total": len(scripts),
+        "current_index": 0,
+        "imported_count": 0,
+        "failed_count": 0,
+        "content_type": content_type if content_type in ALLOWED_CONTENT_TYPES else DEFAULT_CONTENT_TYPE,
+        "scripts": scripts,
+        "results": [],
+        "message": f"已识别 {len(scripts)} 条脚本，等待导入。",
+    }
+    with job_lock:
+        data = load_creator_import_jobs()
+        data[import_id] = job
+        save_creator_import_jobs(data)
+    threading.Thread(target=process_creator_import_job, args=(import_id,), name=f"creator-import-{import_id[:8]}", daemon=True).start()
+    return job
+
+
 def load_storyboard_state(item_id: str) -> dict[str, Any]:
     if not item_id:
         return {}
@@ -4772,47 +5228,88 @@ def has_error_case_access(handler: BaseHTTPRequestHandler) -> bool:
 def has_creator_admin_access(handler: BaseHTTPRequestHandler) -> bool:
     cookies = parse_cookie_header(handler.headers.get("Cookie", ""))
     token = urllib.parse.unquote(cookies.get(CREATOR_ADMIN_AUTH_COOKIE) or "")
-    return bool(token) and secrets.compare_digest(token, CREATOR_ADMIN_PASSWORD)
+    remote_token = urllib.parse.unquote(cookies.get(CREATOR_REMOTE_ADMIN_COOKIE) or "")
+    return (
+        bool(token) and secrets.compare_digest(token, CREATOR_ADMIN_PASSWORD)
+    ) or (
+        bool(remote_token) and secrets.compare_digest(remote_token, CREATOR_ADMIN_PASSWORD)
+    )
+
+
+def load_creator_admin_scripts_cache() -> dict[str, Any] | None:
+    data = read_json_file(CREATOR_ADMIN_SCRIPTS_CACHE_FILE, default={})
+    return data if isinstance(data, dict) and isinstance(data.get("entries"), list) else None
+
+
+def save_creator_admin_scripts_cache(payload: dict[str, Any]) -> None:
+    if not isinstance(payload.get("entries"), list):
+        return
+    cached = dict(payload)
+    cached["cached_at"] = now_iso()
+    write_json_atomic(CREATOR_ADMIN_SCRIPTS_CACHE_FILE, cached)
 
 
 def creator_admin_remote_json(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
     if not path.startswith("/"):
         path = "/" + path
     data = None if method.upper() == "GET" else json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        CREATOR_CENTER_BASE_URL + path,
-        data=data,
-        method=method.upper(),
-        headers={
-            "Content-Type": "application/json",
-            "Accept-Encoding": "identity",
-            "Connection": "close",
-            "User-Agent": "KokoCreatorOps/1.0",
-            "Cookie": f"{CREATOR_REMOTE_ADMIN_COOKIE}={urllib.parse.quote(CREATOR_ADMIN_PASSWORD)}",
-        },
-    )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=35) as response:
-            raw = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="ignore")
-            status = int(getattr(response, "status", 200) or 200)
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode(exc.headers.get_content_charset() or "utf-8", errors="ignore")
-        status = int(exc.code or 500)
-    except http.client.IncompleteRead as exc:
-        raw = bytes(exc.partial or b"").decode("utf-8", errors="ignore")
-        status = 502
-        if not raw.strip().endswith(("}", "]")):
-            return status, {"ok": False, "error": "Creator admin response was interrupted. Please retry."}
-    except Exception as exc:
-        return 502, {"ok": False, "error": friendly_error(str(exc))}
-    try:
-        data_obj = json.loads(raw) if raw.strip() else {}
-    except Exception:
-        data_obj = {"error": raw.strip() or "Creator admin returned a non-JSON response."}
-    if not isinstance(data_obj, dict):
-        data_obj = {"response": data_obj}
-    return status, data_obj
+    attempts = 3 if method.upper() == "GET" else 1
+    last_error = "Creator admin returned a non-JSON response."
+    for attempt in range(attempts):
+        request = urllib.request.Request(
+            CREATOR_CENTER_BASE_URL + path,
+            data=data,
+            method=method.upper(),
+            headers={
+                "Content-Type": "application/json",
+                "Accept-Encoding": "identity",
+                "Connection": "close",
+                "User-Agent": "KokoCreatorOps/1.0",
+                "Cookie": f"{CREATOR_REMOTE_ADMIN_COOKIE}={urllib.parse.quote(CREATOR_ADMIN_PASSWORD)}",
+            },
+        )
+        try:
+            with opener.open(request, timeout=35) as response:
+                chunks: list[bytes] = []
+                while True:
+                    try:
+                        chunk = response.read(32768)
+                    except http.client.IncompleteRead as exc:
+                        chunk = bytes(exc.partial or b"")
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                raw_bytes = b"".join(chunks)
+                expected_length = response.headers.get("Content-Length")
+                if expected_length and len(raw_bytes) < int(expected_length):
+                    last_error = f"Creator admin response was interrupted ({len(raw_bytes)}/{expected_length})."
+                    time.sleep(0.25 * (attempt + 1))
+                    continue
+                raw = raw_bytes.decode(response.headers.get_content_charset() or "utf-8", errors="ignore")
+                status = int(getattr(response, "status", 200) or 200)
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode(exc.headers.get_content_charset() or "utf-8", errors="ignore")
+            status = int(exc.code or 500)
+        except http.client.IncompleteRead as exc:
+            raw = bytes(exc.partial or b"").decode("utf-8", errors="ignore")
+            status = 502
+            if not raw.strip().endswith(("}", "]")):
+                last_error = "Creator admin response was interrupted. Please retry."
+                time.sleep(0.25 * (attempt + 1))
+                continue
+        except Exception as exc:
+            return 502, {"ok": False, "error": friendly_error(str(exc))}
+        try:
+            data_obj = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            last_error = raw.strip() or "Creator admin returned a non-JSON response."
+            time.sleep(0.25 * (attempt + 1))
+            continue
+        if not isinstance(data_obj, dict):
+            data_obj = {"response": data_obj}
+        return status, data_obj
+    return 502, {"ok": False, "error": last_error}
 
 
 def error_cases_login_html(error_message: str = "") -> str:
@@ -13062,14 +13559,14 @@ def library_html() -> str:
 def creator_admin_html() -> str:
     template = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Koko Creator 运营后台</title><style>
 @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
-*{{box-sizing:border-box;font-family:'Readex Pro',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}body{{margin:0;min-height:100vh;background:radial-gradient(circle at 8% 8%,rgba(255,130,0,.34),transparent 30%),linear-gradient(180deg,#ffbf75 0%,#fff4e8 42%,#fff 100%);color:#1f1f1f}}button,input,textarea,select{{font:inherit}}.shell{{width:min(1240px,100%);margin:0 auto;padding:24px}}.panel{{border:1px solid rgba(255,255,255,.78);border-radius:34px;background:rgba(255,255,255,.62);box-shadow:0 28px 80px rgba(249,115,0,.16);backdrop-filter:blur(22px);padding:24px}}.top{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}}.kicker{{display:inline-flex;border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.72);color:#ff8200;font-size:12px;font-weight:800}}h1{{margin:14px 0 8px;font-size:clamp(34px,6vw,64px);line-height:.95;letter-spacing:-.05em;color:#ff8200}}.copy{{margin:0;color:#99520f;line-height:1.6;font-weight:650}}.nav,.ops-tabs{{display:flex;gap:10px;flex-wrap:wrap}}.ops-tabs{{margin:22px 0 6px}}a.btn,button{{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(255,130,0,.24);border-radius:999px;min-height:42px;padding:0 15px;background:rgba(255,255,255,.76);color:#ff8200;font-weight:850;text-decoration:none;cursor:pointer}}button.primary,.ops-tabs button.active{{border-color:#ff8200;background:#ff8200;color:#fff}}button.danger{{color:#c9481e}}button:disabled{{opacity:.52;cursor:not-allowed}}.toolbar{{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;margin:18px 0 14px}}.creator-form{{display:grid;grid-template-columns:1.4fr 1fr auto;gap:10px;margin:18px 0;padding:14px;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.55)}}input,textarea,select{{width:100%;border:1px solid rgba(255,130,0,.22);border-radius:16px;background:rgba(255,255,255,.84);padding:12px 14px;outline:none;color:#1f1f1f}}textarea{{min-height:96px;resize:vertical}}.status{{min-height:22px;color:#99520f;font-size:13px;font-weight:800}}.grid{{display:grid;gap:12px;margin-top:12px}}.card{{display:grid;grid-template-columns:34px 92px 1fr auto;gap:12px;align-items:center;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.74);padding:12px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.card img{{width:92px;aspect-ratio:9/16;border-radius:14px;object-fit:cover;background:#2a1d16}}.card h3{{margin:0 0 7px;font-size:18px;line-height:1.28;color:#1f1f1f}}.card p{{margin:0;color:#6f737a;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}.meta{{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}}.pill{{border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:5px 9px;color:#ff8200;background:#fff7f0;font-size:12px;font-weight:800}}.pill.off{{color:#777;background:#f3f3f3;border-color:#ddd}}.actions{{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}}.creator-card{{border:1px solid rgba(255,130,0,.18);border-radius:26px;background:rgba(255,255,255,.78);padding:16px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.creator-head{{display:grid;grid-template-columns:72px 1fr auto;gap:14px;align-items:center}}.avatar{{width:72px;height:72px;border-radius:50%;object-fit:cover;background:linear-gradient(135deg,#ffbd64,#ff6500)}}.creator-name{{margin:0;font-size:22px;color:#1f1f1f}}.script-mini{{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;margin-top:10px;padding:9px;border-radius:16px;background:#fff7f0;border:1px solid rgba(255,130,0,.14)}}.script-mini img{{width:52px;height:66px;border-radius:10px;object-fit:cover;background:#2a1d16}}.script-mini b{{display:block;font-size:13px;line-height:1.3}}.script-mini span,.small{{color:#6f737a;font-size:12px;line-height:1.35}}.submission-summary{{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start;margin:16px 0;padding:16px;border-radius:24px;background:rgba(255,255,255,.80);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.submission-summary h2{{margin:0 0 6px;font-size:24px;color:#1f1f1f}}.submission-count{{min-width:84px;border-radius:20px;background:#ff8200;color:white;text-align:center;padding:12px;font-weight:950}}.submission-count b{{display:block;font-size:28px;line-height:1}}.submission-groups{{display:grid;gap:10px;margin-top:12px}}.submission-group{{border:1px solid rgba(255,130,0,.16);border-radius:18px;background:#fffaf5;padding:12px}}.submission-group h3{{margin:0 0 8px;font-size:16px}}.submission-row{{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border-top:1px solid rgba(255,130,0,.12);padding-top:9px;margin-top:9px}}.submission-row a{{color:#ff8200;font-weight:850;word-break:break-all}}details{{margin-top:8px}}summary{{cursor:pointer;color:#ff8200;font-weight:900}}.login{{min-height:100vh;display:grid;place-items:center;padding:20px}}.login form,.modal-card{{width:min(520px,100%);border:1px solid rgba(255,130,0,.20);border-radius:30px;background:rgba(255,255,255,.78);padding:24px;box-shadow:0 24px 60px rgba(249,115,0,.18);backdrop-filter:blur(20px)}}.login h1{{text-align:center;font-size:42px}}.modal{{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(47,27,9,.42);padding:14px;z-index:20}}.modal.open{{display:flex}}.modal-card{{max-height:92vh;overflow:auto;background:#fffaf5}}.modal-card h2{{margin:0 0 14px;color:#ff8200}}.fields{{display:grid;gap:10px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.modal-actions{{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-wrap:wrap}}.empty{{padding:28px;border:1px dashed rgba(255,130,0,.34);border-radius:20px;text-align:center;color:#99520f;background:rgba(255,255,255,.72)}}@media(max-width:820px){{.toolbar,.creator-form{{grid-template-columns:1fr}}.card{{grid-template-columns:28px 76px 1fr}}.card img{{width:76px}}.actions{{grid-column:2/4;justify-content:flex-start}}.row,.creator-head,.submission-summary,.submission-row{{grid-template-columns:1fr}}}}
+*{{box-sizing:border-box;font-family:'Readex Pro',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}body{{margin:0;min-height:100vh;background:radial-gradient(circle at 8% 8%,rgba(255,130,0,.34),transparent 30%),linear-gradient(180deg,#ffbf75 0%,#fff4e8 42%,#fff 100%);color:#1f1f1f}}button,input,textarea,select{{font:inherit}}.shell{{width:min(1240px,100%);margin:0 auto;padding:24px}}.panel{{border:1px solid rgba(255,255,255,.78);border-radius:34px;background:rgba(255,255,255,.62);box-shadow:0 28px 80px rgba(249,115,0,.16);backdrop-filter:blur(22px);padding:24px}}.top{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}}.kicker{{display:inline-flex;border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.72);color:#ff8200;font-size:12px;font-weight:800}}h1{{margin:14px 0 8px;font-size:clamp(34px,6vw,64px);line-height:.95;letter-spacing:-.05em;color:#ff8200}}.copy{{margin:0;color:#99520f;line-height:1.6;font-weight:650}}.nav,.ops-tabs{{display:flex;gap:10px;flex-wrap:wrap}}.ops-tabs{{margin:22px 0 6px}}a.btn,button{{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(255,130,0,.24);border-radius:999px;min-height:42px;padding:0 15px;background:rgba(255,255,255,.76);color:#ff8200;font-weight:850;text-decoration:none;cursor:pointer}}button.primary,.ops-tabs button.active{{border-color:#ff8200;background:#ff8200;color:#fff}}button.danger{{color:#c9481e}}button:disabled{{opacity:.52;cursor:not-allowed}}.toolbar{{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;margin:18px 0 14px}}.creator-form{{display:grid;grid-template-columns:1.4fr 1fr auto;gap:10px;margin:18px 0;padding:14px;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.55)}}input,textarea,select{{width:100%;border:1px solid rgba(255,130,0,.22);border-radius:16px;background:rgba(255,255,255,.84);padding:12px 14px;outline:none;color:#1f1f1f}}textarea{{min-height:96px;resize:vertical}}.status{{min-height:22px;color:#99520f;font-size:13px;font-weight:800}}.grid{{display:grid;gap:12px;margin-top:12px}}.card{{display:grid;grid-template-columns:34px 92px 1fr auto;gap:12px;align-items:center;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.74);padding:12px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.card img{{width:92px;aspect-ratio:9/16;border-radius:14px;object-fit:cover;background:#2a1d16}}.card h3{{margin:0 0 7px;font-size:18px;line-height:1.28;color:#1f1f1f}}.card p{{margin:0;color:#6f737a;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}.meta{{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}}.pill{{border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:5px 9px;color:#ff8200;background:#fff7f0;font-size:12px;font-weight:800}}.pill.off{{color:#777;background:#f3f3f3;border-color:#ddd}}.actions{{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}}.creator-card{{border:1px solid rgba(255,130,0,.18);border-radius:26px;background:rgba(255,255,255,.78);padding:16px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.creator-head{{display:grid;grid-template-columns:72px 1fr auto;gap:14px;align-items:center}}.avatar{{width:72px;height:72px;border-radius:50%;object-fit:cover;background:linear-gradient(135deg,#ffbd64,#ff6500)}}.creator-name{{margin:0;font-size:22px;color:#1f1f1f}}.script-mini{{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;margin-top:10px;padding:9px;border-radius:16px;background:#fff7f0;border:1px solid rgba(255,130,0,.14)}}.script-mini img{{width:52px;height:66px;border-radius:10px;object-fit:cover;background:#2a1d16}}.script-mini b{{display:block;font-size:13px;line-height:1.3}}.script-mini span,.small{{color:#6f737a;font-size:12px;line-height:1.35}}.submission-summary{{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start;margin:16px 0;padding:16px;border-radius:24px;background:rgba(255,255,255,.80);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.submission-summary h2{{margin:0 0 6px;font-size:24px;color:#1f1f1f}}.submission-count{{min-width:84px;border-radius:20px;background:#ff8200;color:white;text-align:center;padding:12px;font-weight:950}}.submission-count b{{display:block;font-size:28px;line-height:1}}.submission-groups{{display:grid;gap:10px;margin-top:12px}}.submission-group{{border:1px solid rgba(255,130,0,.16);border-radius:18px;background:#fffaf5;padding:12px}}.submission-group h3{{margin:0 0 8px;font-size:16px}}.submission-row{{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border-top:1px solid rgba(255,130,0,.12);padding-top:9px;margin-top:9px}}.submission-row a{{color:#ff8200;font-weight:850;word-break:break-all}}.import-panel{{display:grid;gap:14px;margin:18px 0;padding:18px;border-radius:26px;background:rgba(255,255,255,.78);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.import-form{{display:grid;grid-template-columns:1.5fr 1fr auto;gap:10px;align-items:center}}.progress{{height:10px;border-radius:999px;background:#ffe3d1;overflow:hidden}}.progress span{{display:block;height:100%;width:0;background:linear-gradient(90deg,#ff9b24,#ff5f00);transition:width .25s ease}}.import-result{{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid rgba(255,130,0,.14);border-radius:18px;background:#fffaf5;padding:12px}}.import-result.failed{{border-color:#ffb0a0;background:#fff3f0}}.import-result b{{display:block;line-height:1.35}}.import-result code{{color:#99520f;font-size:12px;word-break:break-all}}details{{margin-top:8px}}summary{{cursor:pointer;color:#ff8200;font-weight:900}}.login{{min-height:100vh;display:grid;place-items:center;padding:20px}}.login form,.modal-card{{width:min(520px,100%);border:1px solid rgba(255,130,0,.20);border-radius:30px;background:rgba(255,255,255,.78);padding:24px;box-shadow:0 24px 60px rgba(249,115,0,.18);backdrop-filter:blur(20px)}}.login h1{{text-align:center;font-size:42px}}.modal{{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(47,27,9,.42);padding:14px;z-index:20}}.modal.open{{display:flex}}.modal-card{{max-height:92vh;overflow:auto;background:#fffaf5}}.modal-card h2{{margin:0 0 14px;color:#ff8200}}.fields{{display:grid;gap:10px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.modal-actions{{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-wrap:wrap}}.empty{{padding:28px;border:1px dashed rgba(255,130,0,.34);border-radius:20px;text-align:center;color:#99520f;background:rgba(255,255,255,.72)}}@media(max-width:820px){{.toolbar,.creator-form,.import-form{{grid-template-columns:1fr}}.card{{grid-template-columns:28px 76px 1fr}}.card img{{width:76px}}.actions{{grid-column:2/4;justify-content:flex-start}}.row,.creator-head,.submission-summary,.submission-row,.import-result{{grid-template-columns:1fr}}}}
 </style></head><body><main id="app"></main><div class="modal" id="edit-modal"><form class="modal-card" id="edit-form"><h2>编辑 Creator 脚本</h2><div class="fields"><input name="title" placeholder="标题"><textarea name="summary" placeholder="摘要"></textarea><div class="row"><select name="content_type"></select><label style="display:flex;align-items:center;gap:8px;color:#99520f;font-weight:850"><input name="published" type="checkbox" style="width:auto">上架到 Creator 前台</label></div><input name="video_url" placeholder="视频链接"><input name="cover_url" placeholder="封面链接"><input name="html_url" placeholder="HTML 链接"><input name="zh_html_url" placeholder="中文 HTML 链接"></div><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存</button></div></form></div><script>
-const labels=["待分类","骗子","偷奸耍滑","整蛊","夫妻吵架","夫妻欺骗","夫妻算计","妻管严","赖账","撬墙角","夫妻出轨","夫妻整蛊","偷吃东西","夫妻关系","整蛊恶搞","骗局反转","赖账/金钱冲突","偷吃/偷懒/耍小聪明","热门"];let entries=[];let creators=[];let submissions=[];let intakes=[];let activeTab="scripts";let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");
+const labels=["待分类","骗子","偷奸耍滑","整蛊","夫妻吵架","夫妻欺骗","夫妻算计","妻管严","赖账","撬墙角","夫妻出轨","夫妻整蛊","偷吃东西","夫妻关系","整蛊恶搞","骗局反转","赖账/金钱冲突","偷吃/偷懒/耍小聪明","热门"];let entries=[];let creators=[];let submissions=[];let intakes=[];let importJob=null;let importPollTimer=null;let activeTab="scripts";let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");
 function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}}[c]))}}
-async function api(url,opts={{}}){{const r=await fetch(url,{{headers:{{"Content-Type":"application/json"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}
+async function api(url,opts={{}}){{const r=await fetch(url,{{credentials:"same-origin",headers:{{"Content-Type":"application/json"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}
 function loginView(msg=""){{app.innerHTML=`<section class="login"><form id="login-form"><span class="kicker">Koko 内部后台</span><h1>Creator 运营后台</h1><p class="copy">这里管理创作者前台展示的脚本、标签、上下架和同步。</p><input name="password" type="password" placeholder="后台密码" autofocus style="margin-top:16px"><button class="primary" style="width:100%;margin-top:12px" type="submit">进入后台</button><p class="status">${{esc(msg)}}</p></form></section>`}}
-function adminView(){{app.innerHTML=`<section class="shell"><div class="panel"><div class="top"><div><span class="kicker">Koko Creator Operations</span><h1>Creator 运营后台</h1><p class="copy">在 Koko 主平台里管理创作者前台脚本和创作者分配。这里的修改会写入 Creator 运营数据，不破坏原始脚本库。</p></div><div class="nav"><a class="btn" href="/studio">内容中台</a><a class="btn" href="/library">脚本库</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a><button class="primary" id="sync-now" type="button">立刻同步 Creator</button></div></div><div class="ops-tabs"><button class="${{activeTab==="scripts"?"active":""}}" data-tab-main="scripts">脚本管理</button><button class="${{activeTab==="creators"?"active":""}}" data-tab-main="creators">创作者管理</button><button class="${{activeTab==="submissions"?"active":""}}" data-tab-main="submissions">回传数据</button><button class="${{activeTab==="intakes"?"active":""}}" data-tab-main="intakes">作者信息收集</button></div><div id="tab-body"></div></div></section>`;document.querySelector("#sync-now").addEventListener("click",syncNow);renderActiveTab()}}
-function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="creators"){{body.innerHTML=`<form class="creator-form" id="creator-form"><input name="kwai_url" placeholder="粘贴 Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><select name="category">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">导入作者</button></form><p id="status" class="status"></p><div id="creator-list" class="grid"></div>`;document.querySelector("#creator-form").addEventListener("submit",createCreator);renderCreators();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",loadSubmissions);document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",renderList);document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderList()}}
+function adminView(){{app.innerHTML=`<section class="shell"><div class="panel"><div class="top"><div><span class="kicker">Koko Creator Operations</span><h1>Creator 运营后台</h1><p class="copy">在 Koko 主平台里管理创作者前台脚本和创作者分配。这里的修改会写入 Creator 运营数据，不破坏原始脚本库。</p></div><div class="nav"><a class="btn" href="/studio">内容中台</a><a class="btn" href="/library">脚本库</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a><button class="primary" id="sync-now" type="button">立刻同步 Creator</button></div></div><div class="ops-tabs"><button class="${{activeTab==="scripts"?"active":""}}" data-tab-main="scripts">脚本管理</button><button class="${{activeTab==="imports"?"active":""}}" data-tab-main="imports">导入脚本</button><button class="${{activeTab==="creators"?"active":""}}" data-tab-main="creators">创作者管理</button><button class="${{activeTab==="submissions"?"active":""}}" data-tab-main="submissions">回传数据</button><button class="${{activeTab==="intakes"?"active":""}}" data-tab-main="intakes">作者信息收集</button></div><div id="tab-body"></div></div></section>`;document.querySelector("#sync-now").addEventListener("click",syncNow);renderActiveTab()}}
+function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="imports"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">导入标准脚本 Excel</h2><p class="copy">上传包含 Vídeo original / Conteúdo principal / Pontos principais / Partes que podem ser adaptadas / Tempo / Imagem / Ações / Diálogos 的 .xlsx。系统会自动拆分多条脚本，生成葡语脚本页，调用 Gemini 慢慢生成 3x3 分镜图，并同步到 Creator 前台。</p></div><form class="import-form" id="import-form"><input id="import-file" type="file" accept=".xlsx"><select id="import-content-type">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">上传并导入</button></form><p id="status" class="status"></p><div id="import-job"></div></section>`;document.querySelector("#import-form").addEventListener("submit",submitImport);renderImportJob();return}}if(activeTab==="creators"){{body.innerHTML=`<form class="creator-form" id="creator-form"><input name="kwai_url" placeholder="粘贴 Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><select name="category">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">导入作者</button></form><p id="status" class="status"></p><div id="creator-list" class="grid"></div>`;document.querySelector("#creator-form").addEventListener("submit",createCreator);renderCreators();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",loadSubmissions);document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",renderList);document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderList()}}
 function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();if(!q)return entries;return entries.filter(e=>[e.title,e.summary,e.content_type,e.video_url].join(" ").toLowerCase().includes(q))}}
 function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}list.innerHTML=rows.map(e=>`<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span><span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span>${{e.overridden?`<span class="pill">已运营修改</span>`:""}}</div></div><div class="actions"><button type="button" data-edit="${{esc(e.entry_id)}}">编辑</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`).join("")}}
 async function loadEntries(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载中...");const d=await api("/api/creator-admin/scripts");entries=d.entries||[];adminView();document.querySelector("#status").textContent=`共 ${{entries.length}} 条 Creator 脚本`}}catch(e){{loginView(e.message)}}}}
@@ -13088,6 +13585,12 @@ function answerText(answer){{if(!answer)return "未填写";if(Array.isArray(answ
 function questionName(key,answer){{const fallback={{people:"人数",scene:"关系/内容场景",humor:"笑点",duration:"视频时长",shoot_location:"拍摄场景"}};return (answer&&(answer.question_zh||answer.question_pt))||fallback[key]||key}}
 function filteredIntakes(){{const q=String(document.querySelector("#intake-search")?.value||"").trim().toLowerCase();if(!q)return intakes;return intakes.filter(item=>[item.kwai_name,item.notes,JSON.stringify(item.answers||{{}})].join(" ").toLowerCase().includes(q))}}
 function renderIntakes(){{const list=document.querySelector("#intake-list");if(!list)return;const rows=filteredIntakes();if(!rows.length){{list.innerHTML=`<div class="empty">还没有作者信息提交。公开问卷地址：<br><a class="small" href="__CREATOR_BASE__/creator-survey" target="_blank" rel="noopener">__CREATOR_BASE__/creator-survey</a></div>`;return}}list.innerHTML=`<section class="submission-summary"><div><h2>作者信息收集</h2><p class="copy">公开问卷地址：<a href="__CREATOR_BASE__/creator-survey" target="_blank" rel="noopener">__CREATOR_BASE__/creator-survey</a></p></div><div class="submission-count"><b>${{rows.length}}</b><span>条信息</span></div></section>`+rows.map(item=>{{const answers=item.answers||{{}};const pills=Object.entries(answers).map(([key,value])=>`<span class="pill">${{esc(questionName(key,value))}}：${{esc(answerText(value))}}</span>`).join("");return `<article class="creator-card"><div class="creator-head"><div class="avatar"></div><div><h3 class="creator-name">${{esc(item.kwai_name||"未命名作者")}}</h3><div class="small">提交时间：${{esc(timeText(item.created_at))}}</div><div class="meta">${{pills||'<span class="pill">未填写答案</span>'}}</div></div><div class="actions"><button type="button" data-copy="${{esc(item.kwai_name||"")}}">复制名称</button></div></div><div class="script-mini"><div></div><div><b>备注</b><span>${{esc(item.notes||"无备注")}}</span></div><button type="button" data-copy="${{esc(JSON.stringify(item))}}">复制整条</button></div></article>`}}).join("")}}
+function readFileDataUrl(file){{return new Promise((resolve,reject)=>{{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result||""));reader.onerror=()=>reject(reader.error||new Error("读取文件失败"));reader.readAsDataURL(file)}})}}
+function importProgress(job){{const total=Number(job?.total||0);const done=Number(job?.imported_count||0)+Number(job?.failed_count||0);return total?Math.min(100,Math.round(done/total*100)):0}}
+function importStatusText(status){{return {{queued:"等待中",running:"导入中",completed:"已完成",partial:"部分完成",failed:"失败"}}[status]||status||"未知"}}
+function renderImportJob(){{const box=document.querySelector("#import-job");if(!box)return;if(!importJob){{box.innerHTML=`<div class="empty">还没有导入任务。选择一个 Excel 后点击上传。</div>`;return}}const pct=importProgress(importJob);const results=Array.isArray(importJob.results)?importJob.results:[];box.innerHTML=`<section class="submission-summary"><div><h2>导入进度：${{esc(importStatusText(importJob.status))}}</h2><p class="copy">${{esc(importJob.message||"")}}</p><div class="small">文件：${{esc(importJob.filename||"")}} · 共 ${{Number(importJob.total||0)}} 条 · 成功 ${{Number(importJob.imported_count||0)}} · 失败 ${{Number(importJob.failed_count||0)}}</div></div><div class="submission-count"><b>${{pct}}%</b><span>进度</span></div></section><div class="progress"><span style="width:${{pct}}%"></span></div><div class="grid">${{results.map(r=>`<article class="import-result ${{r.status==="failed"?"failed":""}}"><div><b>${{esc(r.title||r.id)}}</b><div class="small">Sheet：${{esc(r.sheet||"")}} · 行：${{esc(r.row||"")}} · 状态：${{esc(r.status||"")}}</div>${{r.error?`<code>${{esc(r.error)}}</code>`:""}}${{r.image_error?`<code>分镜图生成失败：${{esc(r.image_error)}}</code>`:""}}${{r.share_url?`<code>${{esc(r.share_url)}}</code>`:""}}</div><div class="actions">${{r.share_url?`<a class="btn" href="${{esc(r.share_url)}}" target="_blank" rel="noopener">打开</a><button type="button" data-copy="${{esc(r.share_url)}}">复制链接</button>`:""}}</div></article>`).join("")}}</div>`}}
+async function pollImportJob(id){{if(importPollTimer)clearTimeout(importPollTimer);try{{const d=await api(`/api/creator-admin/imports/${{id}}`);importJob=d.job;renderImportJob();if(!["completed","partial","failed"].includes(importJob.status)){{importPollTimer=setTimeout(()=>pollImportJob(id),1800)}}else{{await loadEntries()}}}}catch(err){{const s=document.querySelector("#status");if(s)s.textContent=err.message}}}}
+async function submitImport(e){{e.preventDefault();const file=document.querySelector("#import-file")?.files?.[0];const status=document.querySelector("#status");if(!file){{status.textContent="请先选择 .xlsx 文件";return}}status.textContent="正在上传并解析 Excel...";try{{const file_b64=await readFileDataUrl(file);const content_type=document.querySelector("#import-content-type")?.value||"待分类";const d=await api("/api/creator-admin/imports",{{method:"POST",body:JSON.stringify({{filename:file.name,file_b64,content_type}})}});importJob=d.job;status.textContent=`已识别 ${{importJob.total||0}} 条脚本，开始导入。`;renderImportJob();pollImportJob(importJob.id)}}catch(err){{status.textContent=err.message}}}}
 async function createCreator(e){{e.preventDefault();const fd=new FormData(e.target);const status=document.querySelector("#status");status.textContent="正在抓取 Kwai 作者主页并匹配脚本...";try{{await api("/api/creator-admin/creators",{{method:"POST",body:JSON.stringify({{kwai_url:fd.get("kwai_url"),categories:[fd.get("category")]}})}});await loadCreators()}}catch(err){{status.textContent=err.message}}}}
 function openEdit(id){{editing=entries.find(e=>e.entry_id===id);if(!editing)return;form.title.value=editing.title||"";form.summary.value=editing.summary||"";form.content_type.innerHTML=labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("");form.content_type.value=editing.content_type||"待分类";form.published.checked=!!editing.published;form.video_url.value=editing.video_url||"";form.cover_url.value=editing.cover_url||"";form.html_url.value=editing.html_url||"";form.zh_html_url.value=editing.zh_html_url||"";modal.classList.add("open")}}
 async function saveEdit(ev){{ev.preventDefault();if(!editing)return;const payload=Object.fromEntries(new FormData(form).entries());payload.published=form.published.checked;await api(`/api/creator-admin/scripts/${{editing.entry_id}}`,{{method:"POST",body:JSON.stringify(payload)}});modal.classList.remove("open");await loadEntries()}}
@@ -13274,6 +13777,27 @@ def sync_creator_online_library_if_needed(*, force: bool = False) -> dict[str, A
         if not isinstance(entries, list):
             raise ValueError("Creator library source did not return a list.")
         clean_entries = [entry for entry in entries if isinstance(entry, dict)]
+        existing_entries = read_json_file(CREATOR_ONLINE_LIBRARY_FILE, default=[])
+        if isinstance(existing_entries, list):
+            direct_entries = [
+                entry for entry in existing_entries
+                if isinstance(entry, dict) and str(entry.get("source") or "") == "creator_direct_import"
+            ]
+            source_ids = {str(entry.get("entry_id") or "") for entry in clean_entries}
+            clean_entries = direct_entries + [
+                entry for entry in clean_entries
+                if str(entry.get("entry_id") or "") not in source_ids or str(entry.get("source") or "") != "creator_direct_import"
+            ]
+            seen_ids: set[str] = set()
+            merged_entries: list[dict[str, Any]] = []
+            for entry in clean_entries:
+                entry_id = str(entry.get("entry_id") or "")
+                if entry_id and entry_id in seen_ids:
+                    continue
+                if entry_id:
+                    seen_ids.add(entry_id)
+                merged_entries.append(entry)
+            clean_entries = merged_entries
         write_json_atomic(CREATOR_ONLINE_LIBRARY_FILE, clean_entries)
         meta = {
             "ok": True,
@@ -13319,6 +13843,32 @@ def trigger_creator_center_sync() -> dict[str, Any]:
         return {"ok": True, "target_url": target_url, **payload}
     except Exception as exc:
         return {"ok": False, "target_url": target_url, "error": friendly_error(str(exc))}
+
+
+def push_creator_import_to_center(entry: dict[str, Any], script_json: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+    html_path = output_dir / "script_table_pt.html"
+    if not html_path.exists():
+        html_path = output_dir / "script_table.html"
+    if not html_path.exists():
+        return {"ok": False, "error": "Generated script HTML was not found."}
+    cover_b64 = ""
+    cover_mime = "image/png"
+    storyboard = load_storyboard_state(str(entry.get("entry_id") or ""))
+    cover_url = str(storyboard.get("storyboard_cover_url") or "").strip()
+    if cover_url.startswith("/results/"):
+        cover_name = cover_url.rsplit("/", 1)[-1]
+        cover_path = output_dir / cover_name
+        if cover_path.exists():
+            cover_mime = "image/jpeg" if cover_path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
+            cover_b64 = base64.b64encode(cover_path.read_bytes()).decode("ascii")
+    payload = {
+        "entry": entry,
+        "script_json": script_json,
+        "html_content": html_path.read_text(encoding="utf-8"),
+        "cover_b64": cover_b64,
+        "cover_mime": cover_mime,
+    }
+    return creator_admin_remote_json("/api/admin/scripts/import", method="POST", payload=payload)[1]
 
 
 def creator_abs_url(url: object, base_url: str) -> str:
@@ -13856,6 +14406,9 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         for key, value in headers or []:
             self.send_header(key, value)
         self.end_headers()
@@ -14009,11 +14562,20 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             query = urllib.parse.parse_qs(parsed.query)
             try:
-                limit = max(1, min(500, int((query.get("limit") or ["500"])[0] or "500")))
+                limit = max(1, min(500, int((query.get("limit") or ["100"])[0] or "100")))
             except Exception:
-                limit = 500
+                limit = 100
             search = urllib.parse.urlencode({"limit": limit})
             status, payload = creator_admin_remote_json(f"/api/admin/scripts?{search}")
+            if status == 200 and isinstance(payload.get("entries"), list):
+                save_creator_admin_scripts_cache(payload)
+            elif status >= 500:
+                cached = load_creator_admin_scripts_cache()
+                if cached:
+                    payload = dict(cached)
+                    payload["from_cache"] = True
+                    payload["remote_error"] = payload.get("remote_error") or "Creator remote list is temporarily unavailable."
+                    status = 200
             self.send_json(payload, status=status)
             return
         if parsed.path == "/api/creator-admin/creators":
@@ -14036,6 +14598,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             status, payload = creator_admin_remote_json("/api/admin/intakes")
             self.send_json(payload, status=status)
+            return
+        creator_import_match = re.fullmatch(r"/api/creator-admin/imports/([0-9a-f]{32})", parsed.path)
+        if creator_import_match:
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            job = public_creator_import_job(creator_import_match.group(1))
+            if not job:
+                self.send_json({"error": "导入任务不存在。"}, status=404)
+                return
+            self.send_json({"ok": True, "job": job})
             return
         if parsed.path == "/creator-portal":
             if not is_local_creator_portal_request(self):
@@ -14264,6 +14837,40 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             result = trigger_creator_center_sync()
             self.send_json(result, status=200 if result.get("ok") else 502)
+            return
+        if parsed.path == "/api/admin/scripts/import":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+                result = save_creator_direct_import(payload)
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            except Exception as exc:
+                self.send_json({"error": friendly_error(str(exc))}, status=400)
+                return
+            self.send_json(result, status=201)
+            return
+        if parsed.path == "/api/creator-admin/imports":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+                job = start_creator_excel_import(
+                    str(payload.get("filename") or "scripts.xlsx"),
+                    str(payload.get("file_b64") or ""),
+                    content_type=str(payload.get("content_type") or DEFAULT_CONTENT_TYPE).strip(),
+                )
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            except Exception as exc:
+                self.send_json({"error": friendly_error(str(exc))}, status=400)
+                return
+            self.send_json({"ok": True, "job": job}, status=202)
             return
         if parsed.path == "/api/creator-admin/bulk-delete":
             if not has_creator_admin_access(self):
