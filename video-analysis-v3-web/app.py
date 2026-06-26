@@ -3636,6 +3636,8 @@ def process_creator_import_job(import_id: str) -> None:
                 variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="pt")
             except Exception as exc:
                 image_error = friendly_error(str(exc))
+            if image_error:
+                raise RuntimeError(f"分镜图生成失败，脚本未同步到 Creator：{image_error}")
             entry = imported_creator_entry(item_id, variant.get("script_json") or script_json, video_url, variant, content_type=str(job.get("content_type") or DEFAULT_CONTENT_TYPE))
             append_library_entry(entry)
             center_import = push_creator_import_to_center(entry, variant.get("script_json") or script_json, output_dir)
@@ -13861,6 +13863,8 @@ def push_creator_import_to_center(entry: dict[str, Any], script_json: dict[str, 
         if cover_path.exists():
             cover_mime = "image/jpeg" if cover_path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
             cover_b64 = base64.b64encode(cover_path.read_bytes()).decode("ascii")
+    if not cover_b64:
+        return {"ok": False, "error": "Storyboard cover image was not found; Creator import was skipped."}
     payload = {
         "entry": entry,
         "script_json": script_json,
