@@ -1326,7 +1326,14 @@ def row_cell(row: list[str], index: int) -> str:
 
 
 def row_value_after(row: list[str], index: int) -> str:
-    values = [compact_cell_text(cell) for cell in row[index + 1:] if compact_cell_text(cell)]
+    values: list[str] = []
+    seen: set[str] = set()
+    for cell in row[index + 1:]:
+        value = compact_cell_text(cell)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
     return " ".join(values).strip()
 
 
@@ -3562,7 +3569,17 @@ def public_creator_import_job(import_id: str) -> dict[str, Any] | None:
     return job if isinstance(job, dict) else None
 
 
-def imported_creator_entry(item_id: str, script_json: dict[str, Any], video_url: str, variant: dict[str, Any], *, content_type: str = DEFAULT_CONTENT_TYPE) -> dict[str, Any]:
+def imported_creator_entry(
+    item_id: str,
+    script_json: dict[str, Any],
+    video_url: str,
+    variant: dict[str, Any],
+    *,
+    content_type: str = DEFAULT_CONTENT_TYPE,
+    content_type_source: str = "manual",
+    content_type_reasoning: str = "Imported from standard Portuguese Excel script table.",
+    content_type_confidence: str = "high",
+) -> dict[str, Any]:
     content_type = content_type if content_type in ALLOWED_CONTENT_TYPES else DEFAULT_CONTENT_TYPE
     return {
         "entry_id": item_id,
@@ -3571,9 +3588,9 @@ def imported_creator_entry(item_id: str, script_json: dict[str, Any], video_url:
         "video_url": video_url,
         "title": script_json.get("title") or "Roteiro importado",
         "content_type": content_type,
-        "content_type_source": "manual",
-        "content_type_reasoning": "Imported from standard Portuguese Excel script table.",
-        "content_type_confidence": "high",
+        "content_type_source": str(content_type_source or "manual"),
+        "content_type_reasoning": str(content_type_reasoning or "Imported from standard Portuguese Excel script table."),
+        "content_type_confidence": str(content_type_confidence or "high"),
         "whole_video_summary": script_json.get("whole_video_summary") or "",
         "html_url": variant.get("html_url") or "",
         "pt_html_url": variant.get("html_url") or "",
@@ -3638,15 +3655,43 @@ def process_creator_import_job(import_id: str) -> None:
                 image_error = friendly_error(str(exc))
             if image_error:
                 raise RuntimeError(f"分镜图生成失败，脚本未同步到 Creator：{image_error}")
-            entry = imported_creator_entry(item_id, variant.get("script_json") or script_json, video_url, variant, content_type=str(job.get("content_type") or DEFAULT_CONTENT_TYPE))
+            final_script_json = variant.get("script_json") or script_json
+            job_content_type = str(job.get("content_type") or DEFAULT_CONTENT_TYPE).strip()
+            if job_content_type == DEFAULT_CONTENT_TYPE:
+                content_type_decision = detect_content_type_decision(
+                    final_script_json,
+                    None,
+                    existing_type="",
+                    existing_source="",
+                    use_llm=True,
+                )
+            else:
+                content_type_decision = {
+                    "content_type": job_content_type if job_content_type in ALLOWED_CONTENT_TYPES else DEFAULT_CONTENT_TYPE,
+                    "content_type_source": "manual",
+                    "content_type_reasoning": "Manual import selection",
+                    "content_type_confidence": "manual",
+                }
+            entry = imported_creator_entry(
+                item_id,
+                final_script_json,
+                video_url,
+                variant,
+                content_type=str(content_type_decision.get("content_type") or DEFAULT_CONTENT_TYPE),
+                content_type_source=str(content_type_decision.get("content_type_source") or "manual"),
+                content_type_reasoning=str(content_type_decision.get("content_type_reasoning") or ""),
+                content_type_confidence=str(content_type_decision.get("content_type_confidence") or ""),
+            )
             append_library_entry(entry)
-            center_import = push_creator_import_to_center(entry, variant.get("script_json") or script_json, output_dir)
+            center_import = push_creator_import_to_center(entry, final_script_json, output_dir)
             imported_count += 1
             item_result.update(
                 status=("imported" if not image_error else "imported_without_image") if center_import.get("ok") else "local_imported_remote_failed",
                 html_url=entry.get("pt_html_url") or entry.get("html_url") or "",
                 preview_image_url=entry.get("preview_image_url") or "",
                 image_error=image_error,
+                content_type=entry.get("content_type") or DEFAULT_CONTENT_TYPE,
+                content_type_reasoning=entry.get("content_type_reasoning") or "",
                 center_import=center_import,
             )
         except Exception as exc:
@@ -13568,7 +13613,7 @@ function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"
 async function api(url,opts={{}}){{const r=await fetch(url,{{credentials:"same-origin",headers:{{"Content-Type":"application/json"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}
 function loginView(msg=""){{app.innerHTML=`<section class="login"><form id="login-form"><span class="kicker">Koko 内部后台</span><h1>Creator 运营后台</h1><p class="copy">这里管理创作者前台展示的脚本、标签、上下架和同步。</p><input name="password" type="password" placeholder="后台密码" autofocus style="margin-top:16px"><button class="primary" style="width:100%;margin-top:12px" type="submit">进入后台</button><p class="status">${{esc(msg)}}</p></form></section>`}}
 function adminView(){{app.innerHTML=`<section class="shell"><div class="panel"><div class="top"><div><span class="kicker">Koko Creator Operations</span><h1>Creator 运营后台</h1><p class="copy">在 Koko 主平台里管理创作者前台脚本和创作者分配。这里的修改会写入 Creator 运营数据，不破坏原始脚本库。</p></div><div class="nav"><a class="btn" href="/studio">内容中台</a><a class="btn" href="/library">脚本库</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a><button class="primary" id="sync-now" type="button">立刻同步 Creator</button></div></div><div class="ops-tabs"><button class="${{activeTab==="scripts"?"active":""}}" data-tab-main="scripts">脚本管理</button><button class="${{activeTab==="imports"?"active":""}}" data-tab-main="imports">导入脚本</button><button class="${{activeTab==="creators"?"active":""}}" data-tab-main="creators">创作者管理</button><button class="${{activeTab==="submissions"?"active":""}}" data-tab-main="submissions">回传数据</button><button class="${{activeTab==="intakes"?"active":""}}" data-tab-main="intakes">作者信息收集</button></div><div id="tab-body"></div></div></section>`;document.querySelector("#sync-now").addEventListener("click",syncNow);renderActiveTab()}}
-function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="imports"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">导入标准脚本 Excel</h2><p class="copy">上传包含 Vídeo original / Conteúdo principal / Pontos principais / Partes que podem ser adaptadas / Tempo / Imagem / Ações / Diálogos 的 .xlsx。系统会自动拆分多条脚本，生成葡语脚本页，调用 Gemini 慢慢生成 3x3 分镜图，并同步到 Creator 前台。</p></div><form class="import-form" id="import-form"><input id="import-file" type="file" accept=".xlsx"><select id="import-content-type">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">上传并导入</button></form><p id="status" class="status"></p><div id="import-job"></div></section>`;document.querySelector("#import-form").addEventListener("submit",submitImport);renderImportJob();return}}if(activeTab==="creators"){{body.innerHTML=`<form class="creator-form" id="creator-form"><input name="kwai_url" placeholder="粘贴 Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><select name="category">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">导入作者</button></form><p id="status" class="status"></p><div id="creator-list" class="grid"></div>`;document.querySelector("#creator-form").addEventListener("submit",createCreator);renderCreators();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",loadSubmissions);document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",renderList);document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderList()}}
+function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="imports"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">导入标准脚本 Excel</h2><p class="copy">上传包含 Vídeo original / Conteúdo principal / Pontos principais / Partes que podem ser adaptadas / Tempo / Imagem / Ações / Diálogos 的 .xlsx。系统会自动拆分多条脚本，生成葡语脚本页，调用 Gemini 慢慢生成 3x3 分镜图，并同步到 Creator 前台。分类选择如果保留在“待分类”，后台会自动用大模型判断脚本类型；如果你手动选择了具体类型，则优先按手动类型导入。</p></div><form class="import-form" id="import-form"><input id="import-file" type="file" accept=".xlsx"><select id="import-content-type">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">上传并导入</button></form><p id="status" class="status"></p><div id="import-job"></div></section>`;document.querySelector("#import-form").addEventListener("submit",submitImport);renderImportJob();return}}if(activeTab==="creators"){{body.innerHTML=`<form class="creator-form" id="creator-form"><input name="kwai_url" placeholder="粘贴 Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><select name="category">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">导入作者</button></form><p id="status" class="status"></p><div id="creator-list" class="grid"></div>`;document.querySelector("#creator-form").addEventListener("submit",createCreator);renderCreators();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",loadSubmissions);document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",renderList);document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderList()}}
 function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();if(!q)return entries;return entries.filter(e=>[e.title,e.summary,e.content_type,e.video_url].join(" ").toLowerCase().includes(q))}}
 function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}list.innerHTML=rows.map(e=>`<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span><span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span>${{e.overridden?`<span class="pill">已运营修改</span>`:""}}</div></div><div class="actions"><button type="button" data-edit="${{esc(e.entry_id)}}">编辑</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`).join("")}}
 async function loadEntries(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载中...");const d=await api("/api/creator-admin/scripts");entries=d.entries||[];adminView();document.querySelector("#status").textContent=`共 ${{entries.length}} 条 Creator 脚本`}}catch(e){{loginView(e.message)}}}}
