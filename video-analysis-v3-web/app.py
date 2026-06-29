@@ -1167,6 +1167,9 @@ def load_library_entries() -> list[dict[str, Any]]:
             entry["content_type"] = DEFAULT_CONTENT_TYPE
         source = str(entry.get("content_type_source") or "").strip().lower()
         entry["content_type_source"] = source if source in {"auto", "manual"} else "auto"
+        storyboard_url = library_storyboard_cover_url(entry)
+        if storyboard_url:
+            entry["storyboard_cover_url"] = storyboard_url
     return data
 
 
@@ -3942,6 +3945,31 @@ def library_preview_image_url(entry_id: str, script_json: dict[str, Any] | None 
             if candidate.exists() and candidate.is_file() and (candidate == base or base in candidate.parents):
                 rel = candidate.relative_to(base).as_posix()
                 return f"/results/{entry_id}/{rel}"
+    return ""
+
+
+def library_storyboard_cover_url(entry: dict[str, Any]) -> str:
+    entry_id = str(entry.get("entry_id") or "").strip()
+    explicit = str(entry.get("storyboard_cover_url") or entry.get("storyboard_image_url") or "").strip()
+    if explicit:
+        return explicit
+    preview_url = str(entry.get("preview_image_url") or "").strip()
+    if "storyboard_cover" in preview_url:
+        return preview_url
+    if not entry_id:
+        return ""
+    state_url = str(load_storyboard_state(entry_id).get("storyboard_cover_url") or "").strip()
+    if state_url:
+        return state_url
+    output_dir = RESULTS_ROOT / entry_id
+    for name in (
+        "storyboard_cover.png",
+        "storyboard_cover.jpg",
+        "storyboard_cover.jpeg",
+        "storyboard_cover.webp",
+    ):
+        if (output_dir / name).exists():
+            return f"/results/{entry_id}/{name}"
     return ""
 
 
