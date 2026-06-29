@@ -2840,6 +2840,8 @@ CONTENT_TYPE_CLASSIFY_PROMPT = f"""你是一个短视频脚本分类器。
 
 分类原则：
 1. 先判断是否明显属于夫妻/情侣/伴侣关系主轴。
+   - 只有明确出现夫妻、情侣、男友女友、丈夫妻子、伴侣等关系主轴时，才允许选择 `夫妻吵架/夫妻出轨/夫妻好色/妻管严/夫妻欺骗/夫妻算计/夫妻整蛊/夫妻黄段子`。
+   - 如果只是朋友、闺蜜、同事、陌生人、路人、顾客、老板等关系，即使出现吃醋、另一位女性、审问、暧昧感，也不要判成夫妻类。
 2. 如果属于夫妻关系，再判断是否更具体地属于：
    - 夫妻吵架：围绕现实事务、争执、互相打脸、找人帮忙失败等
    - 夫妻出轨：第三者、抓奸、伪装、暧昧越界
@@ -2878,8 +2880,11 @@ def classify_content_type_with_llm(
     payload = {
         "title": script.get("title") or "",
         "whole_video_summary": script.get("whole_video_summary") or "",
+        "summary": script.get("summary") or "",
         "mechanism_reason": ((script.get("mechanism") or {}).get("reason") or ""),
+        "key_points": script.get("key_points") or script.get("points") or [],
         "replaceable_parts": script.get("replaceable_parts") or [],
+        "script_rows": (script.get("rows") or script.get("script_table") or [])[:12] if isinstance(script.get("rows") or script.get("script_table") or [], list) else [],
         "routing": {
             "primary_type": routing.get("primary_type") or "",
             "subtype_guess": routing.get("subtype_guess") or "",
@@ -2959,6 +2964,7 @@ def detect_content_type_decision(
     existing_type: str = "",
     existing_source: str = "",
     use_llm: bool = True,
+    use_keyword_fallback: bool = True,
 ) -> dict[str, Any]:
     normalized_existing_type = str(existing_type or "").strip()
     normalized_existing_source = str(existing_source or "").strip().lower()
@@ -2981,6 +2987,13 @@ def detect_content_type_decision(
                     "content_type_reasoning": llm_result.get("reasoning") or "LLM semantic classification",
                     "content_type_confidence": confidence,
                 }
+    if not use_keyword_fallback:
+        return {
+            "content_type": DEFAULT_CONTENT_TYPE,
+            "content_type_source": "auto",
+            "content_type_reasoning": "LLM classification unavailable or inconclusive; keyword fallback disabled for Creator import.",
+            "content_type_confidence": "low",
+        }
     content_type = keyword_fallback_content_type(script, bundle)
     return {
         "content_type": content_type,
@@ -3638,6 +3651,7 @@ def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
             existing_type="" if raw_content_type in {"", DEFAULT_CONTENT_TYPE} else raw_content_type,
             existing_source="" if raw_content_type in {"", DEFAULT_CONTENT_TYPE} else raw_content_source,
             use_llm=True,
+            use_keyword_fallback=False,
         )
     imported_entry = {
         "entry_id": entry_id,
@@ -3782,6 +3796,7 @@ def process_creator_import_job(import_id: str) -> None:
                     existing_type="",
                     existing_source="",
                     use_llm=True,
+                    use_keyword_fallback=False,
                 )
             else:
                 content_type_decision = {
