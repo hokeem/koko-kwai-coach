@@ -532,6 +532,72 @@ def emergency_cleanup_result_artifacts() -> dict[str, int]:
     return summary
 
 
+def collect_tracked_result_ids() -> set[str]:
+    tracked: set[str] = set()
+
+    for entry in load_library_entries():
+        entry_id = str((entry or {}).get("entry_id") or (entry or {}).get("id") or "").strip()
+        if re.fullmatch(r"[0-9a-f]{32}", entry_id):
+            tracked.add(entry_id)
+
+    with job_lock:
+        for job_id, job in jobs.items():
+            if re.fullmatch(r"[0-9a-f]{32}", str(job_id or "").strip()):
+                tracked.add(str(job_id).strip())
+            for item in job.get("items") or []:
+                item_id = str((item or {}).get("id") or "").strip()
+                if re.fullmatch(r"[0-9a-f]{32}", item_id):
+                    tracked.add(item_id)
+
+    with translation_jobs_lock:
+        for job_id in translation_jobs.keys():
+            value = str(job_id or "").strip()
+            if re.fullmatch(r"[0-9a-f]{32}", value):
+                tracked.add(value)
+
+    return tracked
+
+
+def cleanup_orphan_result_dirs() -> dict[str, int]:
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    tracked_ids = collect_tracked_result_ids()
+    deleted_dirs = 0
+    freed_bytes = 0
+    skipped_non_job_dirs = 0
+
+    for output_dir in RESULTS_ROOT.iterdir():
+        if not output_dir.is_dir():
+            continue
+        item_id = str(output_dir.name or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{32}", item_id):
+            skipped_non_job_dirs += 1
+            continue
+        if item_id in tracked_ids:
+            continue
+        dir_bytes = 0
+        for path in output_dir.rglob("*"):
+            if path.is_file():
+                try:
+                    dir_bytes += path.stat().st_size
+                except FileNotFoundError:
+                    continue
+        shutil.rmtree(output_dir, ignore_errors=True)
+        deleted_dirs += 1
+        freed_bytes += dir_bytes
+
+    summary = {
+        "deleted_dirs": deleted_dirs,
+        "freed_mb": round(freed_bytes / 1024 / 1024, 2),
+        "tracked_ids": len(tracked_ids),
+        "skipped_non_job_dirs": skipped_non_job_dirs,
+    }
+    if deleted_dirs:
+        log_runtime_warning("orphan_results_cleaned", "Removed orphaned result directories that are no longer tracked by the library or jobs.", **summary)
+    else:
+        log_runtime_info("orphan_results_clean", "No orphaned result directories needed cleanup.", **summary)
+    return summary
+
+
 def load_jobs() -> None:
     global jobs
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -15337,6 +15403,10 @@ def main() -> int:
     load_jobs()
     load_filter_jobs()
     load_translation_jobs()
+    try:
+        cleanup_orphan_result_dirs()
+    except Exception as exc:
+        log_runtime_warning("orphan_results_cleanup_skipped", "Automatic orphan result cleanup failed during startup.", error=str(exc))
     restore_pending_jobs_to_queue()
     restore_pending_filter_jobs_to_queue()
     restore_pending_translation_jobs_to_queue()
