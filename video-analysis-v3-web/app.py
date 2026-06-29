@@ -4153,7 +4153,6 @@ def should_retry_transient_pipeline(error_text: str) -> bool:
             "HTTP 429",
             "HTTP 500",
             "HTTP 503",
-            "RESOURCE_EXHAUSTED",
             "INTERNAL",
             "UNAVAILABLE",
             "HIGH DEMAND",
@@ -4184,14 +4183,18 @@ def friendly_error(error_text: str) -> str:
     upper = text.upper()
     if (
         "HTTP 429" in text
-        or "HTTP 500" in text
+        or "RESOURCE_EXHAUSTED" in upper
+        or "RATE_LIMIT" in upper
+        or "RATE LIMIT" in upper
+        or "QUOTA" in upper
+    ):
+        return "Gemini 当前更像是触发了配额或限流，不一定是服务本身过载。请优先检查 API key 的额度、限速或计费状态。"
+    if (
+        "HTTP 500" in text
         or "HTTP 503" in text
         or "UNAVAILABLE" in text
         or "INTERNAL" in upper
         or "HIGH DEMAND" in upper
-        or "RESOURCE_EXHAUSTED" in upper
-        or "RATE_LIMIT" in upper
-        or "RATE LIMIT" in upper
     ):
         return "Gemini 当前负载较高，系统已自动换模型并延迟重试，但这次仍未成功。请稍后重试。"
     if "FAILED_PRECONDITION" in text and "User location is not supported" in text:
