@@ -2789,6 +2789,22 @@ CONTENT_TYPE_RULES: list[tuple[str, list[str]]] = [
     ("偷奸耍滑", ["偷懒", "耍滑", "偷奸耍滑", "装病", "钻空子", "耍小聪明", "蒙混过关"]),
     ("整蛊", ["整蛊", "恶作剧", "捉弄", "恶搞", "吓唬", "陷阱", "搞怪"]),
 ]
+CONTENT_TYPE_RULES_PT: list[tuple[str, list[str]]] = [
+    ("夫妻出轨", ["traição", "infiel", "amante", "outra mulher", "outro homem", "caso", "flagr", "traindo"]),
+    ("夫妻好色", ["olhar", "encarar", "atraente", "bonita", "corpo", "seios", "bunda", "desejo", "ciúme"]),
+    ("夫妻黄段子", ["quarto", "cama", "banho", "toalha", "relação", "sexual", "duplo sentido", "íntim"]),
+    ("妻管严", ["esposa manda", "marido obedece", "controla", "proíbe", "medo da esposa", "ela não deixa"]),
+    ("夫妻欺骗", ["finge", "mentira", "engan", "esconde", "segredo", "revel", "descobre", "desmascara", "surpresa"]),
+    ("夫妻算计", ["plano", "arma", "combina", "estratég", "aproveita", "vingança", "revanche", "testa", "provoca"]),
+    ("夫妻整蛊", ["pegadinha", "brincadeira", "susto", "troll", "armadilha", "esposa", "marido"]),
+    ("夫妻吵架", ["esposa", "marido", "casal", "briga", "discute", "reclama", "irritado", "zangad", "confronto"]),
+    ("撬墙角", ["namorada", "namorado", "casado", "casada", "conquistar", "seduz", "separar", "levar embora"]),
+    ("偷吃东西", ["comer escondido", "rouba comida", "comida", "lanche", "bolo", "pastel", "bebida", "iogurte"]),
+    ("赖账", ["dinheiro", "reais", "pagar", "pagamento", "dívida", "conta", "cobrar", "salário", "fiado"]),
+    ("骗子", ["golpe", "golpista", "fraude", "engan", "roub", "falso", "finge", "vítima"]),
+    ("偷奸耍滑", ["preguiça", "desculpa", "jeitinho", "esperteza", "evitar", "enrol", "finge estar doente"]),
+    ("整蛊", ["pegadinha", "brincadeira", "susto", "troll", "armadilha", "zoeira", "piada"]),
+]
 
 ALLOWED_CONTENT_TYPES = {label for label, _ in CONTENT_TYPE_RULES}
 DEFAULT_CONTENT_TYPE = "待分类"
@@ -2911,15 +2927,28 @@ def keyword_fallback_content_type(script: dict[str, Any], bundle: dict[str, Any]
         for x in [
             routing.get("reasoning_summary"),
             script.get("whole_video_summary"),
+            script.get("content_summary"),
+            script.get("summary"),
             script.get("title"),
             (script.get("mechanism") or {}).get("reason"),
             (script.get("type_router") or {}).get("reasoning_summary"),
+            " ".join(str(item or "") for item in script.get("key_points") or []),
+            " ".join(str(item or "") for item in script.get("replaceable_parts") or []),
         ]
     )
     for label, keywords in CONTENT_TYPE_RULES:
         hit_count = sum(1 for word in keywords if word in text)
         if hit_count >= 2:
             return label
+    lowered = text.lower()
+    scored: list[tuple[int, str]] = []
+    for label, keywords in CONTENT_TYPE_RULES_PT:
+        hit_count = sum(1 for word in keywords if word in lowered)
+        if hit_count:
+            scored.append((hit_count, label))
+    if scored:
+        scored.sort(key=lambda item: (item[0], 1 if item[1].startswith("夫妻") else 0), reverse=True)
+        return scored[0][1]
     return DEFAULT_CONTENT_TYPE
 
 
@@ -3587,6 +3616,29 @@ def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         (output_dir / preview_name).write_bytes(cover_bytes)
         save_storyboard_state(entry_id, preview_name=preview_name, cover_name=cover_name, model=str(payload.get("cover_model") or "imported"))
         cover_url = f"/results/{entry_id}/{cover_name}"
+    raw_content_type = str(entry.get("content_type") or DEFAULT_CONTENT_TYPE).strip()
+    raw_content_source = str(entry.get("content_type_source") or "").strip().lower()
+    if raw_content_source == "manual" and raw_content_type in ALLOWED_CONTENT_TYPES and raw_content_type != DEFAULT_CONTENT_TYPE:
+        content_type_decision = {
+            "content_type": raw_content_type,
+            "content_type_source": "manual",
+            "content_type_reasoning": str(entry.get("content_type_reasoning") or "Manual import selection."),
+            "content_type_confidence": str(entry.get("content_type_confidence") or "manual"),
+        }
+    else:
+        classify_script = {
+            **script_json,
+            "title": entry.get("title") or script_json.get("title") or "Roteiro importado",
+            "whole_video_summary": entry.get("whole_video_summary") or script_json.get("whole_video_summary") or "",
+            "summary": entry.get("summary") or script_json.get("summary") or "",
+        }
+        content_type_decision = detect_content_type_decision(
+            classify_script,
+            None,
+            existing_type="" if raw_content_type in {"", DEFAULT_CONTENT_TYPE} else raw_content_type,
+            existing_source="" if raw_content_type in {"", DEFAULT_CONTENT_TYPE} else raw_content_source,
+            use_llm=True,
+        )
     imported_entry = {
         "entry_id": entry_id,
         "parent_job_id": str(entry.get("parent_job_id") or f"creator_import_{entry_id}"),
@@ -3594,10 +3646,10 @@ def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "saved_at": str(entry.get("saved_at") or now_iso()),
         "video_url": str(entry.get("video_url") or payload.get("video_url") or ""),
         "title": str(entry.get("title") or script_json.get("title") or "Roteiro importado"),
-        "content_type": str(entry.get("content_type") or DEFAULT_CONTENT_TYPE),
-        "content_type_source": str(entry.get("content_type_source") or "manual"),
-        "content_type_reasoning": str(entry.get("content_type_reasoning") or "Imported from Creator admin Excel."),
-        "content_type_confidence": str(entry.get("content_type_confidence") or "high"),
+        "content_type": str(content_type_decision.get("content_type") or DEFAULT_CONTENT_TYPE),
+        "content_type_source": str(content_type_decision.get("content_type_source") or "auto"),
+        "content_type_reasoning": str(content_type_decision.get("content_type_reasoning") or "Imported from Creator admin Excel."),
+        "content_type_confidence": str(content_type_decision.get("content_type_confidence") or "medium"),
         "whole_video_summary": str(entry.get("whole_video_summary") or script_json.get("whole_video_summary") or ""),
         "html_url": f"/results/{entry_id}/script_table_pt.html",
         "pt_html_url": f"/results/{entry_id}/script_table_pt.html",
