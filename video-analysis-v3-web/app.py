@@ -25,6 +25,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -98,6 +99,8 @@ CREATOR_CENTER_BASE_URL = os.environ.get("CREATOR_CENTER_BASE_URL", "https://kok
 CREATOR_ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
 CREATOR_ADMIN_AUTH_COOKIE = "koko_creator_admin_auth"
 CREATOR_REMOTE_ADMIN_COOKIE = "koko_creator_admin"
+CREATOR_IMPORT_MAX_WORKERS = max(1, int(os.environ.get("CREATOR_IMPORT_MAX_WORKERS", "3")))
+CREATOR_IMPORT_IMAGE_RETRY_ATTEMPTS = max(1, int(os.environ.get("CREATOR_IMPORT_IMAGE_RETRY_ATTEMPTS", "2")))
 FILTER_JOBS_FILE = DATA_ROOT / "filter_jobs.json"
 FILTER_CACHE_ROOT = DATA_ROOT / "filter_cache"
 VISION_MODELS_DIR = DATA_ROOT / "vision_models"
@@ -810,7 +813,7 @@ def library_entry_exists(entry_id: str) -> bool:
     if not target or not LIBRARY_FILE.exists():
         return False
     try:
-        data = read_json(LIBRARY_FILE) or []
+        data = load_library_entries()
     except Exception:
         return False
     for entry in data:
@@ -1171,6 +1174,32 @@ def load_library_entries() -> list[dict[str, Any]]:
         if storyboard_url:
             entry["storyboard_cover_url"] = storyboard_url
     return data
+
+
+def library_entry_by_id(entry_id: str) -> dict[str, Any] | None:
+    target = str(entry_id or "").strip()
+    if not target:
+        return None
+    for entry in load_library_entries():
+        if str((entry or {}).get("entry_id") or "").strip() == target:
+            return dict(entry)
+    return None
+
+
+def infer_library_display_language(entry: dict[str, Any], zh_script: dict[str, Any], pt_script: dict[str, Any]) -> str:
+    explicit = str(entry.get("display_language") or "").strip().lower()
+    if explicit in {"zh", "pt"}:
+        return explicit
+    html_url = str(entry.get("html_url") or "").strip()
+    pt_html_url = str(entry.get("pt_html_url") or "").strip()
+    zh_html_url = str(entry.get("zh_html_url") or "").strip()
+    if pt_script and html_url and pt_html_url and html_url == pt_html_url:
+        return "pt"
+    if zh_script and html_url and zh_html_url and html_url == zh_html_url:
+        return "zh"
+    if pt_script and not zh_script:
+        return "pt"
+    return "zh"
 
 
 def save_library_entries(entries: list[dict[str, Any]]) -> bool:
@@ -3736,110 +3765,124 @@ def imported_creator_entry(
     }
 
 
+def process_creator_import_script(item: dict[str, Any], *, content_type: str = DEFAULT_CONTENT_TYPE) -> dict[str, Any]:
+    item_id = str(item.get("id") or uuid4().hex)
+    video_url = str(item.get("video_url") or "").strip()
+    script_json = json.loads(json.dumps(item.get("script") or {}, ensure_ascii=False))
+    output_dir = RESULTS_ROOT / item_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    script_json["display_language"] = "pt"
+    variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="pt")
+    assets = generate_storyboard_assets(item_id, output_dir, script_json)
+    script_json["storyboard_cover_url"] = assets.get("cover_url") or ""
+    variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="pt")
+    final_script_json = variant.get("script_json") or script_json
+    if content_type == DEFAULT_CONTENT_TYPE:
+        content_type_decision = detect_content_type_decision(
+            final_script_json,
+            None,
+            existing_type="",
+            existing_source="",
+            use_llm=True,
+            use_keyword_fallback=False,
+        )
+    else:
+        content_type_decision = {
+            "content_type": content_type if content_type in ALLOWED_CONTENT_TYPES else DEFAULT_CONTENT_TYPE,
+            "content_type_source": "manual",
+            "content_type_reasoning": "Manual import selection",
+            "content_type_confidence": "manual",
+        }
+    entry = imported_creator_entry(
+        item_id,
+        final_script_json,
+        video_url,
+        variant,
+        content_type=str(content_type_decision.get("content_type") or DEFAULT_CONTENT_TYPE),
+        content_type_source=str(content_type_decision.get("content_type_source") or "manual"),
+        content_type_reasoning=str(content_type_decision.get("content_type_reasoning") or ""),
+        content_type_confidence=str(content_type_decision.get("content_type_confidence") or ""),
+    )
+    append_library_entry(entry)
+    center_import = push_creator_import_to_center(entry, final_script_json, output_dir)
+    return {
+        "ok": True,
+        "id": item_id,
+        "video_url": video_url,
+        "title": final_script_json.get("title") or script_json.get("title") or "",
+        "sheet": item.get("sheet") or "",
+        "row": item.get("row") or "",
+        "status": "imported" if center_import.get("ok") else "local_imported_remote_failed",
+        "share_url": f"{CREATOR_CENTER_BASE_URL}/script/{item_id}",
+        "html_url": entry.get("pt_html_url") or entry.get("html_url") or "",
+        "preview_image_url": entry.get("preview_image_url") or "",
+        "content_type": entry.get("content_type") or DEFAULT_CONTENT_TYPE,
+        "content_type_reasoning": entry.get("content_type_reasoning") or "",
+        "center_import": center_import,
+        "storyboard_cover_url": assets.get("cover_url") or "",
+        "storyboard_prompt_model": assets.get("prompt_model") or "",
+        "storyboard_image_model": assets.get("image_model") or "",
+    }
+
+
 def process_creator_import_job(import_id: str) -> None:
     job = public_creator_import_job(import_id)
     if not job:
         return
     scripts = job.get("scripts") if isinstance(job.get("scripts"), list) else []
+    total = len(scripts)
+    worker_count = min(max(1, CREATOR_IMPORT_MAX_WORKERS), max(1, total))
     results: list[dict[str, Any]] = []
     imported_count = 0
     failed_count = 0
-    update_creator_import_job(import_id, status="running", stage="importing", message="开始导入脚本", started_at=now_iso())
-    for idx, item in enumerate(scripts, start=1):
+    update_creator_import_job(
+        import_id,
+        status="running",
+        stage="importing",
+        message=f"开始导入脚本，worker={worker_count}",
+        started_at=now_iso(),
+    )
+    for item in scripts:
         item_id = str(item.get("id") or uuid4().hex)
-        video_url = str(item.get("video_url") or "").strip()
         script_json = json.loads(json.dumps(item.get("script") or {}, ensure_ascii=False))
-        item_result = {
+        results.append({
             "id": item_id,
-            "video_url": video_url,
+            "video_url": str(item.get("video_url") or "").strip(),
             "title": script_json.get("title") or "",
             "sheet": item.get("sheet") or "",
             "row": item.get("row") or "",
-            "status": "running",
+            "status": "queued",
             "share_url": f"{CREATOR_CENTER_BASE_URL}/script/{item_id}",
-        }
-        results.append(item_result)
-        update_creator_import_job(
-            import_id,
-            current_index=idx,
-            imported_count=imported_count,
-            failed_count=failed_count,
-            results=results,
-            message=f"正在处理第 {idx}/{len(scripts)} 条：{script_json.get('title') or item_id}",
-        )
-        try:
-            output_dir = RESULTS_ROOT / item_id
-            output_dir.mkdir(parents=True, exist_ok=True)
-            script_json["display_language"] = "pt"
-            variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="pt")
-            image_error = ""
+        })
+    update_creator_import_job(import_id, current_index=0, imported_count=0, failed_count=0, results=results)
+    job_content_type = str(job.get("content_type") or DEFAULT_CONTENT_TYPE).strip()
+    future_map: dict[Any, int] = {}
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix=f"creator-import-{import_id[:6]}") as executor:
+        for index, item in enumerate(scripts):
+            future = executor.submit(process_creator_import_script, item, content_type=job_content_type)
+            future_map[future] = index
+        for completed_count, future in enumerate(as_completed(future_map), start=1):
+            index = future_map[future]
+            item_result = results[index]
             try:
-                prompt = enforce_storyboard_prompt_guardrails(build_storyboard_prompt(script_json))
-                image_bytes, mime_type, raw, model = run_gemini_image_prompt(prompt)
-                preview_name = STORYBOARD_PREVIEW_BASENAME + guess_extension_from_mime(mime_type)
-                preview_path = output_dir / preview_name
-                preview_path.write_bytes(image_bytes)
-                (output_dir / "storyboard_image_raw_gemini.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
-                (output_dir / STORYBOARD_PROMPT_FILE).write_text(prompt, encoding="utf-8")
-                cover_name = STORYBOARD_COVER_BASENAME + preview_path.suffix.lower()
-                shutil.copyfile(preview_path, output_dir / cover_name)
-                save_storyboard_state(item_id, prompt=prompt, preview_name=preview_name, cover_name=cover_name, model=model)
-                script_json["storyboard_cover_url"] = f"/results/{item_id}/{cover_name}"
-                variant = generate_script_variant_outputs(output_dir, item_id, script_json, video_url, locale="pt")
+                payload = future.result()
+                if payload.get("ok"):
+                    imported_count += 1
+                    item_result.update(payload)
+                else:
+                    failed_count += 1
+                    item_result.update(status="failed", error=friendly_error(str(payload.get("error") or "导入失败。")))
             except Exception as exc:
-                image_error = friendly_error(str(exc))
-            if image_error:
-                raise RuntimeError(f"分镜图生成失败，脚本未同步到 Creator：{image_error}")
-            final_script_json = variant.get("script_json") or script_json
-            job_content_type = str(job.get("content_type") or DEFAULT_CONTENT_TYPE).strip()
-            if job_content_type == DEFAULT_CONTENT_TYPE:
-                content_type_decision = detect_content_type_decision(
-                    final_script_json,
-                    None,
-                    existing_type="",
-                    existing_source="",
-                    use_llm=True,
-                    use_keyword_fallback=False,
-                )
-            else:
-                content_type_decision = {
-                    "content_type": job_content_type if job_content_type in ALLOWED_CONTENT_TYPES else DEFAULT_CONTENT_TYPE,
-                    "content_type_source": "manual",
-                    "content_type_reasoning": "Manual import selection",
-                    "content_type_confidence": "manual",
-                }
-            entry = imported_creator_entry(
-                item_id,
-                final_script_json,
-                video_url,
-                variant,
-                content_type=str(content_type_decision.get("content_type") or DEFAULT_CONTENT_TYPE),
-                content_type_source=str(content_type_decision.get("content_type_source") or "manual"),
-                content_type_reasoning=str(content_type_decision.get("content_type_reasoning") or ""),
-                content_type_confidence=str(content_type_decision.get("content_type_confidence") or ""),
+                failed_count += 1
+                item_result.update(status="failed", error=friendly_error(str(exc)))
+            update_creator_import_job(
+                import_id,
+                current_index=completed_count,
+                imported_count=imported_count,
+                failed_count=failed_count,
+                results=results,
+                message=f"已处理 {completed_count}/{total} 条",
             )
-            append_library_entry(entry)
-            center_import = push_creator_import_to_center(entry, final_script_json, output_dir)
-            imported_count += 1
-            item_result.update(
-                status=("imported" if not image_error else "imported_without_image") if center_import.get("ok") else "local_imported_remote_failed",
-                html_url=entry.get("pt_html_url") or entry.get("html_url") or "",
-                preview_image_url=entry.get("preview_image_url") or "",
-                image_error=image_error,
-                content_type=entry.get("content_type") or DEFAULT_CONTENT_TYPE,
-                content_type_reasoning=entry.get("content_type_reasoning") or "",
-                center_import=center_import,
-            )
-        except Exception as exc:
-            failed_count += 1
-            item_result.update(status="failed", error=friendly_error(str(exc)))
-        update_creator_import_job(
-            import_id,
-            imported_count=imported_count,
-            failed_count=failed_count,
-            results=results,
-            message=f"已处理 {idx}/{len(scripts)} 条",
-        )
     sync_result = trigger_creator_center_sync()
     final_status = "completed" if imported_count and not failed_count else ("partial" if imported_count else "failed")
     update_creator_import_job(
@@ -3855,22 +3898,19 @@ def process_creator_import_job(import_id: str) -> None:
     )
 
 
-def start_creator_excel_import(filename: str, file_b64: str, *, content_type: str = DEFAULT_CONTENT_TYPE) -> dict[str, Any]:
-    raw_b64 = str(file_b64 or "").strip()
-    if "," in raw_b64 and raw_b64.startswith("data:"):
-        raw_b64 = raw_b64.split(",", 1)[1]
-    if not raw_b64:
-        raise ValueError("请上传一个 Excel 文件。")
-    blob = base64.b64decode(raw_b64)
-    if not str(filename or "").lower().endswith(".xlsx"):
-        raise ValueError("目前只支持 .xlsx 格式。")
-    scripts = parse_creator_script_tables_from_xlsx(blob)
+def start_creator_script_imports(
+    source_name: str,
+    scripts: list[dict[str, Any]],
+    *,
+    content_type: str = DEFAULT_CONTENT_TYPE,
+    start_async: bool = True,
+) -> dict[str, Any]:
     if not scripts:
         raise ValueError("没有识别到标准脚本表。请确认包含 Vídeo original / Conteúdo principal / Pontos principais / Tempo / Imagem / Ações / Diálogos。")
     import_id = uuid4().hex
     job = {
         "id": import_id,
-        "filename": filename,
+        "filename": source_name,
         "status": "queued",
         "stage": "queued",
         "created_at": now_iso(),
@@ -3888,8 +3928,22 @@ def start_creator_excel_import(filename: str, file_b64: str, *, content_type: st
         data = load_creator_import_jobs()
         data[import_id] = job
         save_creator_import_jobs(data)
-    threading.Thread(target=process_creator_import_job, args=(import_id,), name=f"creator-import-{import_id[:8]}", daemon=True).start()
+    if start_async:
+        threading.Thread(target=process_creator_import_job, args=(import_id,), name=f"creator-import-{import_id[:8]}", daemon=True).start()
     return job
+
+
+def start_creator_excel_import(filename: str, file_b64: str, *, content_type: str = DEFAULT_CONTENT_TYPE) -> dict[str, Any]:
+    raw_b64 = str(file_b64 or "").strip()
+    if "," in raw_b64 and raw_b64.startswith("data:"):
+        raw_b64 = raw_b64.split(",", 1)[1]
+    if not raw_b64:
+        raise ValueError("请上传一个 Excel 文件。")
+    blob = base64.b64decode(raw_b64)
+    if not str(filename or "").lower().endswith(".xlsx"):
+        raise ValueError("目前只支持 .xlsx 格式。")
+    scripts = parse_creator_script_tables_from_xlsx(blob)
+    return start_creator_script_imports(filename, scripts, content_type=content_type, start_async=True)
 
 
 def load_storyboard_state(item_id: str) -> dict[str, Any]:
@@ -6653,7 +6707,7 @@ def guess_extension_from_mime(mime_type: str) -> str:
 
 
 def build_storyboard_prompt(script_json: dict[str, Any], extra_instruction: str = "") -> str:
-    rows = choose_script_rows(script_json)[:9]
+    rows = select_storyboard_rows(choose_script_rows(script_json), max_panels=9)
     beats = []
     for idx, row in enumerate(rows, 1):
         beats.append(
@@ -6677,6 +6731,27 @@ def build_storyboard_prompt(script_json: dict[str, Any], extra_instruction: str 
     return enforce_storyboard_prompt_guardrails("\n".join(prompt).strip())
 
 
+def select_storyboard_rows(rows: list[dict[str, Any]], max_panels: int = 9) -> list[dict[str, Any]]:
+    usable = [row for row in rows if isinstance(row, dict)]
+    if len(usable) <= max_panels:
+        return usable
+    if max_panels <= 1:
+        return usable[:1]
+    last_index = len(usable) - 1
+    selected_indexes: list[int] = []
+    for slot in range(max_panels):
+        index = round(slot * last_index / (max_panels - 1))
+        if index not in selected_indexes:
+            selected_indexes.append(index)
+    cursor = 0
+    while len(selected_indexes) < max_panels and cursor < len(usable):
+        if cursor not in selected_indexes:
+            selected_indexes.append(cursor)
+        cursor += 1
+    selected_indexes.sort()
+    return [usable[index] for index in selected_indexes[:max_panels]]
+
+
 def generate_storyboard_prompt_from_script(script_json: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
     fallback = build_storyboard_prompt(script_json)
     if not GOOGLE_API_KEY or run_text_json_prompt_with_fallback is None:
@@ -6686,7 +6761,7 @@ def generate_storyboard_prompt_from_script(script_json: dict[str, Any]) -> tuple
         "whole_video_summary": script_json.get("whole_video_summary") or "",
         "core_viral_points": script_json.get("core_viral_points") or [],
         "replaceable_parts": script_json.get("replaceable_parts") or [],
-        "rows": choose_script_rows(script_json)[:9],
+        "rows": select_storyboard_rows(choose_script_rows(script_json), max_panels=9),
         "fixed_guardrails": STORYBOARD_PROMPT_GUARDRAILS,
     }
     try:
@@ -6839,6 +6914,57 @@ def run_chat_script_edit(item_id: str, message: str, edit_mode: str = "minor") -
         return False, error_message
 
 
+def generate_storyboard_assets(
+    item_id: str,
+    output_dir: Path,
+    script_json: dict[str, Any],
+    *,
+    prompt_override: str = "",
+    attempts: int = CREATOR_IMPORT_IMAGE_RETRY_ATTEMPTS,
+) -> dict[str, str]:
+    attempts = max(1, int(attempts or 1))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate_prompts: list[str] = []
+    primary_prompt = enforce_storyboard_prompt_guardrails(str(prompt_override or "").strip() or build_storyboard_prompt(script_json))
+    candidate_prompts.append(primary_prompt)
+    drafted_prompt, _, drafted_model = generate_storyboard_prompt_from_script(script_json)
+    drafted_prompt = enforce_storyboard_prompt_guardrails(str(drafted_prompt or "").strip() or primary_prompt)
+    if drafted_prompt and drafted_prompt not in candidate_prompts:
+        candidate_prompts.insert(0, drafted_prompt)
+    last_error: Exception | None = None
+    for attempt_index in range(attempts):
+        prompt = candidate_prompts[min(attempt_index, len(candidate_prompts) - 1)]
+        try:
+            image_bytes, mime_type, raw, model = run_gemini_image_prompt(prompt)
+            preview_name = STORYBOARD_PREVIEW_BASENAME + guess_extension_from_mime(mime_type)
+            preview_path = output_dir / preview_name
+            preview_path.write_bytes(image_bytes)
+            (output_dir / "storyboard_image_raw_gemini.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            (output_dir / STORYBOARD_PROMPT_FILE).write_text(prompt, encoding="utf-8")
+            cover_name = STORYBOARD_COVER_BASENAME + preview_path.suffix.lower()
+            shutil.copyfile(preview_path, output_dir / cover_name)
+            save_storyboard_state(
+                item_id,
+                prompt=prompt,
+                preview_name=preview_name,
+                cover_name=cover_name,
+                model=model,
+            )
+            return {
+                "prompt": prompt,
+                "prompt_model": drafted_model if prompt == drafted_prompt else "rule-based",
+                "image_model": model,
+                "preview_name": preview_name,
+                "cover_name": cover_name,
+                "cover_url": f"/results/{item_id}/{cover_name}",
+            }
+        except Exception as exc:
+            last_error = exc
+            if attempt_index + 1 < attempts:
+                time.sleep(min(2 + attempt_index, 5))
+    raise RuntimeError(friendly_error(str(last_error or "Storyboard generation failed.")))
+
+
 def generate_storyboard_preview(item_id: str, prompt_override: str = "") -> dict[str, Any]:
     context = find_item_context(item_id)
     if not context:
@@ -6851,19 +6977,19 @@ def generate_storyboard_preview(item_id: str, prompt_override: str = "") -> dict
     output_dir = RESULTS_ROOT / item_id
     output_dir.mkdir(parents=True, exist_ok=True)
     script_json = item.get("zh_result_json") or item.get("result_json") or {}
-    prompt = enforce_storyboard_prompt_guardrails(str(prompt_override or "").strip() or build_storyboard_prompt(script_json))
-    image_bytes, mime_type, raw, model = run_gemini_image_prompt(prompt)
-    preview_name = STORYBOARD_PREVIEW_BASENAME + guess_extension_from_mime(mime_type)
-    preview_path = output_dir / preview_name
-    preview_path.write_bytes(image_bytes)
-    (output_dir / "storyboard_image_raw_gemini.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
-    (output_dir / STORYBOARD_PROMPT_FILE).write_text(prompt, encoding="utf-8")
-    state = save_storyboard_state(item_id, prompt=prompt, preview_name=preview_name, model=model)
+    assets = generate_storyboard_assets(item_id, output_dir, script_json, prompt_override=prompt_override)
+    state = save_storyboard_state(
+        item_id,
+        prompt=assets.get("prompt") or "",
+        preview_name=assets.get("preview_name") or "",
+        cover_name=assets.get("cover_name") or "",
+        model=assets.get("image_model") or assets.get("prompt_model") or "",
+    )
     update_job_item(
         parent_job_id,
         item_index,
-        storyboard_prompt=state.get("storyboard_prompt") or prompt,
-        storyboard_preview_url=state.get("storyboard_preview_url") or f"/results/{item_id}/{preview_name}",
+        storyboard_prompt=state.get("storyboard_prompt") or assets.get("prompt") or "",
+        storyboard_preview_url=state.get("storyboard_preview_url") or f"/results/{item_id}/{assets.get('preview_name') or ''}",
         storyboard_updated_at=state.get("storyboard_updated_at") or now_iso(),
     )
     with job_lock:
@@ -7001,7 +7127,7 @@ def ensure_storyboard_cover_ready(item_id: str) -> dict[str, Any]:
     return confirm_storyboard_cover(item_id)
 
 
-def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True) -> bool:
+def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True) -> dict[str, Any]:
     script = item.get("result_json") or {}
     output_dir = RESULTS_ROOT / item["id"]
     bundle = read_json(output_dir / "evidence_bundle.json")
@@ -7012,10 +7138,11 @@ def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: 
         existing_source=item.get("content_type_source") or "",
         use_llm=use_llm,
     )
+    existing = library_entry_by_id(str(item.get("id") or "")) or {}
     entry = {
         "entry_id": item["id"],
         "parent_job_id": parent_job_id,
-        "created_at": item.get("completed_at") or now_iso(),
+        "created_at": existing.get("created_at") or item.get("completed_at") or now_iso(),
         "video_url": item.get("video_url"),
         "title": item.get("title") or script.get("title") or "Untitled Script",
         "content_type": decision["content_type"],
@@ -7034,11 +7161,29 @@ def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: 
         "preview_image_url": library_preview_image_url(item["id"], script, output_dir),
         "source": "edited" if item.get("edited") else "ai",
         "saved_at": item.get("saved_to_library_at") or now_iso(),
+        "display_language": item.get("display_language") or existing.get("display_language") or "zh",
+        "chat_messages": item.get("chat_messages") if isinstance(item.get("chat_messages"), list) else existing.get("chat_messages") or [],
+        "reviewed": bool(item.get("reviewed")),
+        "edited": bool(item.get("edited")),
+        "storyboard_prompt": item.get("storyboard_prompt") or existing.get("storyboard_prompt") or "",
+        "storyboard_preview_url": item.get("storyboard_preview_url") or existing.get("storyboard_preview_url") or "",
+        "storyboard_cover_url": item.get("storyboard_cover_url") or existing.get("storyboard_cover_url") or "",
+        "storyboard_updated_at": item.get("storyboard_updated_at") or existing.get("storyboard_updated_at") or "",
     }
+    return entry
+
+
+def sync_library_entry_from_item(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True, delete_source: bool = False) -> bool:
+    entry = build_library_entry_payload(parent_job_id, item, use_llm=use_llm)
     saved = append_library_entry(entry)
-    if saved:
+    if saved and delete_source:
         delete_source_video_if_allowed(item["id"], reason="saved_to_library")
     return saved
+
+
+def persist_library_entry(parent_job_id: str, item: dict[str, Any], *, use_llm: bool = True) -> bool:
+    should_delete_source = library_entry_by_id(str(item.get("id") or "")) is None
+    return sync_library_entry_from_item(parent_job_id, item, use_llm=use_llm, delete_source=should_delete_source)
 
 
 def persist_completed_job_items_async(job_id: str, *, use_llm: bool = True) -> None:
@@ -7104,6 +7249,116 @@ def find_item_context(item_id: str) -> tuple[str, int, dict[str, Any]] | None:
                 }
                 return job_id, 0, pseudo_item
     return None
+
+
+def library_edit_job_id(entry_id: str) -> str:
+    return f"library_edit_{entry_id}"
+
+
+def ensure_library_edit_context(entry_id: str) -> tuple[str, int, dict[str, Any]]:
+    entry_id = str(entry_id or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        raise RuntimeError("Invalid library script id.")
+    entry = library_entry_by_id(entry_id)
+    if not entry:
+        raise RuntimeError("Library script not found.")
+    output_dir = RESULTS_ROOT / entry_id
+    zh_script = read_json(output_dir / "script_table.json") or read_json(output_dir / "analysis_result.json") or {}
+    pt_script = read_json(output_dir / "script_table_pt.json") or {}
+    if not zh_script and not pt_script:
+        raise RuntimeError("No editable script JSON found for this library entry.")
+    display_language = infer_library_display_language(entry, zh_script, pt_script)
+    current_script = pt_script if display_language == "pt" and pt_script else zh_script or pt_script
+    item_payload = {
+        "id": entry_id,
+        "index": 0,
+        "video_url": entry.get("video_url") or "",
+        "status": "completed",
+        "updated_at": entry.get("saved_at") or entry.get("created_at") or now_iso(),
+        "completed_at": entry.get("created_at") or entry.get("saved_at") or now_iso(),
+        "stage": "completed",
+        "stage_message": "Library script ready for editing.",
+        "html_url": entry.get("pt_html_url") if display_language == "pt" and entry.get("pt_html_url") else entry.get("zh_html_url") or entry.get("html_url") or "",
+        "docx_url": entry.get("pt_docx_url") if display_language == "pt" and entry.get("pt_docx_url") else entry.get("zh_docx_url") or entry.get("docx_url") or "",
+        "zh_docx_url": entry.get("zh_docx_url") or entry.get("docx_url") or "",
+        "pt_docx_url": entry.get("pt_docx_url") or "",
+        "zh_html_url": entry.get("zh_html_url") or entry.get("html_url") or "",
+        "pt_html_url": entry.get("pt_html_url") or "",
+        "result_json": current_script,
+        "zh_result_json": zh_script or current_script,
+        "pt_result_json": pt_script or None,
+        "content_type": entry.get("content_type") or DEFAULT_CONTENT_TYPE,
+        "content_type_source": entry.get("content_type_source") or "auto",
+        "content_type_reasoning": entry.get("content_type_reasoning") or "",
+        "content_type_confidence": entry.get("content_type_confidence") or "",
+        "title": entry.get("title") or current_script.get("title") or "Untitled Script",
+        "display_language": display_language,
+        "review_status": "",
+        "review_stage": "",
+        "review_message": "",
+        "review_feedback": "",
+        "review_mode": REVIEW_MODE_PARTIAL,
+        "chat_messages": entry.get("chat_messages") if isinstance(entry.get("chat_messages"), list) else [],
+        "reviewed": bool(entry.get("reviewed")),
+        "edited": bool(entry.get("edited")),
+        "saved_to_library_at": entry.get("saved_at") or entry.get("created_at") or now_iso(),
+        "storyboard_prompt": entry.get("storyboard_prompt") or "",
+        "storyboard_preview_url": entry.get("storyboard_preview_url") or "",
+        "storyboard_cover_url": entry.get("storyboard_cover_url") or "",
+        "storyboard_updated_at": entry.get("storyboard_updated_at") or "",
+        "source": entry.get("source") or "library",
+    }
+    existing = find_item_context(entry_id)
+    with job_lock:
+        if existing:
+            parent_job_id, item_index, _ = existing
+            job = jobs[parent_job_id]
+            if job.get("items"):
+                job["items"][item_index].update(json.loads(json.dumps(item_payload, ensure_ascii=False)))
+                job["updated_at"] = now_iso()
+                save_jobs()
+                return parent_job_id, item_index, jobs[parent_job_id]["items"][item_index]
+        job_id = library_edit_job_id(entry_id)
+        job = jobs.get(job_id)
+        if not isinstance(job, dict):
+            job = {
+                "id": job_id,
+                "video_url": entry.get("video_url") or "",
+                "status": "completed",
+                "created_at": entry.get("created_at") or now_iso(),
+                "updated_at": now_iso(),
+                "started_at": entry.get("created_at") or now_iso(),
+                "completed_at": entry.get("saved_at") or entry.get("created_at") or now_iso(),
+                "total_items": 1,
+                "completed_items": 1,
+                "failed_items": 0,
+                "items": [],
+            }
+            jobs[job_id] = job
+        job["status"] = "completed"
+        job["updated_at"] = now_iso()
+        job["completed_at"] = entry.get("saved_at") or entry.get("created_at") or now_iso()
+        job["items"] = [json.loads(json.dumps(item_payload, ensure_ascii=False))]
+        save_jobs()
+        return job_id, 0, jobs[job_id]["items"][0]
+
+
+def public_library_workbench(entry_id: str) -> dict[str, Any]:
+    parent_job_id, item_index, _ = ensure_library_edit_context(entry_id)
+    with job_lock:
+        job = jobs.get(parent_job_id) or {}
+        item = (job.get("items") or [])[item_index]
+        return {
+            "id": parent_job_id,
+            "status": "completed",
+            "video_url": item.get("video_url") or "",
+            "updated_at": job.get("updated_at") or item.get("updated_at") or now_iso(),
+            "completed_at": job.get("completed_at") or item.get("completed_at") or "",
+            "total_items": 1,
+            "completed_items": 1,
+            "failed_items": 0,
+            "items": [public_item_view(item)],
+        }
 
 
 def apply_script_edits(script: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -7268,6 +7523,8 @@ def regenerate_item_outputs(
             item = jobs[parent_job_id]["items"][item_index]
         if persist_library:
             persist_library_entry(parent_job_id, item, use_llm=False)
+        elif library_entry_exists(item_id):
+            sync_library_entry_from_item(parent_job_id, item, use_llm=False, delete_source=False)
         return public_item_view(item)
 
     script_json = refresh_core_viral_points(
@@ -7339,6 +7596,8 @@ def regenerate_item_outputs(
         item = jobs[parent_job_id]["items"][item_index]
     if persist_library:
         persist_library_entry(parent_job_id, item)
+    elif library_entry_exists(item_id):
+        sync_library_entry_from_item(parent_job_id, item, use_llm=False, delete_source=False)
     return public_item_view(item)
 
 
@@ -7396,6 +7655,8 @@ def set_item_display_language(item_id: str, language: str) -> dict[str, Any]:
             job["display_language"] = item_ref.get("display_language") or language
             job["title"] = item_ref.get("title") or job.get("title") or ""
             save_jobs()
+    if library_entry_exists(item_id):
+        sync_library_entry_from_item(parent_job_id, item_ref, use_llm=False, delete_source=False)
     return public_item_view(item_ref)
 
 
@@ -7572,6 +7833,10 @@ def run_review_reanalysis(parent_job_id: str, item_index: int, item_id: str, fee
             review_feedback=feedback,
             review_mode=mode,
         )
+        with job_lock:
+            final_item = jobs[parent_job_id]["items"][item_index]
+        if library_entry_exists(item_id):
+            sync_library_entry_from_item(parent_job_id, final_item, use_llm=False, delete_source=False)
         def _record_error_case() -> None:
             try:
                 entry = summarize_error_case_with_llm(
@@ -10813,6 +11078,7 @@ def studio_html() -> str:
     const reviewTerminalTracker = Object.create(null);
     const itemOpenState = Object.create(null);
     const detailIframeCache = new Map();
+    const pageParams = new URLSearchParams(window.location.search || "");
     let lastStatusMarkup = "";
     let lastStatusReady = false;
     const ACTIVE_JOB_STORAGE_KEY = "koko_active_job_id";
@@ -11191,6 +11457,33 @@ def studio_html() -> str:
         }}
         const preview = String(raw || "").slice(0, 180).trim();
         throw new Error(preview ? `服务返回了非 JSON 内容：${{preview}}` : "服务返回了空响应。");
+      }}
+    }}
+
+    async function loadLibraryWorkbench(entryId) {{
+      const target = String(entryId || "").trim();
+      if (!target) return false;
+      setStudioPanel("split-panel");
+      setStatus(`
+        <div class="status-empty">
+          <div class="status-empty-title">正在载入脚本库工作台...</div>
+          <div class="status-empty-copy">这条已入库脚本会直接接入当前编辑、修稿和复盘流程。</div>
+        </div>
+      `);
+      try {{
+        const res = await fetch(`/api/library-workbench/${{encodeURIComponent(target)}}?_=${{Date.now()}}`, {{
+          cache: "no-store",
+        }});
+        const data = await readJsonSafely(res);
+        if (!res.ok) throw new Error(data.error || "载入脚本库工作台失败");
+        activeJobId = "";
+        activeReviewItemId = "";
+        persistActiveJobId("");
+        setStatus(renderBatchResults(data), true);
+        return true;
+      }} catch (error) {{
+        setStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        return false;
       }}
     }}
 
@@ -11644,6 +11937,7 @@ def studio_html() -> str:
       const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
       const mechanismReason = (((script.mechanism || {{}}).reason) || "");
       const corePointCards = normalizeInsightItems(script.core_viral_points, []);
+      const librarySaveLabel = (item.saved_to_library_at || item.in_library) ? "保存并更新葡语版本" : "保存并转葡语入库";
       const storyboardPrompt = normalizedText(item.storyboard_prompt || buildStoryboardPrompt(script), "");
       const storyboardPreviewUrl = versionedResultUrl(item.storyboard_preview_url || item.storyboard_cover_url || "", item);
       const renderInsightEditors = (items, kind) => {{
@@ -11713,7 +12007,7 @@ def studio_html() -> str:
           <input type="hidden" data-edit-field="mechanism_reason" value="${{escapeHtml(normalizedText(mechanismReason))}}">
           <div class="link-row structured-editor-actions">
             <button class="action-link primary" type="button" data-save-edits="${{item.id}}">保存当前编辑</button>
-            <button class="action-link" type="button" data-save-library="${{item.id}}">保存并转葡语入库</button>
+            <button class="action-link" type="button" data-save-library="${{item.id}}">${{librarySaveLabel}}</button>
           </div>
         </div>
       `;
@@ -12962,8 +13256,12 @@ def studio_html() -> str:
       }}
     }});
 
+    const libraryWorkbenchEntryId = String(pageParams.get("library_entry") || "").trim();
     const restoredJobId = readPersistedActiveJobId();
-    if (restoredJobId) {{
+    if (libraryWorkbenchEntryId) {{
+      updateStopAllButtonState(false);
+      loadLibraryWorkbench(libraryWorkbenchEntryId);
+    }} else if (restoredJobId) {{
       restoringActiveJob = true;
       updateStopAllButtonState(true);
       setStudioPanel("split-panel");
@@ -13209,6 +13507,7 @@ def library_html() -> str:
             "</div>"
             "<div class='link-row'>"
             + (f"<button class='action-link' type='button' data-open-preview='{html_escape(entry.get('html_url') or '')}'>打开预览</button>" if entry.get("html_url") else "")
+            + f"<button class='action-link primary' type='button' data-open-library-editor='{html_escape(entry.get('entry_id') or '')}'>编辑脚本</button>"
             + (
                 f"<button class='action-link' type='button' data-open-export-modal='{html_escape(entry.get('zh_docx_url') or entry.get('docx_url') or '')}' data-open-export-modal-pt='{html_escape(entry.get('pt_docx_url') or '')}'>导出脚本</button>"
                 if entry.get("zh_docx_url") or entry.get("docx_url") or entry.get("pt_docx_url")
@@ -13770,6 +14069,12 @@ def library_html() -> str:
       if (previewBtn) {{
         const url = previewBtn.getAttribute("data-open-preview");
         if (url) window.location.assign(url);
+        return;
+      }}
+      const editBtn = event.target.closest("[data-open-library-editor]");
+      if (editBtn) {{
+        const entryId = editBtn.getAttribute("data-open-library-editor");
+        if (entryId) window.location.assign(`/studio?library_entry=${{encodeURIComponent(entryId)}}#split-panel`);
         return;
       }}
       const deleteBtn = event.target.closest("[data-delete-entry]");
@@ -14887,6 +15192,15 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/library":
             self.send_json({"entries": load_library_entries()})
+            return
+        library_workbench_match = re.fullmatch(r"/api/library-workbench/([0-9a-f]{32})", parsed.path)
+        if library_workbench_match:
+            try:
+                payload = public_library_workbench(library_workbench_match.group(1))
+            except Exception as exc:
+                self.send_json({"error": friendly_error(str(exc))}, status=404)
+                return
+            self.send_json(payload)
             return
         if parsed.path == "/api/creator/facets":
             if not is_local_creator_portal_request(self):
