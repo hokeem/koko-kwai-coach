@@ -9762,9 +9762,31 @@ def studio_html() -> str:
       display: grid;
       gap: 8px;
     }}
+    .structured-insight-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }}
     .structured-insight-label {{
       min-height: 42px;
       font-weight: 900;
+    }}
+    .structured-delete-btn {{
+      flex: 0 0 auto;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(217, 87, 42, .16);
+      background: #fff4f1;
+      color: #D9572A;
+      font-size: 12px;
+      font-weight: 900;
+      cursor: pointer;
+    }}
+    .structured-delete-btn:hover {{
+      border-color: rgba(217, 87, 42, .32);
+      background: #ffe9e3;
     }}
     .replacement-picker {{
       display: grid;
@@ -9888,19 +9910,28 @@ def studio_html() -> str:
     }}
     .structured-script-table th:nth-child(1),
     .structured-script-table td:nth-child(1) {{
-      width: 12%;
+      width: 11%;
     }}
     .structured-script-table th:nth-child(2),
     .structured-script-table td:nth-child(2) {{
-      width: 24%;
+      width: 22%;
     }}
     .structured-script-table th:nth-child(3),
     .structured-script-table td:nth-child(3) {{
-      width: 34%;
+      width: 31%;
     }}
     .structured-script-table th:nth-child(4),
     .structured-script-table td:nth-child(4) {{
-      width: 30%;
+      width: 28%;
+    }}
+    .structured-script-table th:nth-child(5),
+    .structured-script-table td:nth-child(5) {{
+      width: 8%;
+      text-align: center;
+      vertical-align: middle;
+    }}
+    .structured-row-actions {{
+      padding: 10px 6px;
     }}
     .structured-cell-input,
     .structured-cell-textarea {{
@@ -11618,7 +11649,10 @@ def studio_html() -> str:
       const renderInsightEditors = (items, kind) => {{
         return normalizeInsightItems(items).map((point, idx) => `
           <div class="structured-insight" data-insight-kind="${{kind}}" data-insight-index="${{idx}}">
-            <input class="structured-editor-input structured-insight-label" data-insight-field="label" value="${{escapeHtml(normalizedText(point.label || point.title || point.name, `要点${{idx + 1}}`))}}">
+            <div class="structured-insight-head">
+              <input class="structured-editor-input structured-insight-label" data-insight-field="label" value="${{escapeHtml(normalizedText(point.label || point.title || point.name, `要点${{idx + 1}}`))}}">
+              <button class="structured-delete-btn" type="button" data-delete-insight="${{kind}}">删除格子</button>
+            </div>
             <textarea class="structured-editor-textarea" data-insight-field="text">${{escapeHtml(normalizedText(point.text || point.description || point.value))}}</textarea>
           </div>
         `).join("");
@@ -11630,6 +11664,7 @@ def studio_html() -> str:
           <td><textarea class="structured-cell-textarea" data-row-field="visual_content">${{escapeHtml(normalizedText(row.visual_content, ""))}}</textarea></td>
           <td><textarea class="structured-cell-textarea" data-row-field="action">${{escapeHtml(normalizedText(row.action, ""))}}</textarea></td>
           <td><textarea class="structured-cell-textarea" data-row-field="dialogue_or_audio">${{escapeHtml(normalizedText(row.dialogue_or_audio, ""))}}</textarea></td>
+          <td class="structured-row-actions"><button class="structured-delete-btn" type="button" data-delete-row>删除整行</button></td>
         </tr>
       `).join("");
       return `
@@ -11655,7 +11690,7 @@ def studio_html() -> str:
             <div class="structured-table-wrap">
               <table class="structured-script-table">
                 <thead>
-                  <tr><th>时间</th><th>画面内容</th><th>动作</th><th>关键对白/旁白</th></tr>
+                  <tr><th>时间</th><th>画面内容</th><th>动作</th><th>关键对白/旁白</th><th>操作</th></tr>
                 </thead>
                 <tbody>${{rowEditors}}</tbody>
               </table>
@@ -11812,11 +11847,11 @@ def studio_html() -> str:
           title: root.querySelector('[data-edit-field="title"]')?.value || "",
           whole_video_summary: root.querySelector('[data-edit-field="whole_video_summary"]')?.value || "",
           mechanism_reason: root.querySelector('[data-edit-field="mechanism_reason"]')?.value || "",
+          core_viral_points: coreViralPoints,
+          replaceable_parts: replaceableParts,
           rows,
           target_language: root.getAttribute("data-editor-lang") || "zh",
         }};
-        if (coreViralPoints.length) payload.core_viral_points = coreViralPoints;
-        if (replaceableParts.length) payload.replaceable_parts = replaceableParts;
         return payload;
       }}
       const draft = root.querySelector("[data-editor-draft]")?.value || "";
@@ -13025,6 +13060,18 @@ def studio_html() -> str:
           downloadScript(pendingExportChoice.pt, exportPtBtn);
         }}
         closeExportChoice();
+        return;
+      }}
+      const deleteInsightBtn = event.target.closest("[data-delete-insight]");
+      if (deleteInsightBtn) {{
+        const card = deleteInsightBtn.closest(".structured-insight");
+        if (card) card.remove();
+        return;
+      }}
+      const deleteRowBtn = event.target.closest("[data-delete-row]");
+      if (deleteRowBtn) {{
+        const row = deleteRowBtn.closest("[data-structured-row-index]");
+        if (row) row.remove();
         return;
       }}
       const saveBtn = event.target.closest("[data-save-edits]");
