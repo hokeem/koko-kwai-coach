@@ -14215,13 +14215,6 @@ CREATOR_QUESTIONS = [
                 "types": ["夫妻欺骗", "夫妻算计", "骗子", "整蛊", "撬墙角"],
                 "keywords": ["妈妈", "爸爸", "儿子", "女儿", "家庭", "亲戚", "朋友", "同事", "围观", "多人", "误会"],
             },
-            {
-                "id": "flex",
-                "pt": "Varia bastante",
-                "zh": "不固定",
-                "types": [],
-                "keywords": ["热门", "低成本", "反转", "误会", "发现", "简单", "日常"],
-            },
         ],
     },
     {
@@ -14230,39 +14223,68 @@ CREATOR_QUESTIONS = [
         "zh": "你最常拍哪种关系/场景？",
         "options": [
             {
-                "id": "couple",
+                "id": "solo_reaction",
+                "pt": "Reação / monólogo",
+                "zh": "一个人反应/独白",
+                "people": ["solo"],
+                "types": ["骗子", "偷奸耍滑", "整蛊"],
+                "keywords": ["独自", "一个人", "反应", "吐槽", "发现", "假装", "装病", "误会"],
+            },
+            {
+                "id": "solo_smart",
+                "pt": "Esperteza / situação pessoal",
+                "zh": "个人小聪明/自我处境",
+                "people": ["solo"],
+                "types": ["偷奸耍滑", "骗子"],
+                "keywords": ["偷懒", "耍小聪明", "钻空子", "蒙混过关", "假装", "秘密", "尴尬"],
+            },
+            {
+                "id": "duo_couple",
                 "pt": "Casal / namorados",
                 "zh": "夫妻/情侣",
+                "people": ["duo"],
                 "types": ["夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "夫妻黄段子", "夫妻好色", "夫妻出轨", "夫妻整蛊"],
                 "keywords": ["夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "女友", "男友", "吃醋", "约会"],
             },
             {
-                "id": "friends",
-                "pt": "Amigos ou colegas",
-                "zh": "朋友/同事",
+                "id": "duo_friends",
+                "pt": "Dois amigos / colegas",
+                "zh": "两位朋友/同事",
+                "people": ["duo"],
                 "types": ["整蛊", "骗子", "偷奸耍滑", "撬墙角"],
                 "keywords": ["朋友", "同事", "兄弟", "闺蜜", "套路", "恶作剧", "陷阱", "误会"],
             },
             {
-                "id": "family",
-                "pt": "Família / filhos",
-                "zh": "家庭/亲子",
-                "types": ["夫妻欺骗", "夫妻算计"],
-                "keywords": ["妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "家庭", "生日", "礼物", "亲戚"],
-            },
-            {
-                "id": "service",
-                "pt": "Cliente, chefe ou atendimento",
-                "zh": "顾客/老板/服务",
+                "id": "duo_service",
+                "pt": "Cliente / chefe / atendimento",
+                "zh": "两人顾客/老板/服务",
+                "people": ["duo"],
                 "types": ["赖账", "骗子", "偷奸耍滑", "整蛊"],
                 "keywords": ["老板", "员工", "顾客", "服务", "付款", "结账", "工资", "交易", "投诉", "费用"],
             },
             {
-                "id": "unsure_scene",
-                "pt": "Ainda não sei",
-                "zh": "不确定",
-                "types": [],
-                "keywords": ["热门", "反转", "误会", "发现", "日常", "简单"],
+                "id": "group_family",
+                "pt": "Família / filhos",
+                "zh": "家庭/亲子",
+                "people": ["group"],
+                "types": ["夫妻欺骗", "夫妻算计"],
+                "keywords": ["妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "家庭", "生日", "礼物", "亲戚"],
+            },
+            {
+                "id": "group_friends",
+                "pt": "Grupo de amigos / colegas",
+                "zh": "朋友群体/同事群",
+                "people": ["group"],
+                "types": ["整蛊", "骗子", "偷奸耍滑", "撬墙角"],
+                "keywords": ["朋友", "同事", "兄弟", "闺蜜", "多人", "围观", "恶作剧", "误会", "套路"],
+            },
+            {
+                "id": "group_public",
+                "pt": "Rua / público / confusão",
+                "zh": "街头/围观/多人误会",
+                "people": ["group"],
+                "types": ["整蛊", "骗子", "赖账", "撬墙角"],
+                "keywords": ["街头", "路人", "围观", "多人", "公共场合", "误会", "反转", "冲突"],
             },
         ],
     },
@@ -14275,6 +14297,8 @@ CREATOR_QUESTIONS = [
                 "id": "banter",
                 "pt": "Discussão e respostas rápidas",
                 "zh": "拌嘴互怼",
+                "people": ["duo"],
+                "scenes": ["duo_couple"],
                 "types": ["夫妻吵架", "妻管严", "夫妻算计"],
                 "keywords": ["吵架", "争执", "训斥", "反驳", "打脸", "抱怨", "不满"],
             },
@@ -14282,6 +14306,7 @@ CREATOR_QUESTIONS = [
                 "id": "twist",
                 "pt": "Segredo e revelação",
                 "zh": "隐瞒反转",
+                "people": ["solo", "duo", "group"],
                 "types": ["夫妻欺骗", "骗子", "夫妻算计"],
                 "keywords": ["假装", "隐瞒", "谎称", "秘密", "真相", "发现", "揭开", "被骗", "冒充"],
             },
@@ -14289,6 +14314,8 @@ CREATOR_QUESTIONS = [
                 "id": "prank",
                 "pt": "Pegadinha ou susto",
                 "zh": "整蛊恶搞",
+                "people": ["solo", "duo", "group"],
+                "scenes": ["solo_reaction", "duo_friends", "duo_service", "group_friends", "group_public"],
                 "types": ["整蛊", "夫妻整蛊"],
                 "keywords": ["整蛊", "恶作剧", "捉弄", "吓唬", "陷阱", "搞怪", "吓得", "反应"],
             },
@@ -14296,6 +14323,8 @@ CREATOR_QUESTIONS = [
                 "id": "money",
                 "pt": "Dinheiro ou vantagem",
                 "zh": "钱/占便宜",
+                "people": ["duo", "group"],
+                "scenes": ["duo_service", "duo_friends", "group_public", "group_friends"],
                 "types": ["赖账", "骗子", "夫妻算计"],
                 "keywords": ["付款", "欠钱", "不给钱", "逃单", "结账", "费用", "花钱", "信用卡", "便宜", "贵"],
             },
@@ -14303,8 +14332,26 @@ CREATOR_QUESTIONS = [
                 "id": "sneaky",
                 "pt": "Preguiça ou esperteza",
                 "zh": "偷懒/偷吃/耍小聪明",
+                "people": ["solo", "duo", "group"],
                 "types": ["偷吃东西", "偷奸耍滑"],
                 "keywords": ["偷吃", "偷喝", "冰箱", "零食", "偷懒", "装病", "钻空子", "耍小聪明", "蒙混过关"],
+            },
+            {
+                "id": "relationship",
+                "pt": "Ciúmes / conflito de casal",
+                "zh": "吃醋/亲密关系冲突",
+                "people": ["duo"],
+                "scenes": ["duo_couple"],
+                "types": ["夫妻欺骗", "夫妻吵架", "夫妻出轨", "夫妻算计"],
+                "keywords": ["吃醋", "出轨", "约会", "女友", "男友", "隐瞒", "吵架", "关系"],
+            },
+            {
+                "id": "group_misunderstanding",
+                "pt": "Mal-entendido em grupo",
+                "zh": "多人误会扩散",
+                "people": ["group"],
+                "types": ["整蛊", "骗子", "撬墙角"],
+                "keywords": ["多人", "围观", "误会", "传播", "发现", "尴尬", "反转"],
             },
             {
                 "id": "hot",
@@ -14812,10 +14859,34 @@ def creator_portal_html() -> str:
       pt: {{ homePill:"Biblioteca de roteiros Koko Creator", homeTitle:'Encontre mais rápido <span class="accent">roteiros</span> que você realmente consegue gravar', homeLead:"Responda 3 perguntas simples e veja roteiros que combinam com o jeito que você grava.", start:"Começar agora", seePopular:"Ver populares", recommended:"Recomendado para você", seeAll:"Ver todos", next:"Próxima etapa", finish:"Ver recomendações", libraryPill:"Biblioteca de roteiros Koko Creator", resultTitle:"Sua biblioteca recomendada", open:"Abrir", original:"Vídeo", navHome:"Roteiros", navPrefs:"Perfil", navSaved:"Salvos", navLibrary:"Biblioteca", changePrefs:"Mudar preferências", step:"Etapa", todayPill:"Recomendação de roteiros", todayTitle:"Recomendação de roteiros", todayLead:"Abra, salve e marque o que você vai gravar hoje.", quickNew:"roteiros", quickSaved:"salvos", quickPlan:"para gravar", todayRecommended:"Para gravar hoje", savedPill:"Meus roteiros", savedTitle:"Sua lista de gravação", save:"Salvar", saved:"Salvo", plan:"Vou gravar", done:"Gravado", reject:"Não serve", copy:"Copiar resumo", emptySaved:"Nada aqui ainda", emptySavedText:"Salve um roteiro da recomendação para montar sua lista.", details:"Detalhes do roteiro", quickSummary:"Resumo rápido", howToUse:"Como usar", howToUseText:"Leia o resumo, veja o vídeo de referência e marque se vai gravar.", peopleTag:"2 pessoas", placeTag:"Baixo custo", statusSaved:"Salvos", statusPlanned:"Vou gravar", statusFinished:"Gravados", statusRejected:"Não servem", submitTitle:"Enviar vídeo gravado", submitHint:"Envie o link do vídeo gravado seguindo este roteiro. Vamos revisar e, se aprovado, ajudar com impulsionamento.", submitPlaceholder:"Cole aqui o link do seu vídeo", submitButton:"Enviar para revisão", submitOk:"Recebido. Vamos revisar seu vídeo.", submitError:"Não foi possível enviar. Confira o link e tente novamente." }},
       zh: {{ homePill:"Koko Creator 脚本推荐", homeTitle:'更快找到你<span class="accent">真的能拍</span>的脚本', homeLead:"回答 3 个简单问题，Koko 会按你的拍摄方式推荐脚本。", start:"开始选择", seePopular:"先看热门", recommended:"为你推荐", seeAll:"查看全部", next:"下一步", finish:"查看推荐", libraryPill:"Koko Creator 脚本库", resultTitle:"你的推荐脚本库", open:"打开", original:"原视频", navHome:"脚本推荐", navPrefs:"偏好", navSaved:"收藏", navLibrary:"脚本库", changePrefs:"重新选择偏好", step:"第", todayPill:"脚本推荐", todayTitle:"脚本推荐", todayLead:"打开、收藏，并标记今天准备拍的脚本。", quickNew:"推荐脚本", quickSaved:"已收藏", quickPlan:"准备拍", todayRecommended:"今天可以拍", savedPill:"我的脚本", savedTitle:"你的拍摄清单", save:"收藏", saved:"已收藏", plan:"准备拍", done:"已拍", reject:"不适合", copy:"复制摘要", emptySaved:"这里还没有脚本", emptySavedText:"先从脚本推荐里收藏一个脚本，建立你的拍摄清单。", details:"脚本详情", quickSummary:"快速梗概", howToUse:"怎么使用", howToUseText:"先看梗概和原视频，再标记是否准备拍。", peopleTag:"2 人", placeTag:"低成本", statusSaved:"已收藏", statusPlanned:"准备拍", statusFinished:"已拍", statusRejected:"不适合", submitTitle:"回传拍摄视频", submitHint:"上传按照脚本拍摄的视频，我们会审核后给您投流。", submitPlaceholder:"把你发布后的视频链接粘贴在这里", submitButton:"提交审核", submitOk:"已收到，我们会审核这个视频。", submitError:"提交失败，请检查链接后重试。" }}
     }};
-    const t = key => (i18n[lang] && i18n[lang][key]) || key;
-    const label = item => lang === "zh" ? item.zh : item.pt;
-    const esc = value => String(value || "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
-    function save() {{ localStorage.setItem(profileKey, JSON.stringify(answers)); }}
+	    const t = key => (i18n[lang] && i18n[lang][key]) || key;
+	    const label = item => lang === "zh" ? item.zh : item.pt;
+	    const esc = value => String(value || "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
+	    function optionAllowed(opt) {{
+	      if (!opt) return false;
+	      if (Array.isArray(opt.people) && opt.people.length && !opt.people.includes(answers.people)) return false;
+	      if (Array.isArray(opt.scenes) && opt.scenes.length && !opt.scenes.includes(answers.scene)) return false;
+	      return true;
+	    }}
+	    function optionsFor(q) {{ return (q.options || []).filter(optionAllowed); }}
+	    function normalizeAnswers() {{
+	      let changed = false;
+	      questions.forEach(q => {{
+	        const opts = optionsFor(q);
+	        if (!opts.length) return;
+	        if (!opts.some(opt => opt.id === answers[q.id])) {{
+	          answers[q.id] = opts[0].id;
+	          changed = true;
+	        }}
+	      }});
+	      if (changed) save();
+	      return changed;
+	    }}
+	    function selectedAnswerValues() {{
+	      normalizeAnswers();
+	      return questions.map(q => answers[q.id]).filter(Boolean);
+	    }}
+	    function save() {{ localStorage.setItem(profileKey, JSON.stringify(answers)); }}
     function saveWorkspace() {{ localStorage.setItem(workspaceKey, JSON.stringify(workspace)); updateCounts(); }}
     function hasProfile() {{ return !!localStorage.getItem(profileKey); }}
     function ids(name) {{ return new Set(workspace[name] || []); }}
@@ -14858,16 +14929,18 @@ def creator_portal_html() -> str:
       const active = activeView();
       document.querySelectorAll(".bottom button").forEach(btn => btn.classList.toggle("active", btn.dataset.go === active));
     }}
-    function renderQuestion() {{
-      const q = questions[step];
-      document.querySelector("#step-label").textContent = lang === "zh" ? `${{t("step")}} ${{step + 1}} / 3` : `${{t("step")}} ${{step + 1}} de 3`;
-      document.querySelector("#stepper").innerHTML = questions.map((item, idx) => `<div class="step ${{idx === step ? "active" : ""}}"><i>${{idx + 1}}</i></div>`).join("");
-      document.querySelector("#question-wrap").innerHTML = `<section class="question active"><h1>${{esc(label(q))}}</h1><div class="options">${{q.options.map(opt => `<button class="option ${{answers[q.id] === opt.id ? "selected" : ""}}" type="button" data-answer="${{esc(q.id)}}" data-value="${{esc(opt.id)}}"><span>${{opt.id === "hot" ? "★" : "●"}}</span><b>${{esc(label(opt))}}</b></button>`).join("")}}</div></section>`;
-      document.querySelector("#next-step span").textContent = step === questions.length - 1 ? t("finish") : t("next");
-    }}
-    async function fetchMatches(limit=80) {{
-      const params = new URLSearchParams({{limit}});
-      Object.values(answers).forEach(value => params.append("selected", value));
+	    function renderQuestion() {{
+	      normalizeAnswers();
+	      const q = questions[step];
+	      const opts = optionsFor(q);
+	      document.querySelector("#step-label").textContent = lang === "zh" ? `${{t("step")}} ${{step + 1}} / 3` : `${{t("step")}} ${{step + 1}} de 3`;
+	      document.querySelector("#stepper").innerHTML = questions.map((item, idx) => `<div class="step ${{idx === step ? "active" : ""}}"><i>${{idx + 1}}</i></div>`).join("");
+	      document.querySelector("#question-wrap").innerHTML = `<section class="question active"><h1>${{esc(label(q))}}</h1><div class="options">${{opts.map(opt => `<button class="option ${{answers[q.id] === opt.id ? "selected" : ""}}" type="button" data-answer="${{esc(q.id)}}" data-value="${{esc(opt.id)}}"><span>${{opt.id === "hot" ? "★" : "●"}}</span><b>${{esc(label(opt))}}</b></button>`).join("")}}</div></section>`;
+	      document.querySelector("#next-step span").textContent = step === questions.length - 1 ? t("finish") : t("next");
+	    }}
+	    async function fetchMatches(limit=80) {{
+	      const params = new URLSearchParams({{limit}});
+	      selectedAnswerValues().forEach(value => params.append("selected", value));
       const response = await fetch(`/api/creator/recommendations?${{params.toString()}}&_=${{Date.now()}}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Load failed");
@@ -14878,9 +14951,9 @@ def creator_portal_html() -> str:
     async function renderMini() {{
       try {{ const data = await fetchMatches(3); document.querySelector("#mini-cards").innerHTML = (data.entries || []).map((e,i)=>`<article class="mini-card"><img src="${{esc(e.thumbnail_url)}}" alt="" loading="lazy"><span class="score">${{96 - i * 3}} pontos</span><b>${{esc(e.title).slice(0,52)}}</b><span>🔥 ${{98 - i*11}},${{i+2}} mil</span></article>`).join(""); }} catch(e) {{}}
     }}
-    function selectedChips() {{
-      const lookup = Object.fromEntries(questions.flatMap(q => q.options.map(o => [o.id, o])));
-      return Object.values(answers).map(id => lookup[id]).filter(Boolean).map(opt => `<span class="chip">${{esc(label(opt))}} ✓</span>`).join("");
+	    function selectedChips() {{
+	      const lookup = Object.fromEntries(questions.flatMap(q => q.options.map(o => [o.id, o])));
+	      return selectedAnswerValues().map(id => lookup[id]).filter(Boolean).map(opt => `<span class="chip">${{esc(label(opt))}} ✓</span>`).join("");
     }}
     function statusLabel(status) {{ return status === "planned" ? t("plan") : status === "finished" ? t("done") : status === "rejected" ? t("reject") : t("saved"); }}
     function card(e, i, compact=false) {{
@@ -14961,7 +15034,7 @@ def creator_portal_html() -> str:
       const submitBtn = event.target.closest("[data-submit-video]"); if (submitBtn) {{ submitVideo(submitBtn.dataset.submitVideo); return; }}
       const statusBtn = event.target.closest("[data-status]"); if (statusBtn) {{ setStatus(statusBtn.dataset.entry, statusBtn.dataset.status || ""); return; }}
       const go = event.target.closest("[data-go]"); if (go) {{ if (go.dataset.savedTab) savedTab = go.dataset.savedTab; show(go.dataset.go); return; }}
-      const answer = event.target.closest("[data-answer]"); if (answer) {{ answers[answer.dataset.answer] = answer.dataset.value; save(); renderQuestion(); return; }}
+	      const answer = event.target.closest("[data-answer]"); if (answer) {{ answers[answer.dataset.answer] = answer.dataset.value; normalizeAnswers(); save(); renderQuestion(); return; }}
       if (event.target.closest("#next-step")) {{ if (step < questions.length - 1) {{ step += 1; renderQuestion(); }} else {{ save(); show("dashboard"); }} }}
     }});
     applyLang();
