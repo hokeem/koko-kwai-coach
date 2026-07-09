@@ -94,13 +94,20 @@ CREATOR_IMPORT_JOBS_FILE = DATA_ROOT / "creator_import_jobs.json"
 CREATOR_ADMIN_SCRIPTS_CACHE_FILE = DATA_ROOT / "creator_admin_scripts_cache.json"
 CREATOR_LIBRARY_SOURCE_URL = os.environ.get("CREATOR_LIBRARY_SOURCE_URL", "https://koko-kwai-coach.onrender.com/api/library")
 CREATOR_LIBRARY_SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
-CREATOR_CENTER_SYNC_URL = os.environ.get("CREATOR_CENTER_SYNC_URL", "https://koko-fpml.onrender.com/api/creator/sync-library")
-CREATOR_CENTER_BASE_URL = os.environ.get("CREATOR_CENTER_BASE_URL", "https://koko-fpml.onrender.com").rstrip("/")
+CREATOR_CENTER_SYNC_URL = os.environ.get("CREATOR_CENTER_SYNC_URL", "https://kokocomedy.com/api/creator/sync-library")
+CREATOR_CENTER_BASE_URL = os.environ.get("CREATOR_CENTER_BASE_URL", "https://kokocomedy.com").rstrip("/")
 CREATOR_ADMIN_PASSWORD = os.environ.get("KOKO_CREATOR_ADMIN_PASSWORD", "koko")
 CREATOR_ADMIN_AUTH_COOKIE = "koko_creator_admin_auth"
 CREATOR_REMOTE_ADMIN_COOKIE = "koko_creator_admin"
 CREATOR_IMPORT_MAX_WORKERS = max(1, int(os.environ.get("CREATOR_IMPORT_MAX_WORKERS", "3")))
 CREATOR_IMPORT_IMAGE_RETRY_ATTEMPTS = max(1, int(os.environ.get("CREATOR_IMPORT_IMAGE_RETRY_ATTEMPTS", "2")))
+
+
+def creator_script_share_url(entry_id: object) -> str:
+    script_id = str(entry_id or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", script_id):
+        return ""
+    return f"{CREATOR_CENTER_BASE_URL}/script/{script_id}"
 FILTER_JOBS_FILE = DATA_ROOT / "filter_jobs.json"
 FILTER_CACHE_ROOT = DATA_ROOT / "filter_cache"
 VISION_MODELS_DIR = DATA_ROOT / "vision_models"
@@ -1173,6 +1180,9 @@ def load_library_entries() -> list[dict[str, Any]]:
         storyboard_url = library_storyboard_cover_url(entry)
         if storyboard_url:
             entry["storyboard_cover_url"] = storyboard_url
+        share_url = creator_script_share_url(entry.get("entry_id"))
+        if share_url:
+            entry["creator_share_url"] = share_url
     return data
 
 
@@ -13507,6 +13517,8 @@ def library_html() -> str:
             "</div>"
             "<div class='link-row'>"
             + (f"<button class='action-link' type='button' data-open-preview='{html_escape(entry.get('html_url') or '')}'>打开预览</button>" if entry.get("html_url") else "")
+            + (f"<a class='action-link' href='{html_escape(creator_script_share_url(entry_id))}' target='_blank' rel='noopener'>打开 Creator</a>" if creator_script_share_url(entry_id) else "")
+            + (f"<button class='action-link' type='button' data-copy-creator-link='{html_escape(creator_script_share_url(entry_id))}'>复制 Creator 链接</button>" if creator_script_share_url(entry_id) else "")
             + f"<button class='action-link primary' type='button' data-open-library-editor='{html_escape(entry.get('entry_id') or '')}'>编辑脚本</button>"
             + (
                 f"<button class='action-link' type='button' data-open-export-modal='{html_escape(entry.get('zh_docx_url') or entry.get('docx_url') or '')}' data-open-export-modal-pt='{html_escape(entry.get('pt_docx_url') or '')}'>导出脚本</button>"
@@ -14069,6 +14081,19 @@ def library_html() -> str:
       if (previewBtn) {{
         const url = previewBtn.getAttribute("data-open-preview");
         if (url) window.location.assign(url);
+        return;
+      }}
+      const copyCreatorBtn = event.target.closest("[data-copy-creator-link]");
+      if (copyCreatorBtn) {{
+        const url = copyCreatorBtn.getAttribute("data-copy-creator-link") || "";
+        const originalText = copyCreatorBtn.textContent;
+        try {{
+          await navigator.clipboard.writeText(url);
+          copyCreatorBtn.textContent = "已复制";
+        }} catch (error) {{
+          window.prompt("复制这个 Creator 链接：", url);
+        }}
+        setTimeout(() => {{ copyCreatorBtn.textContent = originalText; }}, 1400);
         return;
       }}
       const editBtn = event.target.closest("[data-open-library-editor]");
