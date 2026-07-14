@@ -2868,8 +2868,13 @@ def normalize_creator_content_type(value: object, text: str = "") -> str:
         "热门",
         "",
     }
-    family_terms = ["família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas", "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma", "家庭", "妈妈", "爸爸", "孩子", "儿子", "女儿", "小孩", "婆婆", "岳母"]
-    if current in legacy_family or any(term in lowered for term in family_terms):
+    family_cn_terms = ["家庭", "妈妈", "爸爸", "孩子", "儿子", "女儿", "小孩", "婆婆", "岳母"]
+    family_pt_terms = ["família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas", "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma"]
+    has_family_text = any(term in lowered for term in family_cn_terms) or any(
+        re.search(rf"(?<![\wÀ-ÿ]){re.escape(term)}(?![\wÀ-ÿ])", lowered, flags=re.I)
+        for term in family_pt_terms
+    )
+    if current in legacy_family or has_family_text:
         return "家庭整蛊"
     if current in ALLOWED_CONTENT_TYPES and current != "家庭整蛊":
         return current
@@ -2883,7 +2888,7 @@ def normalize_creator_content_type(value: object, text: str = "") -> str:
         return "夫妻暧昧"
     if any(term in lowered for term in ["marido", "esposa", "casal", "namorado", "namorada", "夫妻", "妻子", "丈夫", "情侣"]):
         return "夫妻整蛊/冲突"
-    if any(term in lowered for term in ["família", "familia", "mãe", "mae", "pai", "filho", "filha", "家庭", "妈妈", "爸爸", "孩子"]):
+    if has_family_text:
         return "家庭整蛊"
     return DEFAULT_CONTENT_TYPE
 
