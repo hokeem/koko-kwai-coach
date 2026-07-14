@@ -141,6 +141,8 @@ ERROR_CASE_AUTH_COOKIE = "koko_error_case_auth"
 ASSETS_ROOT = BASE / "assets"
 HERO_WORDMARK = ASSETS_ROOT / "kwai-wordmark.svg"
 KWAI_FAVICON = ASSETS_ROOT / "kwai-favicon.svg"
+STUDIO_HERO_VIDEO = ASSETS_ROOT / "studio-hero-video.png"
+STUDIO_TITLE_ART = ASSETS_ROOT / "studio-title-art.png"
 FAVICON_LINKS = """<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=kwai1">
   <link rel="shortcut icon" href="/favicon.ico?v=kwai1">"""
 
@@ -10867,7 +10869,7 @@ def studio_html() -> str:
       color: rgba(31,31,31,.62);
     }}
     .studio-main {{
-      padding: 24px;
+      padding: 28px 34px 34px;
       min-width: 0;
     }}
     .studio-shell:has(.assistant-sidebar) .studio-main {{
@@ -10887,6 +10889,93 @@ def studio_html() -> str:
       color: rgba(31,31,31,.62);
       max-width: 52em;
     }}
+    .studio-topbar {{
+      display: none;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 8px;
+    }}
+    .studio-top-icon {{
+      width: 38px;
+      height: 38px;
+      border: 1px solid rgba(255,130,0,.12);
+      border-radius: 999px;
+      background: rgba(255,255,255,.74);
+      color: #1f1f1f;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 12px 28px rgba(249,115,0,.08);
+    }}
+    .studio-user-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid rgba(255,130,0,.12);
+      border-radius: 999px;
+      background: rgba(255,255,255,.78);
+      padding: 6px 10px 6px 6px;
+      color: #1f1f1f;
+      font-size: 14px;
+      font-weight: 800;
+      box-shadow: 0 12px 28px rgba(249,115,0,.08);
+    }}
+    .studio-user-avatar {{
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      background:
+        radial-gradient(circle at 50% 35%, #ffd7ba 0 19%, transparent 20%),
+        radial-gradient(circle at 50% 77%, #2f4050 0 28%, transparent 29%),
+        linear-gradient(135deg, #fff5eb, #ffd3a7);
+      border: 1px solid rgba(255,130,0,.18);
+    }}
+    .studio-hero-header {{
+      position: relative;
+      min-height: 168px;
+      display: grid;
+      grid-template-columns: minmax(0, .96fr) minmax(280px, .7fr);
+      gap: 24px;
+      align-items: center;
+      margin-bottom: 18px;
+      overflow: visible;
+    }}
+    .studio-title-art {{
+      width: min(620px, 100%);
+      height: auto;
+      display: block;
+      mix-blend-mode: multiply;
+      filter: saturate(1.04);
+    }}
+    .studio-title-fallback {{
+      display: none;
+      margin: 0;
+      font-size: clamp(3rem, 7vw, 6.4rem);
+      line-height: .9;
+      letter-spacing: -.06em;
+      color: #ff5f00;
+    }}
+    .studio-hero-copy {{
+      margin: 4px 0 0 44px;
+      color: rgba(31,31,31,.58);
+      line-height: 1.7;
+      font-size: 15px;
+      max-width: 54em;
+    }}
+    .studio-hero-art {{
+      justify-self: end;
+      align-self: start;
+      width: min(440px, 100%);
+      transform: translateY(-26px);
+      pointer-events: none;
+    }}
+    .studio-hero-art img {{
+      width: 100%;
+      height: auto;
+      display: block;
+      filter: drop-shadow(0 28px 42px rgba(249,115,0,.14));
+    }}
     .studio-panel {{
       display: none;
       margin-top: 22px;
@@ -10900,6 +10989,15 @@ def studio_html() -> str:
       background: rgba(255,255,255,.78);
       box-shadow: 0 22px 48px rgba(249,115,0,.08);
       overflow: hidden;
+    }}
+    .studio-task-card {{
+      position: relative;
+      border-radius: 30px;
+      border-color: rgba(255,130,0,.12);
+      background:
+        radial-gradient(circle at 88% 0%, rgba(255,130,0,.12), transparent 28%),
+        linear-gradient(180deg, rgba(255,255,255,.92), rgba(255,255,255,.78));
+      box-shadow: 0 24px 60px rgba(249,115,0,.11);
     }}
     .studio-card-head {{
       display: flex;
@@ -10915,12 +11013,29 @@ def studio_html() -> str:
       letter-spacing: -.04em;
       color: #1f1f1f;
     }}
+    .studio-task-card .studio-card-head h2 {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 58px;
+      padding: 0 18px;
+      border-radius: 18px;
+      color: #ff5f00;
+      background: linear-gradient(180deg, rgba(255,248,238,.96), rgba(255,255,255,.78));
+      box-shadow: inset 0 -14px 18px rgba(255,130,0,.06);
+      font-size: 30px;
+      font-weight: 900;
+    }}
     .studio-card-head p {{
-      margin: 6px 0 0;
+      margin: 10px auto 0;
       font-size: 14px;
       line-height: 1.7;
       color: rgba(31,31,31,.62);
       max-width: 52em;
+      text-align: center;
+    }}
+    .studio-task-card .studio-card-head {{
+      justify-content: center;
+      text-align: center;
     }}
     .studio-kpis {{
       display: grid;
@@ -10954,6 +11069,107 @@ def studio_html() -> str:
       font-size: 13px;
       line-height: 1.6;
       color: rgba(31,31,31,.58);
+    }}
+    .studio-helper-chips {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }}
+    .studio-helper-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(255,130,0,.14);
+      border-radius: 11px;
+      background: rgba(255,244,232,.78);
+      color: #a55710;
+      padding: 9px 12px;
+      font-size: 13px;
+      font-weight: 800;
+    }}
+    .studio-overview {{
+      margin-top: 18px;
+      border-radius: 26px;
+      border: 1px solid rgba(255,130,0,.10);
+      background: rgba(255,255,255,.78);
+      padding: 22px 24px 24px;
+      box-shadow: 0 18px 44px rgba(249,115,0,.08);
+    }}
+    .studio-overview h2 {{
+      margin: 0 0 16px;
+      color: #1f1f1f;
+      font-size: 22px;
+      letter-spacing: -.03em;
+    }}
+    .studio-stat-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+    }}
+    .studio-stat-card {{
+      min-height: 106px;
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      gap: 12px;
+      align-items: center;
+      border: 1px solid rgba(255,130,0,.10);
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(255,250,245,.98), rgba(255,244,232,.72));
+      padding: 14px;
+    }}
+    .studio-stat-card:nth-child(2) {{
+      border-color: rgba(116,107,255,.16);
+      background: linear-gradient(135deg, rgba(255,255,255,.98), rgba(244,242,255,.74));
+    }}
+    .studio-stat-card:nth-child(3) {{
+      border-color: rgba(34,173,96,.18);
+      background: linear-gradient(135deg, rgba(255,255,255,.98), rgba(239,255,245,.78));
+    }}
+    .studio-stat-card:nth-child(4) {{
+      border-color: rgba(240,72,72,.18);
+      background: linear-gradient(135deg, rgba(255,255,255,.98), rgba(255,241,241,.76));
+    }}
+    .studio-stat-icon {{
+      width: 54px;
+      height: 54px;
+      border-radius: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      background: linear-gradient(135deg, #ffb34d, #ff5f00);
+      box-shadow: 0 12px 26px rgba(249,115,0,.22);
+      font-size: 24px;
+      font-weight: 900;
+    }}
+    .studio-stat-card:nth-child(2) .studio-stat-icon {{ background: linear-gradient(135deg, #ffb14d, #ff8b00); }}
+    .studio-stat-card:nth-child(3) .studio-stat-icon {{ background: linear-gradient(135deg, #8be0a7, #16a45a); }}
+    .studio-stat-card:nth-child(4) .studio-stat-icon {{ background: linear-gradient(135deg, #ff8b8b, #f04444); }}
+    .studio-stat-card strong {{
+      display: block;
+      color: #1f1f1f;
+      font-size: 13px;
+      margin-bottom: 2px;
+    }}
+    .studio-stat-card b {{
+      display: inline-block;
+      color: #101010;
+      font-size: 30px;
+      line-height: 1;
+      margin-right: 8px;
+    }}
+    .studio-stat-card span {{
+      color: rgba(31,31,31,.50);
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .studio-stat-meta {{
+      display: block;
+      margin-top: 4px;
+      color: rgba(31,31,31,.50);
+      font-size: 12px;
+      font-weight: 800;
     }}
     .studio-iframe {{
       width: 100%;
@@ -11005,8 +11221,14 @@ def studio_html() -> str:
         border-bottom: 1px solid rgba(255,255,255,.82);
       }}
       .studio-kpis,
-      .studio-placeholder-grid {{
+      .studio-placeholder-grid,
+      .studio-stat-grid,
+      .studio-hero-header {{
         grid-template-columns: 1fr;
+      }}
+      .studio-hero-art {{
+        justify-self: start;
+        width: min(360px, 100%);
       }}
       .result-workbench {{
         grid-template-columns: 1fr;
@@ -11050,6 +11272,15 @@ def studio_html() -> str:
       }}
       .studio-main {{
         padding: 16px;
+      }}
+      .studio-topbar {{
+        justify-content: flex-start;
+      }}
+      .studio-hero-copy {{
+        margin-left: 0;
+      }}
+      .studio-title-art {{
+        max-width: 96vw;
       }}
       .composer-block,
       .studio-card-head,
@@ -11122,8 +11353,8 @@ def studio_html() -> str:
       </a>
       <nav class="studio-side-nav" aria-label="Koko 内容中台导航">
         <a class="studio-tab-link" href="/" data-nav-kind="home"><span class="studio-tab-icon">⌂</span><span>返回落地页</span></a>
-        <a class="studio-tab-link active" href="#filter-panel" data-panel-target="filter-panel"><span class="studio-tab-icon">⌕</span><span>视频筛选</span></a>
-        <a class="studio-tab-link" href="#split-panel" data-panel-target="split-panel"><span class="studio-tab-icon">▤</span><span>视频拆解</span></a>
+        <a class="studio-tab-link" href="#filter-panel" data-panel-target="filter-panel"><span class="studio-tab-icon">⌕</span><span>视频筛选</span></a>
+        <a class="studio-tab-link active" href="#split-panel" data-panel-target="split-panel"><span class="studio-tab-icon">▶</span><span>视频拆解</span></a>
         <a class="studio-tab-link" href="#translate-panel" data-panel-target="translate-panel"><span class="studio-tab-icon">◉</span><span>葡语转译</span></a>
         <a class="studio-tab-link" href="#stats-panel" data-panel-target="stats-panel"><span class="studio-tab-icon">▥</span><span>数据看板</span></a>
         <a class="studio-tab-link" href="/library"><span class="studio-tab-icon">☰</span><span>脚本库</span></a>
@@ -11135,10 +11366,18 @@ def studio_html() -> str:
       </div>
     </aside>
     <section class="studio-main">
-      <h1 class="studio-page-title">Koko 内容中台</h1>
-      <p class="studio-page-copy">把优质视频筛选、结构化脚本拆解和数据看板放进同一个工作台，让运营团队能更高效地沉淀案例、复盘内容并给作者定向投喂。</p>
+      <section class="studio-hero-header" aria-label="Koko 内容中台">
+        <div>
+          <img class="studio-title-art" src="/brand/studio-title-art.png" alt="Koko 内容中台" />
+          <h1 class="studio-title-fallback">Koko 内容中台</h1>
+          <p class="studio-hero-copy">把优质视频筛选、结构化脚本拆解、葡语转译和数据看板放进同一个工作台，让运营团队更快沉淀案例、复盘内容并给作者定向投喂。</p>
+        </div>
+        <div class="studio-hero-art" aria-hidden="true">
+          <img src="/brand/studio-hero-video.png" alt="" />
+        </div>
+      </section>
 
-      <section id="filter-panel" class="studio-panel active">
+      <section id="filter-panel" class="studio-panel">
         <div class="studio-card">
           <div class="studio-card-head">
             <div>
@@ -11170,12 +11409,12 @@ def studio_html() -> str:
         </div>
       </section>
 
-      <section id="split-panel" class="studio-panel">
-        <div class="studio-card">
+      <section id="split-panel" class="studio-panel active">
+        <div class="studio-card studio-task-card">
           <div class="studio-card-head">
             <div>
               <h2>视频拆解任务中心</h2>
-              <p>保留现有的视频分析、批量任务、队列、脚本预览、导出、复盘和整稿编辑能力。这里承接你现在全部的视频拆解逻辑。</p>
+              <p>粘贴 Kwai 视频链接后，Koko 会批量拆解剧情结构、生成脚本表、分镜提示和可入库版本。</p>
             </div>
           </div>
           <div class="composer-block">
@@ -11183,10 +11422,15 @@ def studio_html() -> str:
               <div class="composer-head">
                 <div></div>
               </div>
-              <label for="video-url">视频链接</label>
+              <label for="video-url">视频链接 <span style="font-weight:500;color:rgba(31,31,31,.50)">（每行粘贴一个链接）</span></label>
               <textarea id="video-url" placeholder="每行粘贴一个链接&#10;https://www.kwai.com/@.../video/...&#10;https://www.kwai.com/@.../video/..."></textarea>
+              <div class="studio-helper-chips" aria-label="任务提示">
+                <span class="studio-helper-chip">🔗 支持 Kwai 链接</span>
+                <span class="studio-helper-chip">▤ 最多 50 条</span>
+                <span class="studio-helper-chip">↵ 回车换行即可</span>
+              </div>
               <div class="actions">
-                <button id="submit-btn">开始拆解脚本</button>
+                <button id="submit-btn">开始拆解脚本 ▶</button>
                 <button class="action-link" id="stop-all-btn" type="button" disabled>停止所有任务</button>
               </div>
             </div>
@@ -11198,6 +11442,15 @@ def studio_html() -> str:
             </div>
           </div>
         </div>
+        <section class="studio-overview" aria-label="任务状态总览">
+          <h2>任务状态总览</h2>
+          <div class="studio-stat-grid">
+            <article class="studio-stat-card"><span class="studio-stat-icon">▣</span><div><strong>待处理任务</strong><b data-studio-stat="queued">0</b><span class="studio-stat-meta" data-studio-stat-meta="queued">等待提交</span></div></article>
+            <article class="studio-stat-card"><span class="studio-stat-icon">↺</span><div><strong>拆解中</strong><b data-studio-stat="running">0</b><span class="studio-stat-meta" data-studio-stat-meta="running">当前无任务</span></div></article>
+            <article class="studio-stat-card"><span class="studio-stat-icon">✓</span><div><strong>已完成</strong><b data-studio-stat="completed">0</b><span class="studio-stat-meta" data-studio-stat-meta="completed">本次任务</span></div></article>
+            <article class="studio-stat-card"><span class="studio-stat-icon">!</span><div><strong>失败任务</strong><b data-studio-stat="failed">0</b><span class="studio-stat-meta" data-studio-stat-meta="failed">本次任务</span></div></article>
+          </div>
+        </section>
       </section>
 
       <section id="translate-panel" class="studio-panel">
@@ -11490,6 +11743,48 @@ def studio_html() -> str:
       ensureDetailIframes(statusBox);
     }}
 
+    function setStudioOverviewValue(key, value, meta) {{
+      const numberNode = document.querySelector(`[data-studio-stat="${{key}}"]`);
+      const metaNode = document.querySelector(`[data-studio-stat-meta="${{key}}"]`);
+      if (numberNode) numberNode.textContent = String(Number(value || 0));
+      if (metaNode) metaNode.textContent = meta || "";
+    }}
+
+    function updateStudioOverview(data = null) {{
+      if (!data) {{
+        setStudioOverviewValue("queued", 0, "等待提交");
+        setStudioOverviewValue("running", 0, "当前无任务");
+        setStudioOverviewValue("completed", 0, "本次任务");
+        setStudioOverviewValue("failed", 0, "本次任务");
+        return;
+      }}
+      const items = Array.isArray(data.items) ? data.items : [];
+      const total = Number(data.total_items || items.length || 0);
+      const ownQueued = items.filter((item) => String(item?.status || "").trim() === "queued").length;
+      const ownRunning = items.filter((item) => String(item?.status || "").trim() === "running").length;
+      const completed = Number(data.completed_items || items.filter((item) => item?.status === "completed").length || 0);
+      const failed = Number(data.failed_items || items.filter((item) => item?.status === "failed").length || 0);
+      const systemQueue = data.system_queue || {{}};
+      const globalQueued = Number(systemQueue.queued_count || 0);
+      const globalRunning = Number(systemQueue.running_count || 0);
+      const queued = Math.max(ownQueued, globalQueued);
+      const running = Math.max(ownRunning, globalRunning);
+      const position = Number(systemQueue.current_job_position || 0);
+      const ahead = Number(systemQueue.current_job_ahead || 0);
+      const queuedMeta = position
+        ? `当前排队第 ${{position}} 位，前方 ${{ahead}} 条`
+        : (queued ? "队列中等待执行" : "没有排队任务");
+      const runningMeta = total
+        ? `占比 ${{Math.round((running / Math.max(total, running, 1)) * 100)}}%`
+        : (running ? "系统正在处理" : "当前无任务");
+      const completedMeta = total ? `本次 ${{completed}}/${{total}}` : "本次任务";
+      const failedMeta = total ? `本次 ${{failed}}/${{total}}` : "本次任务";
+      setStudioOverviewValue("queued", queued, queuedMeta);
+      setStudioOverviewValue("running", running, runningMeta);
+      setStudioOverviewValue("completed", completed, completedMeta);
+      setStudioOverviewValue("failed", failed, failedMeta);
+    }}
+
     function updateStopAllButtonState(active) {{
       if (!stopAllBtn) return;
       stopAllBtn.disabled = !active;
@@ -11615,6 +11910,7 @@ def studio_html() -> str:
       lastStatusMarkup = "";
       lastStatusReady = false;
       setStatus(IDLE_STATUS_HTML, true);
+      updateStudioOverview(null);
       updateStopAllButtonState(false);
     }}
 
@@ -13110,6 +13406,7 @@ def studio_html() -> str:
       restoringActiveJob = false;
       restoreAttempts = 0;
       persistActiveJobSnapshot(data);
+      updateStudioOverview(data);
       const batchResults = renderBatchResults(data);
       const effectiveStatus = deriveEffectiveJobStatus(data);
       const reviewRunning = hasRunningReview(data.items);
@@ -13335,6 +13632,15 @@ def studio_html() -> str:
         persistActiveJobId(data.id);
         updateStopAllButtonState(true);
         setStudioPanel("split-panel");
+        updateStudioOverview({{
+          id: data.id,
+          status: "queued",
+          total_items: videoUrls.length,
+          completed_items: 0,
+          failed_items: 0,
+          items: videoUrls.map((url, index) => ({{ video_url: url, status: "queued", index }})),
+          system_queue: data.system_queue || {{}}
+        }});
         setStatus(`<span class="status status-queued">排队中</span><br><br>${{progressMarkup("queued", "任务已创建，正在准备分析。", data.id, data)}}`);
         pollJob(data.id);
       }} catch (error) {{
@@ -13493,7 +13799,7 @@ def studio_html() -> str:
       pollJob(restoredJobId);
     }} else {{
       updateStopAllButtonState(false);
-      const initialPanelId = String(window.location.hash || "").replace(/^#/, "").trim() || "filter-panel";
+      const initialPanelId = String(window.location.hash || "").replace(/^#/, "").trim() || "split-panel";
       setStudioPanel(initialPanelId);
     }}
 
@@ -15514,6 +15820,12 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/brand/kwai-wordmark.svg" and HERO_WORDMARK.exists():
             self.send_file(HERO_WORDMARK)
             return
+        if parsed.path == "/brand/studio-hero-video.png" and STUDIO_HERO_VIDEO.exists():
+            self.send_file(STUDIO_HERO_VIDEO)
+            return
+        if parsed.path == "/brand/studio-title-art.png" and STUDIO_TITLE_ART.exists():
+            self.send_file(STUDIO_TITLE_ART)
+            return
         if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"} and KWAI_FAVICON.exists():
             self.send_file(KWAI_FAVICON)
             return
@@ -15703,6 +16015,12 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/brand/kwai-wordmark.svg" and HERO_WORDMARK.exists():
             self.head_file(HERO_WORDMARK)
+            return
+        if parsed.path == "/brand/studio-hero-video.png" and STUDIO_HERO_VIDEO.exists():
+            self.head_file(STUDIO_HERO_VIDEO)
+            return
+        if parsed.path == "/brand/studio-title-art.png" and STUDIO_TITLE_ART.exists():
+            self.head_file(STUDIO_TITLE_ART)
             return
         if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"} and KWAI_FAVICON.exists():
             self.head_file(KWAI_FAVICON)
