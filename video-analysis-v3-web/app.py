@@ -140,6 +140,7 @@ ERROR_CASE_PASSWORD = "kwai666"
 ERROR_CASE_AUTH_COOKIE = "koko_error_case_auth"
 ASSETS_ROOT = BASE / "assets"
 HERO_WORDMARK = ASSETS_ROOT / "kwai-wordmark.svg"
+KWAI_FAVICON = ASSETS_ROOT / "kwai-favicon.svg"
 
 
 def parse_model_candidates(*groups: str) -> list[str]:
@@ -2842,8 +2843,7 @@ CONTENT_TYPE_CHOICE_TEXT = "、".join(LIBRARY_FILTER_LABELS)
 
 def normalize_creator_content_type(value: object, text: str = "") -> str:
     current = str(value or "").strip()
-    if current in ALLOWED_CONTENT_TYPES:
-        return current
+    lowered = f"{current} {text}".lower()
     legacy_flirt = {"夫妻暧昧", "夫妻出轨", "夫妻好色", "夫妻黄段子", "撬墙角", "Relacionamento de casal"}
     legacy_couple = {"夫妻整蛊/冲突", "夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "夫妻整蛊", "夫妻关系", "夫妻/情侣", "夫妻情感"}
     legacy_family = {"家庭整蛊", "家庭/亲子"}
@@ -2866,15 +2866,17 @@ def normalize_creator_content_type(value: object, text: str = "") -> str:
         "热门",
         "",
     }
+    family_terms = ["família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas", "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma", "家庭", "妈妈", "爸爸", "孩子", "儿子", "女儿", "小孩", "婆婆", "岳母"]
+    if current in legacy_family or any(term in lowered for term in family_terms):
+        return "家庭整蛊"
+    if current in ALLOWED_CONTENT_TYPES:
+        return current
     if current in legacy_flirt:
         return "夫妻暧昧"
     if current in legacy_couple:
         return "夫妻整蛊/冲突"
-    if current in legacy_family:
-        return "家庭整蛊"
     if current in legacy_friends:
         return "朋友整蛊"
-    lowered = f"{current} {text}".lower()
     if any(term in lowered for term in ["trai", "infiel", "amante", "ciúme", "ciume", "暧昧", "出轨", "好色", "撬墙角"]):
         return "夫妻暧昧"
     if any(term in lowered for term in ["marido", "esposa", "casal", "namorado", "namorada", "夫妻", "妻子", "丈夫", "情侣"]):
@@ -14906,6 +14908,8 @@ def creator_portal_html() -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>Koko Creator</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=kwai1">
+  <link rel="shortcut icon" href="/favicon.ico?v=kwai1">
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
     * {{ box-sizing: border-box; font-family: 'Readex Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
@@ -15495,6 +15499,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/brand/kwai-wordmark.svg" and HERO_WORDMARK.exists():
             self.send_file(HERO_WORDMARK)
             return
+        if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"} and KWAI_FAVICON.exists():
+            self.send_file(KWAI_FAVICON)
+            return
         if parsed.path == "/healthz":
             self.send_json({"ok": True, "time": now_iso(), "skill_root": str(SKILL_ROOT)})
             return
@@ -15681,6 +15688,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/brand/kwai-wordmark.svg" and HERO_WORDMARK.exists():
             self.head_file(HERO_WORDMARK)
+            return
+        if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"} and KWAI_FAVICON.exists():
+            self.head_file(KWAI_FAVICON)
             return
         if parsed.path == "/healthz":
             payload = json.dumps({"ok": True, "time": now_iso(), "skill_root": str(SKILL_ROOT)}, ensure_ascii=False).encode("utf-8")
