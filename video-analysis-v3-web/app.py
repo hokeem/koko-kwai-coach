@@ -2843,10 +2843,10 @@ CONTENT_TYPE_CHOICE_TEXT = "、".join(LIBRARY_FILTER_LABELS)
 
 def normalize_creator_content_type(value: object, text: str = "") -> str:
     current = str(value or "").strip()
-    lowered = f"{current} {text}".lower()
+    lowered = str(text or "").lower()
     legacy_flirt = {"夫妻暧昧", "夫妻出轨", "夫妻好色", "夫妻黄段子", "撬墙角", "Relacionamento de casal"}
     legacy_couple = {"夫妻整蛊/冲突", "夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "夫妻整蛊", "夫妻关系", "夫妻/情侣", "夫妻情感"}
-    legacy_family = {"家庭整蛊", "家庭/亲子"}
+    legacy_family = {"家庭/亲子"}
     legacy_friends = {
         "朋友整蛊",
         "整蛊",
@@ -2869,7 +2869,7 @@ def normalize_creator_content_type(value: object, text: str = "") -> str:
     family_terms = ["família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas", "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma", "家庭", "妈妈", "爸爸", "孩子", "儿子", "女儿", "小孩", "婆婆", "岳母"]
     if current in legacy_family or any(term in lowered for term in family_terms):
         return "家庭整蛊"
-    if current in ALLOWED_CONTENT_TYPES:
+    if current in ALLOWED_CONTENT_TYPES and current != "家庭整蛊":
         return current
     if current in legacy_flirt:
         return "夫妻暧昧"
