@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from PIL import Image, ImageDraw
 
 
 PORT = int(os.environ.get("PORT", 8310))
@@ -101,6 +102,7 @@ CREATOR_ADMIN_AUTH_COOKIE = "koko_creator_admin_auth"
 CREATOR_REMOTE_ADMIN_COOKIE = "koko_creator_admin"
 CREATOR_IMPORT_MAX_WORKERS = max(1, int(os.environ.get("CREATOR_IMPORT_MAX_WORKERS", "3")))
 CREATOR_IMPORT_IMAGE_RETRY_ATTEMPTS = max(1, int(os.environ.get("CREATOR_IMPORT_IMAGE_RETRY_ATTEMPTS", "2")))
+STORYBOARD_LOCAL_ONLY = str(os.environ.get("VIDEO_ANALYSIS_STORYBOARD_LOCAL_ONLY", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def creator_script_share_url(entry_id: object) -> str:
@@ -1172,9 +1174,8 @@ def load_library_entries() -> list[dict[str, Any]]:
     for entry in data:
         if not isinstance(entry, dict):
             continue
-        content_type = str(entry.get("content_type") or "").strip()
-        if content_type not in ALLOWED_CONTENT_TYPES:
-            entry["content_type"] = DEFAULT_CONTENT_TYPE
+        content_type_text = " ".join(str(entry.get(key) or "") for key in ["title", "whole_video_summary", "summary", "content_type_reasoning", "video_url"])
+        entry["content_type"] = normalize_creator_content_type(entry.get("content_type"), content_type_text)
         source = str(entry.get("content_type_source") or "").strip().lower()
         entry["content_type_source"] = source if source in {"auto", "manual"} else "auto"
         storyboard_url = library_storyboard_cover_url(entry)
@@ -2816,58 +2817,71 @@ def build_system_queue_snapshot(current_job_id: str | None = None) -> dict[str, 
 
 
 CONTENT_TYPE_RULES: list[tuple[str, list[str]]] = [
-    ("夫妻吵架", ["院子", "打扫", "装修", "凉棚", "干活", "兄弟", "朋友", "亲戚", "打电话", "花钱找人"]),
-    ("夫妻出轨", ["抓奸", "奸夫", "脚印", "倒着走", "假脚印", "电工", "修水管", "换灯泡", "第三者"]),
-    ("夫妻好色", ["美女", "帅哥", "照镜子", "车窗", "放下车窗", "偷看", "搭讪", "暴揍", "抓包"]),
-    ("妻管严", ["喝酒", "训斥", "别管", "给你钱", "疯老婆", "爱骂我的", "送酒", "回到原样"]),
-    ("夫妻欺骗", ["酣睡", "睡觉", "偷偷溜", "信用卡", "商场", "购物", "赶回床上", "包揽家务"]),
-    ("夫妻算计", ["穿搭", "惊喜", "模仿", "嫉妒", "聚会", "不给你看", "太傻", "风格"]),
-    ("夫妻整蛊", ["气球", "恐怖电视", "关键时候", "扎破", "吓得", "掉下沙发", "夫妻整蛊"]),
-    ("夫妻黄段子", ["没穿内衣", "什么都没穿", "挑逗", "性暗示", "银行卡", "买内衣", "太穷", "取钱"]),
-    ("撬墙角", ["撬墙角", "抢男友", "抢女友", "闺蜜", "兄弟老婆", "挖墙脚", "横刀夺爱"]),
-    ("偷吃东西", ["偷吃", "偷喝", "冰箱", "零食", "吃独食", "藏吃的", "背着吃"]),
-    ("赖账", ["赖账", "不给钱", "欠钱", "不认账", "逃单", "不给结账", "不还钱"]),
-    ("骗子", ["骗子", "骗局", "被骗", "假装", "冒充", "诈骗", "忽悠", "圈套"]),
-    ("偷奸耍滑", ["偷懒", "耍滑", "偷奸耍滑", "装病", "钻空子", "耍小聪明", "蒙混过关"]),
-    ("整蛊", ["整蛊", "恶作剧", "捉弄", "恶搞", "吓唬", "陷阱", "搞怪"]),
+    ("夫妻暧昧", ["出轨", "暧昧", "好色", "黄段子", "撬墙角", "第三者", "偷看", "吃醋", "抓奸", "情人"]),
+    ("夫妻整蛊/冲突", ["夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "吵架", "欺骗", "算计", "妻管严", "整蛊", "反转"]),
+    ("家庭整蛊", ["家庭", "妈妈", "爸爸", "母亲", "父亲", "儿子", "女儿", "孩子", "亲戚", "婆婆"]),
+    ("朋友整蛊", ["朋友", "同事", "闺蜜", "兄弟", "老板", "员工", "路人", "街头", "公共场景", "世界杯", "偷手机", "便利店", "骗局", "赖账", "偷吃", "偷懒"]),
 ]
 CONTENT_TYPE_RULES_PT: list[tuple[str, list[str]]] = [
-    ("夫妻出轨", ["traição", "infiel", "amante", "outra mulher", "outro homem", "caso", "flagr", "traindo"]),
-    ("夫妻好色", ["olhar", "encarar", "atraente", "bonita", "corpo", "seios", "bunda", "desejo", "ciúme"]),
-    ("夫妻黄段子", ["quarto", "cama", "banho", "toalha", "relação", "sexual", "duplo sentido", "íntim"]),
-    ("妻管严", ["esposa manda", "marido obedece", "controla", "proíbe", "medo da esposa", "ela não deixa"]),
-    ("夫妻欺骗", ["finge", "mentira", "engan", "esconde", "segredo", "revel", "descobre", "desmascara", "surpresa"]),
-    ("夫妻算计", ["plano", "arma", "combina", "estratég", "aproveita", "vingança", "revanche", "testa", "provoca"]),
-    ("夫妻整蛊", ["pegadinha", "brincadeira", "susto", "troll", "armadilha", "esposa", "marido"]),
-    ("夫妻吵架", ["esposa", "marido", "casal", "briga", "discute", "reclama", "irritado", "zangad", "confronto"]),
-    ("撬墙角", ["namorada", "namorado", "casado", "casada", "conquistar", "seduz", "separar", "levar embora"]),
-    ("偷吃东西", ["comer escondido", "rouba comida", "comida", "lanche", "bolo", "pastel", "bebida", "iogurte"]),
-    ("赖账", ["dinheiro", "reais", "pagar", "pagamento", "dívida", "conta", "cobrar", "salário", "fiado"]),
-    ("骗子", ["golpe", "golpista", "fraude", "engan", "roub", "falso", "finge", "vítima"]),
-    ("偷奸耍滑", ["preguiça", "desculpa", "jeitinho", "esperteza", "evitar", "enrol", "finge estar doente"]),
-    ("整蛊", ["pegadinha", "brincadeira", "susto", "troll", "armadilha", "zoeira", "piada"]),
+    ("夫妻暧昧", ["traição", "infiel", "amante", "outra mulher", "outro homem", "ciúme", "ciume", "seduz", "paquera", "íntim", "intim", "beijo", "mulher bonita"]),
+    ("夫妻整蛊/冲突", ["esposa", "marido", "casal", "namorado", "namorada", "briga", "discute", "reclama", "conflito", "finge", "mentira", "segredo", "pegadinha"]),
+    ("家庭整蛊", ["família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "sogra", "irmão", "irmao", "irmã", "irma"]),
+    ("朋友整蛊", ["amigo", "amiga", "colega", "chefe", "funcionário", "funcionario", "cliente", "vizinho", "rua", "público", "publico", "loja", "conveniência", "conveniencia", "copa do mundo", "celular", "golpe", "pegadinha", "dinheiro"]),
 ]
 
 ALLOWED_CONTENT_TYPES = {label for label, _ in CONTENT_TYPE_RULES}
-DEFAULT_CONTENT_TYPE = "待分类"
+DEFAULT_CONTENT_TYPE = "朋友整蛊"
 LIBRARY_FILTER_LABELS = [
-    "夫妻吵架",
-    "夫妻出轨",
-    "夫妻好色",
-    "妻管严",
-    "夫妻欺骗",
-    "夫妻算计",
-    "夫妻整蛊",
-    "夫妻黄段子",
-    "撬墙角",
-    "偷吃东西",
-    "赖账",
-    "骗子",
-    "偷奸耍滑",
-    "整蛊",
-    DEFAULT_CONTENT_TYPE,
+    "夫妻整蛊/冲突",
+    "夫妻暧昧",
+    "家庭整蛊",
+    "朋友整蛊",
 ]
 CONTENT_TYPE_CHOICE_TEXT = "、".join(LIBRARY_FILTER_LABELS)
+
+
+def normalize_creator_content_type(value: object, text: str = "") -> str:
+    current = str(value or "").strip()
+    if current in ALLOWED_CONTENT_TYPES:
+        return current
+    legacy_flirt = {"夫妻暧昧", "夫妻出轨", "夫妻好色", "夫妻黄段子", "撬墙角", "Relacionamento de casal"}
+    legacy_couple = {"夫妻整蛊/冲突", "夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "夫妻整蛊", "夫妻关系", "夫妻/情侣", "夫妻情感"}
+    legacy_family = {"家庭整蛊", "家庭/亲子"}
+    legacy_friends = {
+        "朋友整蛊",
+        "整蛊",
+        "整蛊恶搞",
+        "骗局反转",
+        "赖账",
+        "赖账/金钱冲突",
+        "骗子",
+        "偷奸耍滑",
+        "偷吃东西",
+        "偷吃/偷懒/耍小聪明",
+        "Popular",
+        "Golpe e reviravolta",
+        "Pegadinha",
+        "Esperteza cotidiana",
+        "待分类",
+        "热门",
+        "",
+    }
+    if current in legacy_flirt:
+        return "夫妻暧昧"
+    if current in legacy_couple:
+        return "夫妻整蛊/冲突"
+    if current in legacy_family:
+        return "家庭整蛊"
+    if current in legacy_friends:
+        return "朋友整蛊"
+    lowered = f"{current} {text}".lower()
+    if any(term in lowered for term in ["trai", "infiel", "amante", "ciúme", "ciume", "暧昧", "出轨", "好色", "撬墙角"]):
+        return "夫妻暧昧"
+    if any(term in lowered for term in ["marido", "esposa", "casal", "namorado", "namorada", "夫妻", "妻子", "丈夫", "情侣"]):
+        return "夫妻整蛊/冲突"
+    if any(term in lowered for term in ["família", "familia", "mãe", "mae", "pai", "filho", "filha", "家庭", "妈妈", "爸爸", "孩子"]):
+        return "家庭整蛊"
+    return DEFAULT_CONTENT_TYPE
 
 CONTENT_TYPE_CLASSIFY_PROMPT = f"""你是一个短视频脚本分类器。
 
@@ -2881,21 +2895,12 @@ CONTENT_TYPE_CLASSIFY_PROMPT = f"""你是一个短视频脚本分类器。
 你的任务不是改写脚本，而是根据“最终语义”从固定分类白名单里选一个最合适的类型。
 
 分类原则：
-1. 先判断是否明显属于夫妻/情侣/伴侣关系主轴。
-   - 只有明确出现夫妻、情侣、男友女友、丈夫妻子、伴侣等关系主轴时，才允许选择 `夫妻吵架/夫妻出轨/夫妻好色/妻管严/夫妻欺骗/夫妻算计/夫妻整蛊/夫妻黄段子`。
-   - 如果只是朋友、闺蜜、同事、陌生人、路人、顾客、老板等关系，即使出现吃醋、另一位女性、审问、暧昧感，也不要判成夫妻类。
-2. 如果属于夫妻关系，再判断是否更具体地属于：
-   - 夫妻吵架：围绕现实事务、争执、互相打脸、找人帮忙失败等
-   - 夫妻出轨：第三者、抓奸、伪装、暧昧越界
-   - 夫妻好色：明显偷看、好色、被抓包
-   - 妻管严：一方被另一方强势管束，最后反抗失败或主动回归原秩序
-   - 夫妻欺骗：一方制造假象欺骗另一方
-   - 夫妻算计：关系中的小博弈、小算计、小心机
-   - 夫妻整蛊：伴侣之间用道具/时机实施整蛊
-   - 夫妻黄段子：带有明显性暗示与误解反差
-3. 如果不是夫妻类，再看是否属于：撬墙角、偷吃东西、赖账、骗子、偷奸耍滑、整蛊。
-4. 如果证据不够，不要硬判，直接给 `待分类`。
-5. 只能从这个白名单里选：{CONTENT_TYPE_CHOICE_TEXT}
+1. 只能从四个类型里选：{CONTENT_TYPE_CHOICE_TEXT}。
+2. `夫妻整蛊/冲突`：主角关系是夫妻、情侣、男女朋友、丈夫妻子，核心是吵架、误会、欺骗、算计、整蛊、反转、日常冲突。
+3. `夫妻暧昧`：主角关系仍然是夫妻/情侣，但核心笑点是暧昧、出轨、第三者、吃醋、好色、亲密误会、黄段子、撬墙角。
+4. `家庭整蛊`：父母、孩子、兄弟姐妹、亲戚、婆媳等家庭成员是主轴。
+5. `朋友整蛊`：朋友、同事、老板员工、顾客、邻居、路人、公共场景、街头骗局、偷手机、便利店、世界杯等非夫妻/非家庭脚本都归到这里。
+6. 如果证据不够或无法归类，也选 `朋友整蛊`，不要输出其他标签。
 
 输出严格 JSON：
 {{
@@ -2948,7 +2953,7 @@ def classify_content_type_with_llm(
         return None
     content_type = str(result.get("content_type") or "").strip()
     if content_type not in ALLOWED_CONTENT_TYPES and content_type != DEFAULT_CONTENT_TYPE:
-        content_type = DEFAULT_CONTENT_TYPE
+        content_type = normalize_creator_content_type(content_type)
     confidence = str(result.get("confidence") or "").strip().lower()
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
@@ -6845,6 +6850,165 @@ def run_gemini_image_prompt(prompt: str) -> tuple[bytes, str, dict[str, Any], st
     raise RuntimeError(f"storyboard image generation failed across models {tried}: {last_error}") from last_error
 
 
+def storyboard_scene_tokens(row: dict[str, Any]) -> set[str]:
+    text = " ".join(
+        [
+            str(row.get("visual_content") or ""),
+            str(row.get("action") or ""),
+            str(row.get("dialogue") or ""),
+        ]
+    ).lower()
+    tokens: set[str] = set()
+    mapping = {
+        "door": ["porta", "portão", "portao", "gate", "door"],
+        "bed": ["cama", "bed", "quarto"],
+        "car": ["carro", "car", "dirig", "volante"],
+        "table": ["mesa", "table", "bolo", "jantar"],
+        "phone": ["celular", "telefone", "phone", "ligação", "ligacao"],
+        "money": ["dinheiro", "conta", "pagar", "pix", "salário", "salario"],
+        "street": ["rua", "estrada", "calçada", "calcada", "parque", "outdoor"],
+        "yard": ["quintal", "varanda", "campo", "bananeira", "roça", "roca"],
+        "hospital": ["hospital", "médico", "medico", "consulta", "paciente"],
+        "kitchen": ["cozinha", "fogão", "fogao", "panela", "geladeira"],
+        "laundry": ["lavar", "máquina", "maquina", "roupa", "varal"],
+        "baby": ["bebê", "bebe", "filho", "recém", "recem", "criança", "crianca"],
+        "surprise": ["assust", "surpresa", "espelho", "pegadinha", "reviravolta"],
+    }
+    for token, words in mapping.items():
+        if any(word in text for word in words):
+            tokens.add(token)
+    return tokens
+
+
+def storyboard_character_count(row: dict[str, Any]) -> int:
+    text = " ".join(
+        [
+            str(row.get("visual_content") or ""),
+            str(row.get("action") or ""),
+            str(row.get("dialogue") or ""),
+        ]
+    ).lower()
+    hints = [
+        "homem", "mulher", "marido", "esposa", "amigo", "amiga", "namorado", "namorada",
+        "médico", "medico", "paciente", "pai", "mãe", "mae", "filho", "vizinho", "vizinha", "policial",
+    ]
+    count = sum(1 for word in hints if word in text)
+    if count <= 0:
+        return 1
+    if count >= 4:
+        return 3
+    return min(3, max(1, count))
+
+
+def draw_storyboard_character(draw: ImageDraw.ImageDraw, x: int, y: int, scale: int, *, pose: str = "stand") -> None:
+    head_r = max(6, scale // 6)
+    draw.ellipse((x - head_r, y - scale, x + head_r, y - scale + head_r * 2), outline=40, width=2)
+    torso_top = y - scale + head_r * 2
+    torso_bottom = y - scale // 3
+    if pose == "lie":
+        draw.line((x - scale // 3, torso_top + scale // 8, x + scale // 3, torso_top + scale // 8), fill=40, width=2)
+        draw.line((x - scale // 5, torso_top + scale // 8, x - scale // 2, torso_top + scale // 3), fill=40, width=2)
+        draw.line((x + scale // 5, torso_top + scale // 8, x + scale // 2, torso_top + scale // 3), fill=40, width=2)
+        return
+    draw.line((x, torso_top, x, torso_bottom), fill=40, width=2)
+    draw.line((x, torso_top + scale // 6, x - scale // 4, torso_top + scale // 3), fill=40, width=2)
+    draw.line((x, torso_top + scale // 6, x + scale // 4, torso_top + scale // 3), fill=40, width=2)
+    draw.line((x, torso_bottom, x - scale // 5, y), fill=40, width=2)
+    draw.line((x, torso_bottom, x + scale // 5, y), fill=40, width=2)
+
+
+def draw_storyboard_prop(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], tokens: set[str]) -> None:
+    left, top, right, bottom = box
+    width = right - left
+    height = bottom - top
+    mid_y = top + height * 2 // 3
+    draw.line((left + 8, mid_y, right - 8, mid_y), fill=120, width=2)
+    if "street" in tokens or "yard" in tokens:
+        draw.arc((left + 10, top + 10, left + 38, top + 28), 180, 360, fill=150, width=2)
+        draw.arc((left + 40, top + 16, left + 72, top + 32), 180, 360, fill=150, width=2)
+    if "door" in tokens:
+        draw.rectangle((right - 42, top + 22, right - 16, mid_y), outline=80, width=2)
+    if "bed" in tokens:
+        draw.rectangle((left + 12, mid_y - 20, left + width // 2 + 12, mid_y + 8), outline=80, width=2)
+        draw.rectangle((left + 16, mid_y - 24, left + 36, mid_y - 12), outline=120, width=1)
+    if "table" in tokens:
+        tx1 = left + width // 2 - 28
+        tx2 = left + width // 2 + 28
+        ty = mid_y - 8
+        draw.line((tx1, ty, tx2, ty), fill=80, width=2)
+        draw.line((tx1 + 6, ty, tx1 + 2, mid_y + 18), fill=80, width=2)
+        draw.line((tx2 - 6, ty, tx2 - 2, mid_y + 18), fill=80, width=2)
+    if "car" in tokens:
+        cx1 = left + 12
+        cx2 = left + width // 2 + 10
+        cy = mid_y - 18
+        draw.rounded_rectangle((cx1, cy, cx2, cy + 24), radius=6, outline=80, width=2)
+        draw.ellipse((cx1 + 10, cy + 20, cx1 + 22, cy + 32), outline=80, width=2)
+        draw.ellipse((cx2 - 22, cy + 20, cx2 - 10, cy + 32), outline=80, width=2)
+    if "phone" in tokens:
+        draw.rounded_rectangle((right - 36, mid_y - 30, right - 20, mid_y - 2), radius=3, outline=60, width=2)
+    if "money" in tokens:
+        draw.rectangle((left + 14, top + 18, left + 34, top + 30), outline=80, width=2)
+        draw.line((left + 18, top + 24, left + 30, top + 24), fill=120, width=1)
+    if "hospital" in tokens:
+        hx = right - 28
+        hy = top + 22
+        draw.line((hx - 6, hy, hx + 6, hy), fill=80, width=2)
+        draw.line((hx, hy - 6, hx, hy + 6), fill=80, width=2)
+    if "baby" in tokens:
+        draw.arc((left + 14, top + 12, left + 38, top + 30), 200, 340, fill=80, width=2)
+        draw.line((left + 22, top + 24, left + 28, top + 34), fill=80, width=2)
+    if "surprise" in tokens:
+        sx = left + width - 24
+        sy = top + 24
+        draw.line((sx, sy - 8, sx, sy + 8), fill=60, width=2)
+        draw.line((sx - 8, sy, sx + 8, sy), fill=60, width=2)
+        draw.line((sx - 6, sy - 6, sx + 6, sy + 6), fill=60, width=2)
+        draw.line((sx + 6, sy - 6, sx - 6, sy + 6), fill=60, width=2)
+
+
+def render_local_storyboard_image(item_id: str, script_json: dict[str, Any]) -> bytes:
+    rows = select_storyboard_rows(choose_script_rows(script_json), max_panels=9)
+    canvas_size = 1080
+    margin = 44
+    gap = 18
+    panel_size = (canvas_size - margin * 2 - gap * 2) // 3
+    image = Image.new("L", (canvas_size, canvas_size), color=248)
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((8, 8, canvas_size - 8, canvas_size - 8), radius=28, outline=120, width=3)
+    for idx in range(9):
+        row = rows[idx] if idx < len(rows) else {}
+        col = idx % 3
+        r = idx // 3
+        left = margin + col * (panel_size + gap)
+        top = margin + r * (panel_size + gap)
+        right = left + panel_size
+        bottom = top + panel_size
+        draw.rectangle((left, top, right, bottom), outline=95, width=3)
+        inner = (left + 8, top + 8, right - 8, bottom - 8)
+        tokens = storyboard_scene_tokens(row if isinstance(row, dict) else {})
+        draw_storyboard_prop(draw, inner, tokens)
+        count = storyboard_character_count(row if isinstance(row, dict) else {})
+        poses = ["stand", "stand", "stand"]
+        if "bed" in tokens:
+            poses[0] = "lie"
+        if "surprise" in tokens and count >= 2:
+            poses[-1] = "stand"
+        anchors = [
+            (left + panel_size // 4, bottom - 32),
+            (left + panel_size // 2, bottom - 28),
+            (left + panel_size * 3 // 4, bottom - 32),
+        ]
+        for person_index in range(count):
+            x, y = anchors[min(person_index, len(anchors) - 1)]
+            scale = 76 if person_index == 1 else 68
+            draw_storyboard_character(draw, x, y, scale, pose=poses[min(person_index, len(poses) - 1)])
+    rgb = image.convert("RGB")
+    output = io.BytesIO()
+    rgb.save(output, format="PNG")
+    return output.getvalue()
+
+
 def run_chat_script_edit(item_id: str, message: str, edit_mode: str = "minor") -> tuple[bool, str | dict[str, Any]]:
     context = find_item_context(item_id)
     if not context:
@@ -6941,6 +7105,34 @@ def generate_storyboard_assets(
     drafted_prompt = enforce_storyboard_prompt_guardrails(str(drafted_prompt or "").strip() or primary_prompt)
     if drafted_prompt and drafted_prompt not in candidate_prompts:
         candidate_prompts.insert(0, drafted_prompt)
+    if STORYBOARD_LOCAL_ONLY:
+        prompt = candidate_prompts[0]
+        image_bytes = render_local_storyboard_image(item_id, script_json)
+        preview_name = STORYBOARD_PREVIEW_BASENAME + ".png"
+        preview_path = output_dir / preview_name
+        preview_path.write_bytes(image_bytes)
+        (output_dir / STORYBOARD_PROMPT_FILE).write_text(prompt, encoding="utf-8")
+        (output_dir / "storyboard_image_raw_local.json").write_text(
+            json.dumps({"mode": "local_storyboard_renderer"}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        cover_name = STORYBOARD_COVER_BASENAME + ".png"
+        shutil.copyfile(preview_path, output_dir / cover_name)
+        save_storyboard_state(
+            item_id,
+            prompt=prompt,
+            preview_name=preview_name,
+            cover_name=cover_name,
+            model="local_storyboard_renderer",
+        )
+        return {
+            "prompt": prompt,
+            "prompt_model": drafted_model if prompt == drafted_prompt else "rule-based",
+            "image_model": "local_storyboard_renderer",
+            "preview_name": preview_name,
+            "cover_name": cover_name,
+            "cover_url": f"/results/{item_id}/{cover_name}",
+        }
     last_error: Exception | None = None
     for attempt_index in range(attempts):
         prompt = candidate_prompts[min(attempt_index, len(candidate_prompts) - 1)]
@@ -13492,6 +13684,7 @@ def library_html() -> str:
         created_at = format_beijing_time(entry.get("created_at") or "")
         content_type = entry.get("content_type") or DEFAULT_CONTENT_TYPE
         content_type_source = entry.get("content_type_source") or "auto"
+        creator_share_url = creator_script_share_url(entry_id)
         manual_badge = "<span class='library-time' data-manual-badge='true'>Manual</span>" if content_type_source == "manual" else "<span class='library-time' data-manual-badge='true' hidden>Manual</span>"
         cards.append(
             f"<article class='library-card' data-entry-id='{html_escape(entry_id)}' data-content-type='{html_escape(content_type)}'>"
@@ -13517,8 +13710,8 @@ def library_html() -> str:
             "</div>"
             "<div class='link-row'>"
             + (f"<button class='action-link' type='button' data-open-preview='{html_escape(entry.get('html_url') or '')}'>打开预览</button>" if entry.get("html_url") else "")
-            + (f"<a class='action-link' href='{html_escape(creator_script_share_url(entry_id))}' target='_blank' rel='noopener'>打开 Creator</a>" if creator_script_share_url(entry_id) else "")
-            + (f"<button class='action-link' type='button' data-copy-creator-link='{html_escape(creator_script_share_url(entry_id))}'>复制 Creator 链接</button>" if creator_script_share_url(entry_id) else "")
+            + (f"<a class='action-link' href='{html_escape(creator_share_url)}' target='_blank' rel='noopener'>打开 Creator</a>" if creator_share_url else "")
+            + (f"<button class='action-link' type='button' data-copy-creator-link='{html_escape(creator_share_url)}'>复制 Creator 链接</button>" if creator_share_url else "")
             + f"<button class='action-link primary' type='button' data-open-library-editor='{html_escape(entry.get('entry_id') or '')}'>编辑脚本</button>"
             + (
                 f"<button class='action-link' type='button' data-open-export-modal='{html_escape(entry.get('zh_docx_url') or entry.get('docx_url') or '')}' data-open-export-modal-pt='{html_escape(entry.get('pt_docx_url') or '')}'>导出脚本</button>"
@@ -14166,7 +14359,7 @@ def creator_admin_html(initial_tab: str = "scripts") -> str:
 @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
 *{{box-sizing:border-box;font-family:'Readex Pro',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}body{{margin:0;min-height:100vh;background:radial-gradient(circle at 8% 8%,rgba(255,130,0,.34),transparent 30%),linear-gradient(180deg,#ffbf75 0%,#fff4e8 42%,#fff 100%);color:#1f1f1f}}button,input,textarea,select{{font:inherit}}.shell{{width:min(1240px,100%);margin:0 auto;padding:24px}}.panel{{border:1px solid rgba(255,255,255,.78);border-radius:34px;background:rgba(255,255,255,.62);box-shadow:0 28px 80px rgba(249,115,0,.16);backdrop-filter:blur(22px);padding:24px}}.top{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}}.kicker{{display:inline-flex;border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.72);color:#ff8200;font-size:12px;font-weight:800}}h1{{margin:14px 0 8px;font-size:clamp(34px,6vw,64px);line-height:.95;letter-spacing:-.05em;color:#ff8200}}.copy{{margin:0;color:#99520f;line-height:1.6;font-weight:650}}.nav,.ops-tabs{{display:flex;gap:10px;flex-wrap:wrap}}.ops-tabs{{margin:22px 0 6px}}a.btn,button,.ops-tabs a{{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(255,130,0,.24);border-radius:999px;min-height:42px;padding:0 15px;background:rgba(255,255,255,.76);color:#ff8200;font-weight:850;text-decoration:none;cursor:pointer}}button.primary,.ops-tabs a.active{{border-color:#ff8200;background:#ff8200;color:#fff}}button.danger{{color:#c9481e}}button:disabled{{opacity:.52;cursor:not-allowed}}.toolbar{{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;margin:18px 0 14px}}.quick-filters{{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 14px}}.quick-filter-chip{{border:1px solid rgba(255,130,0,.20);border-radius:999px;padding:8px 14px;background:rgba(255,255,255,.78);color:#99520f;font-size:13px;font-weight:850;cursor:pointer;transition:all .18s ease}}.quick-filter-chip.active{{border-color:#ff8200;background:#ff8200;color:#fff}}.quick-filter-chip small{{font-size:11px;font-weight:800;opacity:.8}}.creator-form{{display:grid;grid-template-columns:1.4fr 1fr auto;gap:10px;margin:18px 0;padding:14px;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.55)}}input,textarea,select{{width:100%;border:1px solid rgba(255,130,0,.22);border-radius:16px;background:rgba(255,255,255,.84);padding:12px 14px;outline:none;color:#1f1f1f}}textarea{{min-height:96px;resize:vertical}}.status{{min-height:22px;color:#99520f;font-size:13px;font-weight:800}}.grid{{display:grid;gap:12px;margin-top:12px}}.card{{display:grid;grid-template-columns:34px 92px 1fr auto;gap:12px;align-items:center;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.74);padding:12px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.card img{{width:92px;aspect-ratio:9/16;border-radius:14px;object-fit:cover;background:#2a1d16}}.card h3{{margin:0 0 7px;font-size:18px;line-height:1.28;color:#1f1f1f}}.card p{{margin:0;color:#6f737a;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}.meta{{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}}.pill{{border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:5px 9px;color:#ff8200;background:#fff7f0;font-size:12px;font-weight:800}}.pill.off{{color:#777;background:#f3f3f3;border-color:#ddd}}.actions{{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}}.creator-card{{border:1px solid rgba(255,130,0,.18);border-radius:26px;background:rgba(255,255,255,.78);padding:16px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.creator-head{{display:grid;grid-template-columns:72px 1fr auto;gap:14px;align-items:center}}.avatar{{width:72px;height:72px;border-radius:50%;object-fit:cover;background:linear-gradient(135deg,#ffbd64,#ff6500)}}.creator-name{{margin:0;font-size:22px;color:#1f1f1f}}.script-mini{{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;margin-top:10px;padding:9px;border-radius:16px;background:#fff7f0;border:1px solid rgba(255,130,0,.14)}}.script-mini img{{width:52px;height:66px;border-radius:10px;object-fit:cover;background:#2a1d16}}.script-mini b{{display:block;font-size:13px;line-height:1.3}}.script-mini span,.small{{color:#6f737a;font-size:12px;line-height:1.35}}.submission-summary{{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start;margin:16px 0;padding:16px;border-radius:24px;background:rgba(255,255,255,.80);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.submission-summary h2{{margin:0 0 6px;font-size:24px;color:#1f1f1f}}.submission-count{{min-width:84px;border-radius:20px;background:#ff8200;color:white;text-align:center;padding:12px;font-weight:950}}.submission-count b{{display:block;font-size:28px;line-height:1}}.submission-groups{{display:grid;gap:10px;margin-top:12px}}.submission-group{{border:1px solid rgba(255,130,0,.16);border-radius:18px;background:#fffaf5;padding:12px}}.submission-group h3{{margin:0 0 8px;font-size:16px}}.submission-row{{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border-top:1px solid rgba(255,130,0,.12);padding-top:9px;margin-top:9px}}.submission-row a{{color:#ff8200;font-weight:850;word-break:break-all}}.import-panel{{display:grid;gap:14px;margin:18px 0;padding:18px;border-radius:26px;background:rgba(255,255,255,.78);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.import-form{{display:grid;grid-template-columns:1.5fr 1fr auto;gap:10px;align-items:center}}.progress{{height:10px;border-radius:999px;background:#ffe3d1;overflow:hidden}}.progress span{{display:block;height:100%;width:0;background:linear-gradient(90deg,#ff9b24,#ff5f00);transition:width .25s ease}}.import-result{{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid rgba(255,130,0,.14);border-radius:18px;background:#fffaf5;padding:12px}}.import-result.failed{{border-color:#ffb0a0;background:#fff3f0}}.import-result b{{display:block;line-height:1.35}}.import-result code{{color:#99520f;font-size:12px;word-break:break-all}}details{{margin-top:8px}}summary{{cursor:pointer;color:#ff8200;font-weight:900}}.login{{min-height:100vh;display:grid;place-items:center;padding:20px}}.login form,.modal-card{{width:min(520px,100%);border:1px solid rgba(255,130,0,.20);border-radius:30px;background:rgba(255,255,255,.78);padding:24px;box-shadow:0 24px 60px rgba(249,115,0,.18);backdrop-filter:blur(20px)}}.login h1{{text-align:center;font-size:42px}}.modal{{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(47,27,9,.42);padding:14px;z-index:20}}.modal.open{{display:flex}}.modal-card{{max-height:92vh;overflow:auto;background:#fffaf5}}.modal-card h2{{margin:0 0 14px;color:#ff8200}}.fields{{display:grid;gap:10px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.modal-actions{{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-wrap:wrap}}.empty{{padding:28px;border:1px dashed rgba(255,130,0,.34);border-radius:20px;text-align:center;color:#99520f;background:rgba(255,255,255,.72)}}@media(max-width:820px){{.toolbar,.creator-form,.import-form{{grid-template-columns:1fr}}.card{{grid-template-columns:28px 76px 1fr}}.card img{{width:76px}}.actions{{grid-column:2/4;justify-content:flex-start}}.row,.creator-head,.submission-summary,.submission-row,.import-result{{grid-template-columns:1fr}}}}
 </style></head><body><main id="app"></main><div class="modal" id="edit-modal"><form class="modal-card" id="edit-form"><h2>编辑 Creator 脚本</h2><div class="fields"><input name="title" placeholder="标题"><textarea name="summary" placeholder="摘要"></textarea><div class="row"><select name="content_type"></select><label style="display:flex;align-items:center;gap:8px;color:#99520f;font-weight:850"><input name="published" type="checkbox" style="width:auto">上架到 Creator 前台</label></div><input name="video_url" placeholder="视频链接"><input name="cover_url" placeholder="封面链接"><input name="html_url" placeholder="HTML 链接"><input name="zh_html_url" placeholder="中文 HTML 链接"></div><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存</button></div></form></div><script>
-const labels=["待分类","骗子","偷奸耍滑","整蛊","夫妻吵架","夫妻欺骗","夫妻算计","妻管严","赖账","撬墙角","夫妻出轨","夫妻整蛊","偷吃东西","夫妻关系","整蛊恶搞","骗局反转","赖账/金钱冲突","偷吃/偷懒/耍小聪明","热门"];let entries=[];let creators=[];let submissions=[];let intakes=[];let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptScope="portal_visible";let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");
+const labels=["夫妻整蛊/冲突","夫妻暧昧","家庭整蛊","朋友整蛊"];let entries=[];let creators=[];let submissions=[];let intakes=[];let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptScope="portal_visible";let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");
 function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}}[c]))}}
 async function api(url,opts={{}}){{const r=await fetch(url,{{credentials:"same-origin",headers:{{"Content-Type":"application/json"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}
 function loginView(msg=""){{app.innerHTML=`<section class="login"><form id="login-form"><span class="kicker">Koko 内部后台</span><h1>Creator 运营后台</h1><p class="copy">这里管理创作者前台展示的脚本、标签、上下架和同步。</p><input name="password" type="password" placeholder="后台密码" autofocus style="margin-top:16px"><button class="primary" style="width:100%;margin-top:12px" type="submit">进入后台</button><p class="status">${{esc(msg)}}</p></form></section>`}}
@@ -14232,7 +14425,7 @@ CREATOR_QUESTIONS = [
                 "id": "duo",
                 "pt": "Duas pessoas",
                 "zh": "两个人拍",
-                "types": ["夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "整蛊", "骗子", "赖账"],
+                "types": ["夫妻吵架", "夫妻欺骗", "夫妻算计", "妻管严", "整蛊", "骗子", "赖账/金钱冲突"],
                 "keywords": ["夫妻", "妻子", "丈夫", "老公", "老婆", "情侣", "朋友", "同事", "顾客", "老板"],
             },
             {
@@ -14286,7 +14479,7 @@ CREATOR_QUESTIONS = [
                 "pt": "Cliente / chefe / atendimento",
                 "zh": "两人顾客/老板/服务",
                 "people": ["duo"],
-                "types": ["赖账", "骗子", "偷奸耍滑", "整蛊"],
+                "types": ["赖账/金钱冲突", "骗子", "偷奸耍滑", "整蛊"],
                 "keywords": ["老板", "员工", "顾客", "服务", "付款", "结账", "工资", "交易", "投诉", "费用"],
             },
             {
@@ -14310,7 +14503,7 @@ CREATOR_QUESTIONS = [
                 "pt": "Rua / público / confusão",
                 "zh": "街头/围观/多人误会",
                 "people": ["group"],
-                "types": ["整蛊", "骗子", "赖账", "撬墙角"],
+                "types": ["整蛊", "骗子", "赖账/金钱冲突", "撬墙角"],
                 "keywords": ["街头", "路人", "围观", "多人", "公共场合", "误会", "反转", "冲突"],
             },
         ],
@@ -14352,7 +14545,7 @@ CREATOR_QUESTIONS = [
                 "zh": "钱/占便宜",
                 "people": ["duo", "group"],
                 "scenes": ["duo_service", "duo_friends", "group_public", "group_friends"],
-                "types": ["赖账", "骗子", "夫妻算计"],
+                "types": ["赖账/金钱冲突", "骗子", "夫妻算计"],
                 "keywords": ["付款", "欠钱", "不给钱", "逃单", "结账", "费用", "花钱", "信用卡", "便宜", "贵"],
             },
             {
@@ -14379,13 +14572,6 @@ CREATOR_QUESTIONS = [
                 "people": ["group"],
                 "types": ["整蛊", "骗子", "撬墙角"],
                 "keywords": ["多人", "围观", "误会", "传播", "发现", "尴尬", "反转"],
-            },
-            {
-                "id": "hot",
-                "pt": "Mostre os populares",
-                "zh": "先看热门",
-                "types": [],
-                "keywords": ["热门", "完整", "反转", "误会", "简单", "日常"],
             },
         ],
     },
