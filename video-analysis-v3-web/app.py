@@ -2845,6 +2845,10 @@ LIBRARY_FILTER_LABELS = [
 CONTENT_TYPE_CHOICE_TEXT = "、".join(LIBRARY_FILTER_LABELS)
 
 
+def has_word_signal(text: str, terms: list[str]) -> bool:
+    return any(re.search(rf"(?<![\wÀ-ÿ]){re.escape(term)}(?![\wÀ-ÿ])", text, flags=re.I) for term in terms)
+
+
 def normalize_creator_content_type(value: object, text: str = "") -> str:
     current = str(value or "").strip()
     lowered = str(text or "").lower()
@@ -2870,26 +2874,26 @@ def normalize_creator_content_type(value: object, text: str = "") -> str:
         "热门",
         "",
     }
-    family_cn_terms = ["家庭", "妈妈", "爸爸", "孩子", "儿子", "女儿", "小孩", "婆婆", "岳母"]
-    family_pt_terms = ["família", "familia", "mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas", "bebê", "bebe", "sogra", "irmão", "irmao", "irmã", "irma"]
+    family_cn_terms = ["妈妈", "爸爸", "母亲", "父亲", "孩子", "儿子", "女儿", "小孩", "宝宝", "亲戚", "婆婆", "岳母", "兄弟", "姐妹"]
+    family_pt_terms = ["mãe", "mae", "pai", "filho", "filha", "criança", "crianca", "crianças", "criancas", "bebê", "bebe", "sogra", "sogro", "irmão", "irmao", "irmã", "irma"]
     has_family_text = any(term in lowered for term in family_cn_terms) or any(
         re.search(rf"(?<![\wÀ-ÿ]){re.escape(term)}(?![\wÀ-ÿ])", lowered, flags=re.I)
         for term in family_pt_terms
     )
+    flirt_terms = ["trai", "infiel", "amante", "ciúme", "ciume", "暧昧", "出轨", "好色", "撬墙角", "mulher bonita", "namorado", "namorada", "paquera", "beijo"]
+    couple_terms = ["marido", "esposa", "casal", "夫妻", "妻子", "丈夫", "情侣"]
+    has_flirt = current in legacy_flirt or any(term in lowered for term in flirt_terms)
+    has_couple = current in legacy_couple or any(term in lowered for term in couple_terms)
     if current in legacy_family or has_family_text:
         return "家庭整蛊"
+    if has_flirt:
+        return "夫妻暧昧"
+    if has_couple:
+        return "夫妻整蛊/冲突"
     if current in ALLOWED_CONTENT_TYPES and current != "家庭整蛊":
         return current
-    if current in legacy_flirt:
-        return "夫妻暧昧"
-    if current in legacy_couple:
-        return "夫妻整蛊/冲突"
     if current in legacy_friends:
         return "朋友整蛊"
-    if any(term in lowered for term in ["trai", "infiel", "amante", "ciúme", "ciume", "暧昧", "出轨", "好色", "撬墙角"]):
-        return "夫妻暧昧"
-    if any(term in lowered for term in ["marido", "esposa", "casal", "namorado", "namorada", "夫妻", "妻子", "丈夫", "情侣"]):
-        return "夫妻整蛊/冲突"
     if has_family_text:
         return "家庭整蛊"
     return DEFAULT_CONTENT_TYPE
@@ -10933,16 +10937,16 @@ def studio_html() -> str:
     }}
     .studio-hero-header {{
       position: relative;
-      min-height: 168px;
+      min-height: 214px;
       display: grid;
-      grid-template-columns: minmax(0, .96fr) minmax(280px, .7fr);
+      grid-template-columns: minmax(0, .92fr) minmax(320px, .72fr);
       gap: 24px;
-      align-items: center;
-      margin-bottom: 18px;
+      align-items: start;
+      margin: -8px 0 6px;
       overflow: visible;
     }}
     .studio-title-art {{
-      width: min(620px, 100%);
+      width: min(670px, 100%);
       height: auto;
       display: block;
       mix-blend-mode: multiply;
@@ -10957,7 +10961,7 @@ def studio_html() -> str:
       color: #ff5f00;
     }}
     .studio-hero-copy {{
-      margin: 4px 0 0 44px;
+      margin: -2px 0 0 44px;
       color: rgba(31,31,31,.58);
       line-height: 1.7;
       font-size: 15px;
@@ -10966,8 +10970,9 @@ def studio_html() -> str:
     .studio-hero-art {{
       justify-self: end;
       align-self: start;
-      width: min(440px, 100%);
-      transform: translateY(-26px);
+      width: min(520px, 100%);
+      margin-right: 16px;
+      transform: translateY(-46px);
       pointer-events: none;
     }}
     .studio-hero-art img {{
@@ -10998,6 +11003,7 @@ def studio_html() -> str:
         radial-gradient(circle at 88% 0%, rgba(255,130,0,.12), transparent 28%),
         linear-gradient(180deg, rgba(255,255,255,.92), rgba(255,255,255,.78));
       box-shadow: 0 24px 60px rgba(249,115,0,.11);
+      margin-top: -14px;
     }}
     .studio-card-head {{
       display: flex;
