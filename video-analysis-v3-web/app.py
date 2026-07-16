@@ -143,6 +143,7 @@ HERO_WORDMARK = ASSETS_ROOT / "kwai-wordmark.svg"
 KWAI_FAVICON = ASSETS_ROOT / "kwai-favicon.svg"
 STUDIO_HERO_VIDEO = ASSETS_ROOT / "studio-hero-video.png"
 STUDIO_TITLE_ART = ASSETS_ROOT / "studio-title-art.png"
+STUDIO_HERO_BANNER_SHALLOW = ASSETS_ROOT / "studio-hero-banner-shallow.png"
 FAVICON_LINKS = """<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=kwai1">
   <link rel="shortcut icon" href="/favicon.ico?v=kwai1">"""
 
@@ -10937,13 +10938,26 @@ def studio_html() -> str:
     }}
     .studio-hero-header {{
       position: relative;
-      min-height: 214px;
-      display: grid;
-      grid-template-columns: minmax(0, .92fr) minmax(320px, .72fr);
-      gap: 24px;
-      align-items: start;
-      margin: -8px 0 6px;
+      min-height: 0;
+      display: block;
+      margin: -12px auto 18px;
       overflow: visible;
+      border-radius: 26px;
+      background: linear-gradient(180deg, rgba(255,249,242,.92), rgba(255,240,224,.58));
+      box-shadow: 0 18px 46px rgba(249,115,0,.08);
+      max-width: 1120px;
+    }}
+    .studio-hero-banner {{
+      display: block;
+      width: 100%;
+      pointer-events: none;
+    }}
+    .studio-hero-banner img {{
+      width: 100%;
+      aspect-ratio: 1120 / 378;
+      height: auto;
+      display: block;
+      border-radius: 26px;
     }}
     .studio-title-art {{
       width: min(670px, 100%);
@@ -10959,13 +10973,6 @@ def studio_html() -> str:
       line-height: .9;
       letter-spacing: -.06em;
       color: #ff5f00;
-    }}
-    .studio-hero-copy {{
-      margin: -2px 0 0 44px;
-      color: rgba(31,31,31,.58);
-      line-height: 1.7;
-      font-size: 15px;
-      max-width: 54em;
     }}
     .studio-hero-art {{
       justify-self: end;
@@ -11373,14 +11380,10 @@ def studio_html() -> str:
     </aside>
     <section class="studio-main">
       <section class="studio-hero-header" aria-label="Koko 内容中台">
-        <div>
-          <img class="studio-title-art" src="/brand/studio-title-art.png" alt="Koko 内容中台" />
-          <h1 class="studio-title-fallback">Koko 内容中台</h1>
-          <p class="studio-hero-copy">把优质视频筛选、结构化脚本拆解、葡语转译和数据看板放进同一个工作台，让运营团队更快沉淀案例、复盘内容并给作者定向投喂。</p>
+        <div class="studio-hero-banner" aria-hidden="true">
+          <img src="/brand/studio-hero-banner-shallow.png" alt="" />
         </div>
-        <div class="studio-hero-art" aria-hidden="true">
-          <img src="/brand/studio-hero-video.png" alt="" />
-        </div>
+        <h1 class="studio-title-fallback">Koko 内容中台</h1>
       </section>
 
       <section id="filter-panel" class="studio-panel">
@@ -15832,6 +15835,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/brand/studio-title-art.png" and STUDIO_TITLE_ART.exists():
             self.send_file(STUDIO_TITLE_ART)
             return
+        if parsed.path == "/brand/studio-hero-banner-shallow.png" and STUDIO_HERO_BANNER_SHALLOW.exists():
+            self.send_file(STUDIO_HERO_BANNER_SHALLOW)
+            return
         if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"} and KWAI_FAVICON.exists():
             self.send_file(KWAI_FAVICON)
             return
@@ -16027,6 +16033,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/brand/studio-title-art.png" and STUDIO_TITLE_ART.exists():
             self.head_file(STUDIO_TITLE_ART)
+            return
+        if parsed.path == "/brand/studio-hero-banner-shallow.png" and STUDIO_HERO_BANNER_SHALLOW.exists():
+            self.head_file(STUDIO_HERO_BANNER_SHALLOW)
             return
         if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"} and KWAI_FAVICON.exists():
             self.head_file(KWAI_FAVICON)
