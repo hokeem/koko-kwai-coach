@@ -1187,6 +1187,8 @@ def load_library_entries() -> list[dict[str, Any]]:
         storyboard_url = library_storyboard_cover_url(entry)
         if storyboard_url:
             entry["storyboard_cover_url"] = storyboard_url
+        if not entry.get("duration_bucket"):
+            entry.update(creator_duration_fields(str(entry.get("entry_id") or "")))
         share_url = creator_script_share_url(entry.get("entry_id"))
         if share_url:
             entry["creator_share_url"] = share_url
@@ -1747,6 +1749,20 @@ def script_duration_seconds(script_json: dict[str, Any]) -> float:
         if isinstance(row, dict)
     ]
     return max(values) if values else 0.0
+
+
+def creator_duration_fields(entry_id: str, script_json: dict[str, Any] | None = None) -> dict[str, Any]:
+    if script_json is None:
+        output_dir = RESULTS_ROOT / str(entry_id or "")
+        script_json = read_json(output_dir / "script_table_pt.json") or read_json(output_dir / "script_table.json")
+    duration_seconds = script_duration_seconds(script_json or {})
+    duration_bucket = creator_duration_bucket(duration_seconds)
+    return {
+        "duration_seconds": round(duration_seconds, 2) if duration_seconds > 0 else 0,
+        "duration_bucket": duration_bucket,
+        "duration_label_pt": CREATOR_DURATION_LABELS.get(duration_bucket, {}).get("pt", ""),
+        "duration_label_zh": CREATOR_DURATION_LABELS.get(duration_bucket, {}).get("zh", ""),
+    }
 
 
 def download_url_to_file(url: str, target: Path) -> None:
@@ -4479,6 +4495,7 @@ def sync_library_from_jobs() -> None:
                         existing_source=job.get("content_type_source") or "",
                         use_llm=False,
                     ),
+                    **creator_duration_fields(parent_job_id, script_json),
                     "entry_id": parent_job_id,
                     "parent_job_id": parent_job_id,
                     "created_at": job.get("completed_at") or job.get("updated_at") or now_iso(),
@@ -7419,6 +7436,7 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
         use_llm=use_llm,
     )
     existing = library_entry_by_id(str(item.get("id") or "")) or {}
+    duration_fields = creator_duration_fields(str(item.get("id") or ""), script)
     entry = {
         "entry_id": item["id"],
         "parent_job_id": parent_job_id,
@@ -7429,6 +7447,7 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
         "content_type_source": decision["content_type_source"],
         "content_type_reasoning": decision["content_type_reasoning"],
         "content_type_confidence": decision["content_type_confidence"],
+        **duration_fields,
         "whole_video_summary": script.get("whole_video_summary") or "",
         "html_url": item.get("html_url") or "",
         "report_url": item.get("report_url") or "",
@@ -14768,7 +14787,8 @@ function scriptTypeCounts(){{const counts=new Map();for(const entry of entries){
 function scriptTypeOptions(){{const counts=scriptTypeCounts();const ordered=[];for(const label of labels){{if(counts.has(label))ordered.push([label,counts.get(label)])}}for(const [label,count] of [...counts.entries()].sort((a,b)=>String(a[0]).localeCompare(String(b[0]),"zh-CN"))){{if(!labels.includes(label))ordered.push([label,count])}}return ordered}}
 function renderScriptTypeFilters(){{const box=document.querySelector("#script-type-filters");if(!box)return;const options=scriptTypeOptions();box.innerHTML=[`<button class="quick-filter-chip ${{!activeScriptType?"active":""}}" type="button" data-type-filter=""><span>全部</span> <small>${{entries.length}}</small></button>`,...options.map(([label,count])=>`<button class="quick-filter-chip ${{activeScriptType===label?"active":""}}" type="button" data-type-filter="${{esc(label)}}"><span>${{esc(label)}}</span> <small>${{count}}</small></button>`)].join("")}}
 function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();return entries.filter(e=>{{const matchesType=!activeScriptType||String(e.content_type||"待分类").trim()===activeScriptType;if(!matchesType)return false;if(!q)return true;return [e.title,e.summary,e.content_type,e.video_url].join(" ").toLowerCase().includes(q)}})}}
-function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}list.innerHTML=rows.map(e=>{{const share=scriptShareUrl(e.entry_id);return `<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span><span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span>${{e.overridden?`<span class="pill">已运营修改</span>`:""}}</div><div class="share-line"><b>kokocomedy 外链</b><a href="${{esc(share)}}" target="_blank" rel="noopener">${{esc(share)}}</a></div></div><div class="actions"><a class="btn" href="${{esc(share)}}" target="_blank" rel="noopener">打开外链</a><button type="button" data-copy="${{esc(share)}}">复制外链</button><button class="primary" type="button" data-script-edit="${{esc(e.entry_id)}}">修改脚本</button><button type="button" data-edit="${{esc(e.entry_id)}}">修改标签</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`}}).join("")}}
+function durationTag(e){{const map={{dur_1_20:"1-20 s",dur_20_60:"20 s-1 min",dur_60_120:"1-2 min",dur_120_plus:"Mais de 2 min"}};return e.duration_label_pt||map[e.duration_bucket]||""}}
+function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}list.innerHTML=rows.map(e=>{{const share=scriptShareUrl(e.entry_id);const duration=durationTag(e);return `<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span>${{duration?`<span class="pill">${{esc(duration)}}</span>`:""}}<span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span></div><div class="share-line"><b>kokocomedy 外链</b><a href="${{esc(share)}}" target="_blank" rel="noopener">${{esc(share)}}</a></div></div><div class="actions"><a class="btn" href="${{esc(share)}}" target="_blank" rel="noopener">打开外链</a><button type="button" data-copy="${{esc(share)}}">复制外链</button><button class="primary" type="button" data-script-edit="${{esc(e.entry_id)}}">修改脚本</button><button type="button" data-edit="${{esc(e.entry_id)}}">修改标签</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`}}).join("")}}
 async function loadEntries(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载中...");const params=new URLSearchParams({{limit:"500",scope:activeScriptScope}});const d=await api(`/api/creator-admin/scripts?${{params.toString()}}`);entries=d.entries||[];scriptScopeCounts=d.scope_counts||{{portal_visible:0,hidden:0,incomplete:0,all:entries.length}};activeScriptScope=d.scope||activeScriptScope;if(activeScriptType&&!entries.some(e=>String(e.content_type||"待分类").trim()===activeScriptType))activeScriptType="";adminView();const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;document.querySelector("#status").textContent=`${{scopeLabel}}：共 ${{entries.length}} 条`}}catch(e){{loginView(e.message)}}}}
 async function loadCreators(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载作者中...");const d=await api("/api/creator-admin/creators");creators=d.creators||[];activeTab="creators";adminView();document.querySelector("#status").textContent=`共 ${{creators.length}} 个创作者`}}catch(e){{loginView(e.message)}}}}
 async function loadAccounts(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载账号中...");const d=await api("/api/creator-admin/accounts");accounts=d.accounts||[];activeTab="accounts";adminView();document.querySelector("#status").textContent=`共 ${{accounts.length}} 个账号`}}catch(e){{loginView(e.message)}}}}
