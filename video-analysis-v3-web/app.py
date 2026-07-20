@@ -8691,7 +8691,7 @@ def page_html() -> str:
           <a href="/">Start</a>
           <a href="/studio">Studio</a>
           <a href="/studio#split-panel">Preview</a>
-          <a href="/library">Library</a>
+          <a href="/library">Script Admin</a>
           <a href="/creator-admin">Creator Ops</a>
           <a href="/stats">Stats</a>
         </div>
@@ -11370,7 +11370,7 @@ def studio_html() -> str:
         <a class="studio-tab-link active" href="#split-panel" data-panel-target="split-panel"><span class="studio-tab-icon">▶</span><span>视频拆解</span></a>
         <a class="studio-tab-link" href="#translate-panel" data-panel-target="translate-panel"><span class="studio-tab-icon">◉</span><span>葡语转译</span></a>
         <a class="studio-tab-link" href="#stats-panel" data-panel-target="stats-panel"><span class="studio-tab-icon">▥</span><span>数据看板</span></a>
-        <a class="studio-tab-link" href="/library"><span class="studio-tab-icon">☰</span><span>脚本库</span></a>
+        <a class="studio-tab-link" href="/library"><span class="studio-tab-icon">☰</span><span>脚本管理</span></a>
         <a class="studio-tab-link" href="/creator-admin"><span class="studio-tab-icon">★</span><span>Creator 运营</span></a>
       </nav>
       <div class="studio-side-meta">
@@ -12416,9 +12416,9 @@ def studio_html() -> str:
           <div class="library-confirm-card done" data-library-confirm-card="${{item.id}}">
             <div class="library-confirm-copy">
               <div class="library-confirm-title">已入库</div>
-              <div class="library-confirm-note">这条脚本已经进入脚本库，后续可以在脚本库中预览、导出或删除。</div>
+              <div class="library-confirm-note">这条脚本已经进入脚本管理，后续可以统一编辑、上下架、导出或删除。</div>
             </div>
-            <a class="action-link" href="/library">打开脚本库</a>
+            <a class="action-link" href="/library">打开脚本管理</a>
           </div>
         `;
       }}
@@ -12774,7 +12774,7 @@ def studio_html() -> str:
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Confirm library failed");
-        showToast("已入库", "这条脚本已进入脚本库。");
+        showToast("已入库", "这条脚本已进入脚本管理。");
         if (activeJobId) {{
           pollJob(activeJobId);
         }} else {{
@@ -14670,8 +14670,7 @@ def library_html() -> str:
 
 
 CREATOR_ADMIN_TAB_ROUTES = {
-    "/creator-admin": "scripts",
-    "/creator-admin/scripts": "scripts",
+    "/creator-admin": "creators",
     "/creator-admin/imports": "imports",
     "/creator-admin/creators": "creators",
     "/creator-admin/submissions": "submissions",
@@ -14683,20 +14682,26 @@ def creator_admin_tab_for_path(path: str) -> str | None:
     return CREATOR_ADMIN_TAB_ROUTES.get(path)
 
 
-def creator_admin_html(initial_tab: str = "scripts") -> str:
+def creator_admin_html(initial_tab: str = "scripts", *, library_mode: bool = False) -> str:
     if initial_tab not in {"scripts", "imports", "creators", "submissions", "intakes"}:
         initial_tab = "scripts"
     initial_tab_json = json.dumps(initial_tab, ensure_ascii=False)
+    library_mode_json = "true" if library_mode else "false"
     template = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Koko Creator 运营后台</title>__FAVICON_LINKS__<style>
 @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
 *{{box-sizing:border-box;font-family:'Readex Pro',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}body{{margin:0;min-height:100vh;background:radial-gradient(circle at 8% 8%,rgba(255,130,0,.34),transparent 30%),linear-gradient(180deg,#ffbf75 0%,#fff4e8 42%,#fff 100%);color:#1f1f1f}}button,input,textarea,select{{font:inherit}}.shell{{width:min(1240px,100%);margin:0 auto;padding:24px}}.panel{{border:1px solid rgba(255,255,255,.78);border-radius:34px;background:rgba(255,255,255,.62);box-shadow:0 28px 80px rgba(249,115,0,.16);backdrop-filter:blur(22px);padding:24px}}.top{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}}.kicker{{display:inline-flex;border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.72);color:#ff8200;font-size:12px;font-weight:800}}h1{{margin:14px 0 8px;font-size:clamp(34px,6vw,64px);line-height:.95;letter-spacing:-.05em;color:#ff8200}}.copy{{margin:0;color:#99520f;line-height:1.6;font-weight:650}}.nav,.ops-tabs{{display:flex;gap:10px;flex-wrap:wrap}}.ops-tabs{{margin:22px 0 6px}}a.btn,button,.ops-tabs a{{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(255,130,0,.24);border-radius:999px;min-height:42px;padding:0 15px;background:rgba(255,255,255,.76);color:#ff8200;font-weight:850;text-decoration:none;cursor:pointer}}button.primary,.ops-tabs a.active{{border-color:#ff8200;background:#ff8200;color:#fff}}button.danger{{color:#c9481e}}button:disabled{{opacity:.52;cursor:not-allowed}}.toolbar{{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;margin:18px 0 14px}}.quick-filters{{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 14px}}.quick-filter-chip{{border:1px solid rgba(255,130,0,.20);border-radius:999px;padding:8px 14px;background:rgba(255,255,255,.78);color:#99520f;font-size:13px;font-weight:850;cursor:pointer;transition:all .18s ease}}.quick-filter-chip.active{{border-color:#ff8200;background:#ff8200;color:#fff}}.quick-filter-chip small{{font-size:11px;font-weight:800;opacity:.8}}.creator-form{{display:grid;grid-template-columns:1.4fr 1fr auto;gap:10px;margin:18px 0;padding:14px;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.55)}}input,textarea,select{{width:100%;border:1px solid rgba(255,130,0,.22);border-radius:16px;background:rgba(255,255,255,.84);padding:12px 14px;outline:none;color:#1f1f1f}}textarea{{min-height:96px;resize:vertical}}.status{{min-height:22px;color:#99520f;font-size:13px;font-weight:800}}.grid{{display:grid;gap:12px;margin-top:12px}}.card{{display:grid;grid-template-columns:34px 92px 1fr auto;gap:12px;align-items:center;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.74);padding:12px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.card img{{width:92px;aspect-ratio:9/16;border-radius:14px;object-fit:cover;background:#2a1d16}}.card h3{{margin:0 0 7px;font-size:18px;line-height:1.28;color:#1f1f1f}}.card p{{margin:0;color:#6f737a;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}.meta{{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}}.pill{{border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:5px 9px;color:#ff8200;background:#fff7f0;font-size:12px;font-weight:800}}.pill.off{{color:#777;background:#f3f3f3;border-color:#ddd}}.actions{{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}}.creator-card{{border:1px solid rgba(255,130,0,.18);border-radius:26px;background:rgba(255,255,255,.78);padding:16px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.creator-head{{display:grid;grid-template-columns:72px 1fr auto;gap:14px;align-items:center}}.avatar{{width:72px;height:72px;border-radius:50%;object-fit:cover;background:linear-gradient(135deg,#ffbd64,#ff6500)}}.creator-name{{margin:0;font-size:22px;color:#1f1f1f}}.script-mini{{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;margin-top:10px;padding:9px;border-radius:16px;background:#fff7f0;border:1px solid rgba(255,130,0,.14)}}.script-mini img{{width:52px;height:66px;border-radius:10px;object-fit:cover;background:#2a1d16}}.script-mini b{{display:block;font-size:13px;line-height:1.3}}.script-mini span,.small{{color:#6f737a;font-size:12px;line-height:1.35}}.submission-summary{{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start;margin:16px 0;padding:16px;border-radius:24px;background:rgba(255,255,255,.80);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.submission-summary h2{{margin:0 0 6px;font-size:24px;color:#1f1f1f}}.submission-count{{min-width:84px;border-radius:20px;background:#ff8200;color:white;text-align:center;padding:12px;font-weight:950}}.submission-count b{{display:block;font-size:28px;line-height:1}}.submission-groups{{display:grid;gap:10px;margin-top:12px}}.submission-group{{border:1px solid rgba(255,130,0,.16);border-radius:18px;background:#fffaf5;padding:12px}}.submission-group h3{{margin:0 0 8px;font-size:16px}}.submission-row{{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border-top:1px solid rgba(255,130,0,.12);padding-top:9px;margin-top:9px}}.submission-row a{{color:#ff8200;font-weight:850;word-break:break-all}}.import-panel{{display:grid;gap:14px;margin:18px 0;padding:18px;border-radius:26px;background:rgba(255,255,255,.78);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.import-form{{display:grid;grid-template-columns:1.5fr 1fr auto;gap:10px;align-items:center}}.progress{{height:10px;border-radius:999px;background:#ffe3d1;overflow:hidden}}.progress span{{display:block;height:100%;width:0;background:linear-gradient(90deg,#ff9b24,#ff5f00);transition:width .25s ease}}.import-result{{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid rgba(255,130,0,.14);border-radius:18px;background:#fffaf5;padding:12px}}.import-result.failed{{border-color:#ffb0a0;background:#fff3f0}}.import-result b{{display:block;line-height:1.35}}.import-result code{{color:#99520f;font-size:12px;word-break:break-all}}details{{margin-top:8px}}summary{{cursor:pointer;color:#ff8200;font-weight:900}}.login{{min-height:100vh;display:grid;place-items:center;padding:20px}}.login form,.modal-card{{width:min(520px,100%);border:1px solid rgba(255,130,0,.20);border-radius:30px;background:rgba(255,255,255,.78);padding:24px;box-shadow:0 24px 60px rgba(249,115,0,.18);backdrop-filter:blur(20px)}}.login h1{{text-align:center;font-size:42px}}.modal{{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(47,27,9,.42);padding:14px;z-index:20}}.modal.open{{display:flex}}.modal-card{{max-height:92vh;overflow:auto;background:#fffaf5}}.modal-card h2{{margin:0 0 14px;color:#ff8200}}.fields{{display:grid;gap:10px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.modal-actions{{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-wrap:wrap}}.empty{{padding:28px;border:1px dashed rgba(255,130,0,.34);border-radius:20px;text-align:center;color:#99520f;background:rgba(255,255,255,.72)}}@media(max-width:820px){{.toolbar,.creator-form,.import-form{{grid-template-columns:1fr}}.card{{grid-template-columns:28px 76px 1fr}}.card img{{width:76px}}.actions{{grid-column:2/4;justify-content:flex-start}}.row,.creator-head,.submission-summary,.submission-row,.import-result{{grid-template-columns:1fr}}}}
 .share-line{{display:grid;gap:4px;margin-top:10px;padding:9px 10px;border:1px solid rgba(255,130,0,.14);border-radius:14px;background:#fffaf5}}.share-line b{{color:#99520f;font-size:12px}}.share-line a{{color:#ff5f00;font-size:12px;font-weight:850;word-break:break-all;text-decoration:none}}
 </style></head><body><main id="app"></main><div class="modal" id="edit-modal"><form class="modal-card" id="edit-form"><h2>编辑 Creator 脚本</h2><div class="fields"><input name="title" placeholder="标题"><textarea name="summary" placeholder="摘要"></textarea><div class="row"><select name="content_type"></select><label style="display:flex;align-items:center;gap:8px;color:#99520f;font-weight:850"><input name="published" type="checkbox" style="width:auto">上架到 Creator 前台</label></div><input name="video_url" placeholder="视频链接"><input name="cover_url" placeholder="封面链接"><input name="html_url" placeholder="HTML 链接"><input name="zh_html_url" placeholder="中文 HTML 链接"></div><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存</button></div></form></div><script>
-const labels=["夫妻整蛊/冲突","夫妻暧昧","家庭整蛊","朋友整蛊"];let entries=[];let creators=[];let submissions=[];let intakes=[];let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptScope="portal_visible";let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");
+const libraryMode=__LIBRARY_MODE__;const labels=["夫妻整蛊/冲突","夫妻暧昧","家庭整蛊","朋友整蛊"];let entries=[];let creators=[];let submissions=[];let intakes=[];let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptScope="portal_visible";let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");
 function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}}[c]))}}
 async function api(url,opts={{}}){{const r=await fetch(url,{{credentials:"same-origin",headers:{{"Content-Type":"application/json"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}
-function loginView(msg=""){{app.innerHTML=`<section class="login"><form id="login-form"><span class="kicker">Koko 内部后台</span><h1>Creator 运营后台</h1><p class="copy">这里管理创作者前台展示的脚本、标签、上下架和同步。</p><input name="password" type="password" placeholder="后台密码" autofocus style="margin-top:16px"><button class="primary" style="width:100%;margin-top:12px" type="submit">进入后台</button><p class="status">${{esc(msg)}}</p></form></section>`}}
-function adminView(){{app.innerHTML=`<section class="shell"><div class="panel"><div class="top"><div><span class="kicker">Koko Creator Operations</span><h1>Creator 运营后台</h1><p class="copy">在 Koko 主平台里管理创作者前台脚本和创作者分配。这里的修改会写入 Creator 运营数据，不破坏原始脚本库。</p></div><div class="nav"><a class="btn" href="/studio">内容中台</a><a class="btn" href="/library">脚本库</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a><button class="primary" id="sync-now" type="button">立刻同步 Creator</button></div></div><div class="ops-tabs"><a class="${{activeTab==="scripts"?"active":""}}" href="/creator-admin">脚本管理</a><a class="${{activeTab==="imports"?"active":""}}" href="/creator-admin/imports">导入脚本</a><a class="${{activeTab==="creators"?"active":""}}" href="/creator-admin/creators">创作者管理</a><a class="${{activeTab==="submissions"?"active":""}}" href="/creator-admin/submissions">回传数据</a><a class="${{activeTab==="intakes"?"active":""}}" href="/creator-admin/intakes">作者信息收集</a></div><div id="tab-body"></div></div></section>`;document.querySelector("#sync-now").addEventListener("click",syncNow);renderActiveTab()}}
+function loginView(msg=""){{app.innerHTML=`<section class="login"><form id="login-form"><span class="kicker">Koko 内部后台</span><h1>${{libraryMode?"脚本管理":"Creator 运营后台"}}</h1><p class="copy">${{libraryMode?"这里统一管理 Koko 入库脚本和 kokocomedy 前台脚本。":"这里管理创作者前台展示的脚本、标签、上下架和同步。"}}</p><input name="password" type="password" placeholder="后台密码" autofocus style="margin-top:16px"><button class="primary" style="width:100%;margin-top:12px" type="submit">进入后台</button><p class="status">${{esc(msg)}}</p></form></section>`}}
+function adminKicker(){{return libraryMode?"Koko Script Management":"Koko Creator Operations"}}
+function adminTitle(){{return libraryMode?"脚本管理":"Creator 运营后台"}}
+function adminCopy(){{return libraryMode?"这里是 Koko 内容中台的统一脚本管理入口，以 kokocomedy 当前脚本库为准；编辑、上下架、删除和分享外链都会直接作用到创作者前台。":"这里管理创作者、回传数据和作者信息收集。脚本管理已合并到 /library，避免两个脚本库不一致。"}}
+function adminNav(){{return libraryMode?`<a class="btn" href="/studio">内容中台</a><a class="btn" href="/creator-admin/imports">导入脚本</a><a class="btn" href="/creator-admin/creators">创作者运营</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a><button class="primary" id="sync-now" type="button">立刻同步 Creator</button>`:`<a class="btn" href="/studio">内容中台</a><a class="btn" href="/library">脚本管理</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a><button class="primary" id="sync-now" type="button">立刻同步 Creator</button>`}}
+function adminTabs(){{return libraryMode?`<div class="ops-tabs"><a class="active" href="/library">脚本管理</a><a class="${{activeTab==="imports"?"active":""}}" href="/creator-admin/imports">导入脚本</a><a href="/creator-admin/creators">创作者管理</a><a href="/creator-admin/submissions">回传数据</a><a href="/creator-admin/intakes">作者信息收集</a></div>`:`<div class="ops-tabs"><a class="${{activeTab==="imports"?"active":""}}" href="/creator-admin/imports">导入脚本</a><a class="${{activeTab==="creators"?"active":""}}" href="/creator-admin/creators">创作者管理</a><a class="${{activeTab==="submissions"?"active":""}}" href="/creator-admin/submissions">回传数据</a><a class="${{activeTab==="intakes"?"active":""}}" href="/creator-admin/intakes">作者信息收集</a></div>`}}
+function adminView(){{app.innerHTML=`<section class="shell"><div class="panel"><div class="top"><div><span class="kicker">${{adminKicker()}}</span><h1>${{adminTitle()}}</h1><p class="copy">${{adminCopy()}}</p></div><div class="nav">${{adminNav()}}</div></div>${{adminTabs()}}<div id="tab-body"></div></div></section>`;document.querySelector("#sync-now").addEventListener("click",syncNow);renderActiveTab()}}
 function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="imports"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">导入标准脚本 Excel</h2><p class="copy">上传包含 Vídeo original / Conteúdo principal / Pontos principais / Partes que podem ser adaptadas / Tempo / Imagem / Ações / Diálogos 的 .xlsx。系统会自动拆分多条脚本，生成葡语脚本页，调用 Gemini 慢慢生成 3x3 分镜图，并同步到 Creator 前台。分类选择如果保留在“待分类”，后台会自动用大模型判断脚本类型；如果你手动选择了具体类型，则优先按手动类型导入。</p></div><form class="import-form" id="import-form"><input id="import-file" type="file" accept=".xlsx"><select id="import-content-type">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">上传并导入</button></form><p id="status" class="status"></p><div id="import-job"></div></section>`;document.querySelector("#import-form").addEventListener("submit",submitImport);renderImportJob();return}}if(activeTab==="creators"){{body.innerHTML=`<form class="creator-form" id="creator-form"><input name="kwai_url" placeholder="粘贴 Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><select name="category">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">导入作者</button></form><p id="status" class="status"></p><div id="creator-list" class="grid"></div>`;document.querySelector("#creator-form").addEventListener("submit",createCreator);renderCreators();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",loadSubmissions);document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><div id="script-scope-filters" class="quick-filters"></div><div id="script-type-filters" class="quick-filters"></div><p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",renderList);document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderScriptScopeFilters();renderScriptTypeFilters();renderList()}}
 function scriptScopeOptions(){{return [{{key:"portal_visible",label:"前台展示中"}},{{key:"hidden",label:"已下架"}},{{key:"incomplete",label:"信息不完整"}},{{key:"all",label:"全部"}}]}}
 function renderScriptScopeFilters(){{const box=document.querySelector("#script-scope-filters");if(!box)return;box.innerHTML=scriptScopeOptions().map(option=>`<button class="quick-filter-chip ${{activeScriptScope===option.key?"active":""}}" type="button" data-scope-filter="${{option.key}}"><span>${{option.label}}</span> <small>${{Number(scriptScopeCounts?.[option.key]||0)}}</small></button>`).join("")}}
@@ -14738,7 +14743,17 @@ async function logout(){{await api("/creator-admin/logout",{{method:"POST",body:
 document.addEventListener("submit",async e=>{{if(e.target.id==="login-form"){{e.preventDefault();try{{await api("/creator-admin/login",{{method:"POST",body:JSON.stringify({{password:new FormData(e.target).get("password")}})}});await loadCurrentTab()}}catch(err){{loginView(err.message)}}}}}});
 document.addEventListener("click",async e=>{{const tab=e.target.closest("[data-tab-main]");if(tab){{activeTab=tab.dataset.tabMain;if(activeTab==="creators"){{await loadCreators()}}else if(activeTab==="submissions"){{await loadSubmissions()}}else if(activeTab==="intakes"){{await loadIntakes()}}else adminView();return}}const scopeFilter=e.target.closest("[data-scope-filter]");if(scopeFilter){{activeScriptScope=scopeFilter.dataset.scopeFilter||"portal_visible";activeScriptType="";await loadEntries();return}}const typeFilter=e.target.closest("[data-type-filter]");if(typeFilter){{activeScriptType=typeFilter.dataset.typeFilter||"";renderScriptTypeFilters();renderList();return}}const copy=e.target.closest("[data-copy]");if(copy){{await navigator.clipboard?.writeText(copy.dataset.copy).catch(()=>null);copy.textContent="已复制";return}}const delCreator=e.target.closest("[data-delete-creator]");if(delCreator){{if(confirm("确定删除这个创作者吗？")){{await api(`/api/creator-admin/creators/${{delCreator.dataset.deleteCreator}}`,{{method:"DELETE"}});await loadCreators()}}return}}const refresh=e.target.closest("[data-refresh-creator]");if(refresh){{const c=creators.find(x=>x.profile_id===refresh.dataset.refreshCreator);if(c){{await api(`/api/creator-admin/creators/${{c.profile_id}}`,{{method:"POST",body:JSON.stringify({{kwai_url:c.kwai_url,categories:c.categories||[]}})}});await loadCreators()}}return}}const edit=e.target.closest("[data-edit]");if(edit)openEdit(edit.dataset.edit);const toggle=e.target.closest("[data-toggle]");if(toggle)togglePublish(toggle.dataset.toggle)}});document.querySelector("#edit-cancel").addEventListener("click",()=>modal.classList.remove("open"));form.addEventListener("submit",saveEdit);loadCurrentTab();
 </script></body></html>"""
-    return template.replace("{{", "{").replace("}}", "}").replace("__CREATOR_BASE__", CREATOR_CENTER_BASE_URL).replace("__INITIAL_TAB__", initial_tab_json).replace("__FAVICON_LINKS__", FAVICON_LINKS)
+    html = (
+        template.replace("{{", "{")
+        .replace("}}", "}")
+        .replace("__CREATOR_BASE__", CREATOR_CENTER_BASE_URL)
+        .replace("__INITIAL_TAB__", initial_tab_json)
+        .replace("__LIBRARY_MODE__", library_mode_json)
+        .replace("__FAVICON_LINKS__", FAVICON_LINKS)
+    )
+    if library_mode:
+        html = html.replace("<title>Koko Creator 运营后台</title>", "<title>Koko 脚本管理</title>")
+    return html
 
 
 CREATOR_QUESTIONS = [
@@ -15758,7 +15773,12 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_html(stats_html())
             return
         if parsed.path == "/library":
-            self.send_html(library_html())
+            self.send_html(creator_admin_html("scripts", library_mode=True))
+            return
+        if parsed.path == "/creator-admin/scripts":
+            self.send_response(302)
+            self.send_header("Location", "/library")
+            self.end_headers()
             return
         creator_admin_tab = creator_admin_tab_for_path(parsed.path)
         if creator_admin_tab:
@@ -16002,10 +16022,15 @@ class AppHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if parsed.path == "/library":
-            body = library_html().encode("utf-8")
+            body = creator_admin_html("scripts", library_mode=True).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return
+        if parsed.path == "/creator-admin/scripts":
+            self.send_response(302)
+            self.send_header("Location", "/library")
             self.end_headers()
             return
         creator_admin_tab = creator_admin_tab_for_path(parsed.path)
