@@ -2968,7 +2968,8 @@ CONTENT_TYPE_CLASSIFY_PROMPT = f"""你是一个短视频脚本分类器。
 2. 故事梗概（whole_video_summary）
 3. 包袱机制原因
 4. 可选的替换方案
-5. 可选的路由说明
+5. 脚本表最后时间码推导出的时长信息
+6. 可选的路由说明
 
 你的任务不是改写脚本，而是根据“最终语义”从固定分类白名单里选一个最合适的类型。
 
@@ -2979,6 +2980,7 @@ CONTENT_TYPE_CLASSIFY_PROMPT = f"""你是一个短视频脚本分类器。
 4. `家庭整蛊`：父母、孩子、兄弟姐妹、亲戚、婆媳等家庭成员是主轴。
 5. `朋友整蛊`：朋友、同事、老板员工、顾客、邻居、路人、公共场景、街头骗局、偷手机、便利店、世界杯等非夫妻/非家庭脚本都归到这里。
 6. 如果证据不够或无法归类，也选 `朋友整蛊`，不要输出其他标签。
+7. 时长信息只作为辅助理解脚本结构，不允许输出时间作为分类标签。
 
 输出严格 JSON：
 {{
@@ -3002,11 +3004,16 @@ def classify_content_type_with_llm(
     if not key or run_text_json_prompt_with_fallback is None:
         return None
     routing = (bundle or {}).get("routing") or script.get("type_router") or {}
+    duration_seconds = script_duration_seconds(script)
+    duration_bucket = creator_duration_bucket(duration_seconds)
     payload = {
         "title": script.get("title") or "",
         "whole_video_summary": script.get("whole_video_summary") or "",
         "summary": script.get("summary") or "",
         "mechanism_reason": ((script.get("mechanism") or {}).get("reason") or ""),
+        "duration_seconds": round(duration_seconds, 2) if duration_seconds > 0 else 0,
+        "duration_bucket": duration_bucket,
+        "duration_label_pt": CREATOR_DURATION_LABELS.get(duration_bucket, {}).get("pt", ""),
         "key_points": script.get("key_points") or script.get("points") or [],
         "replaceable_parts": script.get("replaceable_parts") or [],
         "script_rows": (script.get("rows") or script.get("script_table") or [])[:12] if isinstance(script.get("rows") or script.get("script_table") or [], list) else [],
@@ -4242,6 +4249,34 @@ def update_library_entry_content_type(entry_id: str, content_type: str) -> dict[
                 job["updated_at"] = now_iso()
         save_jobs()
     return updated_entry
+
+
+def apply_manual_item_content_type(parent_job_id: str, item_index: int, content_type: object) -> None:
+    raw_selected = str(content_type or "").strip()
+    if not raw_selected:
+        return
+    selected = raw_selected if raw_selected in ALLOWED_CONTENT_TYPES else normalize_creator_content_type(raw_selected)
+    if selected not in ALLOWED_CONTENT_TYPES:
+        return
+    with job_lock:
+        if parent_job_id not in jobs:
+            return
+        job = jobs[parent_job_id]
+        items = job.get("items") or []
+        item = items[item_index] if 0 <= item_index < len(items) else None
+        if item is not None:
+            item["content_type"] = selected
+            item["content_type_source"] = "manual"
+            item["content_type_reasoning"] = "Manual selection before library save"
+            item["content_type_confidence"] = "manual"
+            item["updated_at"] = now_iso()
+        if item is None or job.get("id") == item.get("id") or len(items) == 1:
+            job["content_type"] = selected
+            job["content_type_source"] = "manual"
+            job["content_type_reasoning"] = "Manual selection before library save"
+            job["content_type_confidence"] = "manual"
+            job["updated_at"] = now_iso()
+        save_jobs()
 
 
 def generate_script_variant_outputs(output_dir: Path, item_id: str, script_json: dict[str, Any], video_url: str, *, locale: str) -> dict[str, Any]:
@@ -7821,7 +7856,7 @@ def regenerate_item_outputs(
                 save_jobs()
             item = jobs[parent_job_id]["items"][item_index]
         if persist_library:
-            persist_library_entry(parent_job_id, item, use_llm=False)
+            persist_library_entry(parent_job_id, item, use_llm=True)
         elif library_entry_exists(item_id):
             sync_library_entry_from_item(parent_job_id, item, use_llm=False, delete_source=False)
         return public_item_view(item)
@@ -10084,6 +10119,28 @@ def studio_html() -> str:
       font-size: 13px;
       line-height: 1.6;
       color: var(--muted);
+    }}
+    .manual-tag-picker {{
+      display: grid;
+      gap: 6px;
+      min-width: min(260px, 100%);
+    }}
+    .manual-tag-picker label {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .manual-tag-picker select {{
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid rgba(255,130,0,.20);
+      border-radius: 14px;
+      background: rgba(255,255,255,.94);
+      color: var(--ink);
+      padding: 0 12px;
+      font-size: 13px;
+      font-weight: 800;
+      outline: none;
     }}
     .library-confirm-card.done {{
       border-color: rgba(21,115,71,.22);
@@ -12485,6 +12542,28 @@ def studio_html() -> str:
       }});
     }}
 
+    const CONTENT_TYPE_OPTIONS = {json.dumps(LIBRARY_FILTER_LABELS, ensure_ascii=False)};
+
+    function manualTagPickerMarkup(item, compact = false) {{
+      const manualValue = item.content_type_source === "manual" ? (item.content_type || "") : "";
+      const options = [`<option value="">自动判断分类</option>`, ...CONTENT_TYPE_OPTIONS.map((label) => {{
+        return `<option value="${{escapeHtml(label)}}" ${{label === manualValue ? "selected" : ""}}>${{escapeHtml(label)}}</option>`;
+      }})].join("");
+      return `
+        <div class="manual-tag-picker">
+          <label>${{compact ? "入库分类 tag" : "分类 tag（不选则 AI 自动判断）"}}</label>
+          <select data-manual-content-type="${{item.id}}">
+            ${{options}}
+          </select>
+        </div>
+      `;
+    }}
+
+    function selectedManualContentType(itemId, root = document) {{
+      const value = root.querySelector(`[data-manual-content-type="${{itemId}}"]`)?.value || "";
+      return CONTENT_TYPE_OPTIONS.includes(value) ? value : "";
+    }}
+
     function buildLibraryConfirmMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const alreadySaved = Boolean(item.saved_to_library_at || item.in_library);
@@ -12505,6 +12584,7 @@ def studio_html() -> str:
             <div class="library-confirm-title">确认入库</div>
             <div class="library-confirm-note">确认这个版本可用后，Koko 会自动生成全葡语版本并写入脚本库。</div>
           </div>
+          ${{manualTagPickerMarkup(item)}}
           <button class="action-link primary" type="button" data-confirm-library="${{item.id}}">转葡语并入库</button>
         </div>
       `;
@@ -12522,6 +12602,7 @@ def studio_html() -> str:
           </summary>
           <div class="editor-shell" data-editor-item="${{item.id}}" data-editor-lang="${{escapeHtml(item.display_language || "zh")}}" data-editor-rows="${{rowsJson}}">
             <textarea class="editor-textarea editor-draft-textarea" data-editor-draft spellcheck="false">${{escapeHtml(draft)}}</textarea>
+            ${{manualTagPickerMarkup(item, true)}}
             <div class="link-row">
               <button class="action-link" type="button" data-save-edits="${{item.id}}">保存修改</button>
               <button class="action-link primary" type="button" data-save-library="${{item.id}}">保存修改并转葡语入库</button>
@@ -12606,6 +12687,7 @@ def studio_html() -> str:
           </section>
           <input type="hidden" data-edit-field="mechanism_reason" value="${{escapeHtml(normalizedText(mechanismReason))}}">
           <div class="link-row structured-editor-actions">
+            ${{manualTagPickerMarkup(item, true)}}
             <button class="action-link primary" type="button" data-save-edits="${{item.id}}">保存当前编辑</button>
             <button class="action-link" type="button" data-save-library="${{item.id}}">${{librarySaveLabel}}</button>
           </div>
@@ -12745,6 +12827,7 @@ def studio_html() -> str:
           replaceable_parts: replaceableParts,
           rows,
           target_language: root.getAttribute("data-editor-lang") || "zh",
+          content_type: selectedManualContentType(itemId, root),
         }};
         return payload;
       }}
@@ -12765,6 +12848,7 @@ def studio_html() -> str:
           replaceable_parts: parseInsightDraft(textOf("替换方案") || textOf("可替换部分")),
           rows: parseScriptRowsDraft(textOf("脚本表"), originalRows),
           target_language: root.getAttribute("data-editor-lang") || "zh",
+          content_type: selectedManualContentType(itemId, root),
       }};
     }}
 
@@ -12843,11 +12927,12 @@ def studio_html() -> str:
       const original = button.textContent;
       button.disabled = true;
       button.textContent = "入库中...";
+      const scope = button.closest("[data-library-confirm-card]") || document;
       try {{
         const response = await fetch(`/api/items/${{itemId}}/confirm-library`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{}}),
+          body: JSON.stringify({{ content_type: selectedManualContentType(itemId, scope) }}),
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Confirm library failed");
@@ -16373,6 +16458,11 @@ class AppHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "Only completed scripts can be added to the library."}, status=400)
                     return
                 try:
+                    apply_manual_item_content_type(parent_job_id, item_index, payload.get("content_type"))
+                    refreshed_context = find_item_context(item_id)
+                    if not refreshed_context:
+                        raise RuntimeError("Script item not found.")
+                    parent_job_id, item_index, item = refreshed_context
                     ensure_storyboard_cover_ready(item_id)
                     refreshed_context = find_item_context(item_id)
                     if not refreshed_context:
@@ -16401,6 +16491,11 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 target_language = str(payload.get("target_language") or item.get("display_language") or "zh").strip().lower()
                 updated_script = apply_script_edits(item.get("result_json") or {}, payload)
+                apply_manual_item_content_type(parent_job_id, item_index, payload.get("content_type"))
+                refreshed_context = find_item_context(item_id)
+                if not refreshed_context:
+                    raise RuntimeError("Script item not found.")
+                parent_job_id, item_index, item = refreshed_context
                 if action == "save-to-library":
                     if target_language == "pt":
                         pt_item = regenerate_item_outputs(
