@@ -1703,6 +1703,52 @@ def parse_duration_seconds(duration_text: object) -> float:
     return hours * 3600 + minutes * 60 + seconds
 
 
+CREATOR_DURATION_LABELS = {
+    "dur_1_20": {"pt": "1-20 s", "zh": "1-20 秒"},
+    "dur_20_60": {"pt": "20 s-1 min", "zh": "20 秒-1 分钟"},
+    "dur_60_120": {"pt": "1-2 min", "zh": "1-2 分钟"},
+    "dur_120_plus": {"pt": "Mais de 2 min", "zh": "2 分钟以上"},
+}
+
+
+def parse_script_timecode_seconds(value: object) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    nums = [int(part) for part in re.findall(r"\d+", text)]
+    if len(nums) >= 3:
+        return float(nums[-3] * 3600 + nums[-2] * 60 + nums[-1])
+    if len(nums) >= 2:
+        return float(nums[-2] * 60 + nums[-1])
+    if nums:
+        return float(nums[-1])
+    return 0.0
+
+
+def creator_duration_bucket(seconds: float) -> str:
+    if seconds <= 0:
+        return ""
+    if seconds <= 20:
+        return "dur_1_20"
+    if seconds <= 60:
+        return "dur_20_60"
+    if seconds <= 120:
+        return "dur_60_120"
+    return "dur_120_plus"
+
+
+def script_duration_seconds(script_json: dict[str, Any]) -> float:
+    rows = script_json.get("segments") or script_json.get("rows") or script_json.get("script_table") or []
+    if not isinstance(rows, list):
+        return 0.0
+    values = [
+        parse_script_timecode_seconds(row.get("time") or row.get("tempo") or row.get("Tempo") or "")
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    return max(values) if values else 0.0
+
+
 def download_url_to_file(url: str, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -3716,6 +3762,8 @@ def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
             use_llm=True,
             use_keyword_fallback=False,
         )
+    duration_seconds = script_duration_seconds(script_json)
+    duration_bucket = creator_duration_bucket(duration_seconds)
     imported_entry = {
         "entry_id": entry_id,
         "parent_job_id": str(entry.get("parent_job_id") or f"creator_import_{entry_id}"),
@@ -3727,6 +3775,10 @@ def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "content_type_source": str(content_type_decision.get("content_type_source") or "auto"),
         "content_type_reasoning": str(content_type_decision.get("content_type_reasoning") or "Imported from Creator admin Excel."),
         "content_type_confidence": str(content_type_decision.get("content_type_confidence") or "medium"),
+        "duration_seconds": round(duration_seconds, 2) if duration_seconds > 0 else 0,
+        "duration_bucket": duration_bucket,
+        "duration_label_pt": CREATOR_DURATION_LABELS.get(duration_bucket, {}).get("pt", ""),
+        "duration_label_zh": CREATOR_DURATION_LABELS.get(duration_bucket, {}).get("zh", ""),
         "whole_video_summary": str(entry.get("whole_video_summary") or script_json.get("whole_video_summary") or ""),
         "html_url": f"/results/{entry_id}/script_table_pt.html",
         "pt_html_url": f"/results/{entry_id}/script_table_pt.html",
@@ -3776,6 +3828,8 @@ def imported_creator_entry(
     content_type_confidence: str = "high",
 ) -> dict[str, Any]:
     content_type = content_type if content_type in ALLOWED_CONTENT_TYPES else DEFAULT_CONTENT_TYPE
+    duration_seconds = script_duration_seconds(script_json)
+    duration_bucket = creator_duration_bucket(duration_seconds)
     return {
         "entry_id": item_id,
         "parent_job_id": f"creator_import_{item_id}",
@@ -3786,6 +3840,10 @@ def imported_creator_entry(
         "content_type_source": str(content_type_source or "manual"),
         "content_type_reasoning": str(content_type_reasoning or "Imported from standard Portuguese Excel script table."),
         "content_type_confidence": str(content_type_confidence or "high"),
+        "duration_seconds": round(duration_seconds, 2) if duration_seconds > 0 else 0,
+        "duration_bucket": duration_bucket,
+        "duration_label_pt": CREATOR_DURATION_LABELS.get(duration_bucket, {}).get("pt", ""),
+        "duration_label_zh": CREATOR_DURATION_LABELS.get(duration_bucket, {}).get("zh", ""),
         "whole_video_summary": script_json.get("whole_video_summary") or "",
         "html_url": variant.get("html_url") or "",
         "pt_html_url": variant.get("html_url") or "",
