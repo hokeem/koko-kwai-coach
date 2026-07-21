@@ -5678,7 +5678,7 @@ def creator_admin_remote_json(path: str, *, method: str = "GET", payload: dict[s
             },
         )
         try:
-            with opener.open(request, timeout=35) as response:
+            with opener.open(request, timeout=120) as response:
                 chunks: list[bytes] = []
                 while True:
                     try:
