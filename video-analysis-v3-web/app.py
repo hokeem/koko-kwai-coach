@@ -6019,6 +6019,41 @@ def write_product_outputs(job_id: str, output_dir: Path, result_json: dict[str, 
     }
 
 
+def build_understanding_summary(script_json: dict[str, Any] | None, video_url: str = "") -> str:
+    script = script_json if isinstance(script_json, dict) else {}
+    candidates = [
+        script.get("whole_video_summary"),
+        script.get("content_summary"),
+        script.get("summary"),
+        (script.get("mechanism") or {}).get("summary") if isinstance(script.get("mechanism"), dict) else "",
+        (script.get("story_analysis") or {}).get("safe_final_story") if isinstance(script.get("story_analysis"), dict) else "",
+    ]
+    for value in candidates:
+        text = compact_cell_text(str(value or ""))
+        if text:
+            return text
+    rows = script.get("rows")
+    if isinstance(rows, list):
+        fragments: list[str] = []
+        for row in rows[:6]:
+            if not isinstance(row, dict):
+                continue
+            fragments.extend(
+                compact_cell_text(str(row.get(key) or ""))
+                for key in ["visual_content", "action", "dialogue_or_audio", "integrated_summary"]
+                if row.get(key)
+            )
+        text = compact_cell_text("；".join(fragment for fragment in fragments if fragment))
+        if text:
+            return text[:520]
+    title = compact_cell_text(str(script.get("title") or ""))
+    if title:
+        return f"这个视频的核心内容是：{title}"
+    if video_url:
+        return f"已经完成视频理解，但没有提取到稳定的文字概要。原链接：{video_url}"
+    return "已经完成视频理解，但没有提取到稳定的文字概要。"
+
+
 def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
     item_id = str(item.get("id") or "").strip()
     source_video_path = RESULTS_ROOT / item_id / SOURCE_VIDEO_NAME if item_id else Path()
@@ -6051,6 +6086,8 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "content_type_reasoning": item.get("content_type_reasoning") or "",
         "content_type_confidence": item.get("content_type_confidence") or "",
         "title": item.get("title") or "",
+        "understanding_summary": item.get("understanding_summary")
+        or build_understanding_summary(item.get("result_json") or item.get("zh_result_json"), item.get("video_url") or ""),
         "display_language": item.get("display_language") or "zh",
         "review_status": item.get("review_status") or "",
         "review_stage": item.get("review_stage") or "",
@@ -8379,11 +8416,24 @@ def run_job_batch(job_id: str) -> None:
     try:
         update_job(job_id, status="running", started_at=now_iso(), stage="queued", stage_message="Batch task started.")
         items = jobs[job_id]["items"]
+        understanding_mode = str(jobs[job_id].get("mode") or "").strip() == "understanding"
         for idx, item in enumerate(items):
             retry_attempt = 0
             while True:
                 execute_single_pipeline(job_id, idx, item)
                 current_item = jobs[job_id]["items"][idx]
+                if understanding_mode and current_item.get("status") == "completed":
+                    summary = build_understanding_summary(
+                        current_item.get("result_json") or current_item.get("zh_result_json"),
+                        current_item.get("video_url") or "",
+                    )
+                    update_job_item(
+                        job_id,
+                        idx,
+                        understanding_summary=summary,
+                        stage_message="视频理解已完成。",
+                    )
+                    current_item = jobs[job_id]["items"][idx]
                 transient_error = current_item.get("raw_error") or current_item.get("error") or ""
                 if (
                     current_item.get("status") == "failed"
@@ -8444,7 +8494,9 @@ def run_job_batch(job_id: str) -> None:
         update_job(job_id, status="failed", error=friendly_error(str(exc)), completed_at=now_iso(), stage="failed", stage_message="Batch failed.")
 
 
-def create_job(video_urls: list[str]) -> dict[str, Any]:
+def create_job(video_urls: list[str], mode: str = "") -> dict[str, Any]:
+    normalized_mode = str(mode or "").strip().lower()
+    job_mode = "understanding" if normalized_mode == "understanding" else ("batch" if len(video_urls) > 1 else "single")
     job_id = uuid4().hex
     items = []
     for index, video_url in enumerate(video_urls):
@@ -8479,6 +8531,7 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
                 "content_type_reasoning": "",
                 "content_type_confidence": "",
                 "title": "",
+                "understanding_summary": "",
                 "review_status": "",
                 "review_stage": "",
                 "review_message": "",
@@ -8490,7 +8543,7 @@ def create_job(video_urls: list[str]) -> dict[str, Any]:
         )
     job = {
         "id": job_id,
-        "mode": "batch" if len(video_urls) > 1 else "single",
+        "mode": job_mode,
         "video_url": video_urls[0] if len(video_urls) == 1 else "",
         "video_urls": video_urls,
         "status": "queued",
@@ -11502,6 +11555,7 @@ def studio_html() -> str:
         <a class="studio-tab-link" href="/" data-nav-kind="home"><span class="studio-tab-icon">⌂</span><span>返回落地页</span></a>
         <a class="studio-tab-link" href="#filter-panel" data-panel-target="filter-panel"><span class="studio-tab-icon">⌕</span><span>视频筛选</span></a>
         <a class="studio-tab-link active" href="#split-panel" data-panel-target="split-panel"><span class="studio-tab-icon">▶</span><span>视频拆解</span></a>
+        <a class="studio-tab-link" href="#understanding-panel" data-panel-target="understanding-panel"><span class="studio-tab-icon">◌</span><span>视频理解</span></a>
         <a class="studio-tab-link" href="#translate-panel" data-panel-target="translate-panel"><span class="studio-tab-icon">◉</span><span>葡语转译</span></a>
         <a class="studio-tab-link" href="#stats-panel" data-panel-target="stats-panel"><span class="studio-tab-icon">▥</span><span>数据看板</span></a>
         <a class="studio-tab-link" href="/library"><span class="studio-tab-icon">☰</span><span>脚本管理</span></a>
@@ -11596,6 +11650,40 @@ def studio_html() -> str:
         </section>
       </section>
 
+      <section id="understanding-panel" class="studio-panel">
+        <div class="studio-card studio-task-card">
+          <div class="studio-card-head">
+            <div>
+              <h2>视频理解</h2>
+              <p>粘贴 Kwai 视频链接后，Koko 会沿用 Gemini 与 v3 双链路拆解并交叉校验，但这里只输出视频核心内容概述。</p>
+            </div>
+          </div>
+          <div class="composer-block">
+            <div class="composer">
+              <div class="composer-head">
+                <div></div>
+              </div>
+              <label for="understanding-url">视频链接 <span style="font-weight:500;color:rgba(31,31,31,.50)">（每行粘贴一个链接）</span></label>
+              <textarea id="understanding-url" placeholder="每行粘贴一个链接&#10;https://www.kwai.com/@.../video/...&#10;https://www.kwai.com/@.../video/..."></textarea>
+              <div class="studio-helper-chips" aria-label="理解任务提示">
+                <span class="studio-helper-chip"> Gemini 主分析</span>
+                <span class="studio-helper-chip"> v3 对照验证</span>
+                <span class="studio-helper-chip"> 只输出内容概述</span>
+              </div>
+              <div class="actions">
+                <button id="understanding-submit-btn">开始理解视频 ▶</button>
+              </div>
+            </div>
+          </div>
+          <div id="understanding-status-box" class="status-box">
+            <div class="status-empty">
+              <div class="status-empty-title">视频理解已就绪。</div>
+              <div class="status-empty-copy">输入一个或多个视频链接后，系统会显示同款拆解进度，完成后只给出脚本内容概述。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="translate-panel" class="studio-panel">
         <div class="studio-card">
           <div class="studio-card-head">
@@ -11666,6 +11754,9 @@ def studio_html() -> str:
     const submitBtn = document.getElementById("submit-btn");
     const stopAllBtn = document.getElementById("stop-all-btn");
     const statusBox = document.getElementById("status-box");
+    const understandingInput = document.getElementById("understanding-url");
+    const understandingSubmitBtn = document.getElementById("understanding-submit-btn");
+    const understandingStatusBox = document.getElementById("understanding-status-box");
     const studioPanelLinks = Array.from(document.querySelectorAll("[data-panel-target]"));
     const studioPanels = Array.from(document.querySelectorAll(".studio-panel"));
     const heroPanel = document.querySelector(".hero-panel");
@@ -11711,12 +11802,21 @@ def studio_html() -> str:
         <div class="status-empty-copy">贴入一批链接或上传表格后，Koko 会提取完整音频信息和三张关键帧，再输出通过三轮规则的视频。</div>
       </div>
     `;
+    const UNDERSTANDING_IDLE_HTML = `
+      <div class="status-empty">
+        <div class="status-empty-title">视频理解已就绪。</div>
+        <div class="status-empty-copy">输入一个或多个视频链接后，系统会显示同款拆解进度，完成后只给出脚本内容概述。</div>
+      </div>
+    `;
     let activeFilterJobId = "";
     let filterPollTimer = null;
     const ACTIVE_FILTER_JOB_STORAGE_KEY = "koko_active_filter_job_id";
     let activeTranslationJobId = "";
     let translationPollTimer = null;
     const ACTIVE_TRANSLATION_JOB_STORAGE_KEY = "koko_active_translation_job_id";
+    let activeUnderstandingJobId = "";
+    let understandingPollTimer = null;
+    const ACTIVE_UNDERSTANDING_JOB_STORAGE_KEY = "koko_active_understanding_job_id";
 
     function setStudioPanel(panelId) {{
       const target = String(panelId || "filter-panel").trim() || "filter-panel";
@@ -11943,6 +12043,35 @@ def studio_html() -> str:
       if (!translationStatusBox) return;
       translationStatusBox.className = ready ? "status-box visible ready" : "status-box visible";
       translationStatusBox.innerHTML = html;
+    }}
+
+    function setUnderstandingStatus(html, ready = false) {{
+      if (!understandingStatusBox) return;
+      understandingStatusBox.className = ready ? "status-box visible ready" : "status-box visible";
+      understandingStatusBox.innerHTML = html;
+    }}
+
+    function persistActiveUnderstandingJobId(jobId) {{
+      const value = String(jobId || "").trim();
+      try {{
+        if (!value) window.localStorage.removeItem(ACTIVE_UNDERSTANDING_JOB_STORAGE_KEY);
+        else window.localStorage.setItem(ACTIVE_UNDERSTANDING_JOB_STORAGE_KEY, value);
+      }} catch (error) {{
+        // Ignore storage failures.
+      }}
+    }}
+
+    function readPersistedActiveUnderstandingJobId() {{
+      try {{
+        return String(window.localStorage.getItem(ACTIVE_UNDERSTANDING_JOB_STORAGE_KEY) || "").trim();
+      }} catch (error) {{
+        return "";
+      }}
+    }}
+
+    function scheduleUnderstandingPoll(jobId, delay = 2500) {{
+      if (understandingPollTimer) clearTimeout(understandingPollTimer);
+      understandingPollTimer = setTimeout(() => pollUnderstandingJob(jobId), delay);
     }}
 
     function persistActiveTranslationJobId(jobId) {{
@@ -12385,8 +12514,8 @@ def studio_html() -> str:
       return (items || []).find((item) => itemState(item) === "running") || null;
     }}
 
-    function collectUrls() {{
-      return String(videoInput.value || "")
+    function collectUrls(inputNode = videoInput) {{
+      return String(inputNode?.value || "")
         .split(/[\\n\\r,]+/)
         .map((value) => value.trim())
         .filter((value, index, arr) => value && /^https?:\\/\\//i.test(value) && arr.indexOf(value) === index);
@@ -13628,6 +13757,89 @@ def studio_html() -> str:
       pollJob(activeJobId, {{ force: true }});
     }}
 
+    function renderUnderstandingResults(data) {{
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const status = deriveEffectiveJobStatus(data || {{}});
+      const currentItem = findCurrentItem(items);
+      const effectiveStage = status === "completed"
+        ? "completed"
+        : status === "failed"
+          ? "failed"
+          : (data?.stage || currentItem?.stage || "queued");
+      const summaryCards = items.filter((item) => item.status === "completed" || item.status === "failed").map((item, index) => {{
+        const summary = item.understanding_summary || item.result_json?.whole_video_summary || item.result_json?.summary || "";
+        const error = item.error ? `<div class="queue-error">${{escapeHtml(item.error)}}</div>` : "";
+        return `
+          <article class="queue-card ${{item.status === "completed" ? "current" : ""}}">
+            <div class="queue-card-top">
+              <div class="queue-index">视频 ${{index + 1}}</div>
+              <span class="queue-status ${{item.status === "completed" ? "completed" : "failed"}}">${{item.status === "completed" ? "已理解" : "失败"}}</span>
+            </div>
+            <h4 class="queue-title">${{escapeHtml(displayVideoName(item, index))}}</h4>
+            <div class="queue-url"><span class="queue-link-icon">🔗</span>${{escapeHtml(item.video_url || "")}}</div>
+            ${{summary ? `<div class="summary-box"><strong>脚本内容概述</strong><br>${{escapeHtml(summary)}}</div>` : ""}}
+            ${{error}}
+          </article>
+        `;
+      }}).join("");
+      const done = status === "completed";
+      const badgeClass = status === "completed" ? "status-completed" : status === "failed" ? "status-failed" : status === "running" ? "status-running" : "status-queued";
+      const title = status === "completed" ? "视频理解完成" : status === "failed" ? "视频理解失败" : status === "running" ? "视频理解中" : "排队中";
+      return `
+        <span class="status ${{badgeClass}}">${{title}}</span>
+        <br><br>
+        <div class="batch-dashboard">
+          ${{!done || !summaryCards ? `
+            <section class="batch-overview">
+              <div class="batch-overview-top">
+                <div class="batch-overview-copy">
+                  <div class="batch-overview-title">视频理解进度</div>
+                  <div class="focus-note">Koko 正在沿用完整拆解链路做理解校验，最终只输出内容概述。</div>
+                </div>
+                <span class="status ${{badgeClass}}">${{title}}</span>
+              </div>
+              ${{progressMarkup(effectiveStage, data?.stage_message || data?.message || currentItem?.stage_message || "正在理解视频。", data?.id || "", data)}}
+            </section>
+          ` : ""}}
+          <section class="queue-shell">
+            <div class="queue-header">
+              <h3>脚本内容概述</h3>
+              <p>这里不展示脚本表、复盘和编辑能力，只保留视频核心内容。</p>
+            </div>
+            <div class="queue-list">${{summaryCards || `<div class="status-empty"><div class="status-empty-title">还没有完成的视频。</div><div class="status-empty-copy">完成后会在这里显示内容概述。</div></div>`}}</div>
+          </section>
+        </div>
+      `;
+    }}
+
+    async function pollUnderstandingJob(jobId) {{
+      if (!jobId) return;
+      activeUnderstandingJobId = jobId;
+      persistActiveUnderstandingJobId(jobId);
+      try {{
+        const res = await fetch(`/api/jobs/${{jobId}}?_=${{Date.now()}}`, {{
+          cache: "no-store",
+          headers: {{
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache"
+          }}
+        }});
+        const data = await readJsonSafely(res);
+        if (!res.ok) throw new Error(data.error || "视频理解任务查询失败");
+        setUnderstandingStatus(renderUnderstandingResults(data), deriveEffectiveJobStatus(data) === "completed");
+        const effectiveStatus = deriveEffectiveJobStatus(data);
+        if (effectiveStatus === "completed" || effectiveStatus === "failed") {{
+          persistActiveUnderstandingJobId("");
+          activeUnderstandingJobId = "";
+          return;
+        }}
+        scheduleUnderstandingPoll(jobId);
+      }} catch (error) {{
+        setUnderstandingStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        scheduleUnderstandingPoll(jobId, 4000);
+      }}
+    }}
+
     function renderFilterResults(data) {{
       const items = Array.isArray(data?.items) ? data.items : [];
       const matchedLinks = Array.isArray(data?.matched_links) ? data.matched_links.filter(Boolean) : [];
@@ -13822,6 +14034,38 @@ def studio_html() -> str:
       }}
     }});
 
+    if (understandingSubmitBtn) {{
+      understandingSubmitBtn.addEventListener("click", async () => {{
+        const videoUrls = collectUrls(understandingInput);
+        if (!videoUrls.length) {{
+          setUnderstandingStatus("请先粘贴至少一个公开视频链接。");
+          return;
+        }}
+        understandingSubmitBtn.disabled = true;
+        setStudioPanel("understanding-panel");
+        setUnderstandingStatus("正在创建视频理解任务...");
+        try {{
+          const res = await fetch("/api/jobs", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ video_urls: videoUrls, mode: "understanding" }})
+          }});
+          const data = await readJsonSafely(res);
+          if (!res.ok) {{
+            throw new Error(data.error || "视频理解任务创建失败");
+          }}
+          activeUnderstandingJobId = data.id;
+          persistActiveUnderstandingJobId(data.id);
+          setUnderstandingStatus(`<span class="status status-queued">排队中</span><br><br>${{progressMarkup("queued", "任务已创建，正在准备理解视频。", data.id, data)}}`);
+          pollUnderstandingJob(data.id);
+        }} catch (error) {{
+          setUnderstandingStatus(`<span class="status status-failed">失败</span><br><br><code>${{escapeHtml(String(error.message || error))}}</code>`);
+        }} finally {{
+          understandingSubmitBtn.disabled = false;
+        }}
+      }});
+    }}
+
     if (filterSubmitBtn) {{
       filterSubmitBtn.addEventListener("click", async () => {{
         const directUrls = collectFilterUrls();
@@ -13982,11 +14226,28 @@ def studio_html() -> str:
       setFilterIdleState();
     }}
 
+    const restoredUnderstandingJobId = readPersistedActiveUnderstandingJobId();
+    if (restoredUnderstandingJobId) {{
+      activeUnderstandingJobId = restoredUnderstandingJobId;
+      setStudioPanel("understanding-panel");
+      pollUnderstandingJob(restoredUnderstandingJobId);
+    }} else {{
+      setUnderstandingStatus(UNDERSTANDING_IDLE_HTML, true);
+    }}
+
     videoInput.addEventListener("keydown", (event) => {{
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {{
         submitBtn.click();
       }}
     }});
+
+    if (understandingInput && understandingSubmitBtn) {{
+      understandingInput.addEventListener("keydown", (event) => {{
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {{
+          understandingSubmitBtn.click();
+        }}
+      }});
+    }}
 
     if (filterInput) {{
       filterInput.addEventListener("keydown", (event) => {{
@@ -16762,8 +17023,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if not AUTO_ANALYZE.exists():
             self.send_json({"error": f"Missing pipeline entrypoint: {AUTO_ANALYZE}"}, status=500)
             return
+        mode = str(payload.get("mode") or "").strip().lower()
         try:
-            job = create_job(video_urls)
+            job = create_job(video_urls, mode=mode)
         except Exception as exc:
             log_runtime_warning("analysis_job_create_failed", "Failed to create analysis job.", error=str(exc))
             status = 507 if is_no_space_error(exc) else 500
