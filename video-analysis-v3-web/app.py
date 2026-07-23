@@ -5349,11 +5349,34 @@ def stats_html() -> str:
       border:1px dashed rgba(255,130,0,.18); border-radius:18px; background:rgba(255,255,255,.56);
       padding:18px; font-size:14px; line-height:1.7; color:#FF8200;
     }}
+    .creator-analytics {{ display:flex; flex-direction:column; gap:16px; }}
+    .creator-analytics-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; }}
+    .creator-metric {{ border:1px solid rgba(255,130,0,.14); border-radius:22px; background:rgba(255,255,255,.68); padding:16px; box-shadow:0 16px 36px rgba(249,115,0,.08); }}
+    .creator-metric span {{ display:block; color:#FF8200; font-size:12px; font-weight:800; letter-spacing:.04em; }}
+    .creator-metric strong {{ display:block; margin-top:8px; color:#1F1F1F; font-size:34px; line-height:1; }}
+    .creator-row-grid {{ display:grid; grid-template-columns:1.1fr 1fr; gap:16px; }}
+    .creator-panel {{ border:1px solid rgba(255,130,0,.14); border-radius:24px; background:rgba(255,255,255,.68); padding:16px; overflow:hidden; }}
+    .creator-panel h3 {{ margin:0 0 12px; color:#1F1F1F; font-size:18px; letter-spacing:-.03em; }}
+    .creator-table {{ display:flex; flex-direction:column; gap:8px; }}
+    .creator-table-row {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; padding:11px 0; border-top:1px solid rgba(255,130,0,.10); color:#1F1F1F; }}
+    .creator-table-row:first-child {{ border-top:0; }}
+    .creator-table-row b {{ display:block; font-size:13px; line-height:1.35; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .creator-table-row small {{ display:block; margin-top:3px; color:#FF8200; opacity:.82; font-size:11px; line-height:1.45; }}
+    .creator-table-row code {{ color:#1F1F1F; background:rgba(255,130,0,.10); border-radius:999px; padding:5px 8px; font-size:12px; font-weight:800; }}
+    .creator-event-chips {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .creator-event-chip {{ display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:8px 11px; color:#FF8200; background:rgba(255,255,255,.72); border:1px solid rgba(255,130,0,.14); font-size:12px; font-weight:800; }}
+    .creator-event-chip em {{ color:#1F1F1F; font-style:normal; }}
+    .creator-daily {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; }}
+    .creator-day {{ border:1px solid rgba(255,130,0,.12); border-radius:18px; background:rgba(255,255,255,.62); padding:12px; }}
+    .creator-day b {{ color:#1F1F1F; font-size:13px; }}
+    .creator-day span {{ display:block; color:#FF8200; font-size:12px; line-height:1.65; margin-top:6px; }}
     @media (max-width: 760px) {{
       .stats-shell {{ padding: 12px; }}
       .stats-wrap {{ padding: 18px; }}
       .stats-day-summary {{ align-items:flex-start; }}
       .stats-item-row {{ flex-direction:column; }}
+      .creator-row-grid {{ grid-template-columns:1fr; }}
+      .creator-table-row b {{ white-space:normal; }}
     }}
   </style>
 </head>
@@ -5370,6 +5393,16 @@ def stats_html() -> str:
       <div class="stats-grid">{summary_cards}</div>
       <section class="stats-section">
         <div class="stats-section-head">
+          <div>
+            <h2>Creator 使用情况</h2>
+            <p>来自 kokocomedy 的前端埋点，按巴西时间聚合，脱敏统计访客与创作者行为。</p>
+          </div>
+          <button class="action-link" id="refresh-creator-analytics" type="button">刷新使用数据</button>
+        </div>
+        <div class="creator-analytics" id="creator-analytics"><div class="stats-empty">正在读取 kokocomedy 使用情况...</div></div>
+      </section>
+      <section class="stats-section">
+        <div class="stats-section-head">
           <h2>每日统计</h2>
           <p>按天展开查看具体脚本链接、生成时间以及后续操作情况</p>
         </div>
@@ -5384,6 +5417,54 @@ def stats_html() -> str:
         window.location.assign("/");
       }});
     }}
+    const escStats = (value) => String(value || "").replace(/[&<>"']/g, (c) => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
+    const metricCard = (label, value) => `<article class="creator-metric"><span>${{escStats(label)}}</span><strong>${{Number(value || 0).toLocaleString("zh-CN")}}</strong></article>`;
+    const row = (title, meta, value) => `<div class="creator-table-row"><div><b>${{escStats(title || "未命名")}}</b><small>${{escStats(meta || "")}}</small></div><code>${{escStats(value)}}</code></div>`;
+    function renderCreatorAnalytics(data) {{
+      const root = document.getElementById("creator-analytics");
+      if (!root) return;
+      const summary = data.summary || {{}};
+      const daily = data.daily || [];
+      const creators = data.creators || [];
+      const scripts = data.scripts || [];
+      const eventCounts = data.event_counts || [];
+      const recent = data.recent_events || [];
+      root.innerHTML = `
+        <div class="creator-analytics-grid">
+          ${{metricCard("昨日活跃创作者", summary.yesterday_active_creators)}}
+          ${{metricCard("昨日独立访客估算", summary.yesterday_unique_visitors)}}
+          ${{metricCard("昨日行为事件", summary.yesterday_events)}}
+          ${{metricCard("昨日回传", summary.yesterday_submissions)}}
+          ${{metricCard("累计行为事件", summary.total_events)}}
+          ${{metricCard("累计回传", summary.total_submissions)}}
+        </div>
+        <div class="creator-panel">
+          <h3>最近 14 天趋势</h3>
+          <div class="creator-daily">${{daily.slice(0,14).map(d => `<div class="creator-day"><b>${{escStats(d.date)}}</b><span>创作者 ${{d.active_creators || 0}} · 访客 ${{d.unique_visitors || 0}}<br>脚本 ${{d.scripts || 0}} · 事件 ${{d.events || 0}} · 回传 ${{d.submissions || 0}}</span></div>`).join("") || '<div class="stats-empty">暂无趋势数据。</div>'}}</div>
+        </div>
+        <div class="creator-row-grid">
+          <section class="creator-panel"><h3>活跃创作者</h3><div class="creator-table">${{creators.slice(0,10).map(c => row(c.creator_name || c.creator_id, `打开 ${{c.detail_views || 0}} · 收藏 ${{c.favorites || 0}} · 日历 ${{c.calendar_adds || 0}} · 分享 ${{c.shares || 0}} · 回传 ${{c.submissions || 0}}`, c.scripts || c.events || 0)).join("") || '<div class="stats-empty">还没有创作者行为。</div>'}}</div></section>
+          <section class="creator-panel"><h3>热门脚本</h3><div class="creator-table">${{scripts.slice(0,10).map(s => row(s.title || s.script_id, `曝光 ${{s.impressions || 0}} · 打开 ${{s.detail_views || 0}} · 收藏 ${{s.favorites || 0}} · 日历 ${{s.calendar_adds || 0}} · 分享 ${{s.shares || 0}} · 回传 ${{s.submissions || 0}}`, s.creators || s.events || 0)).join("") || '<div class="stats-empty">还没有脚本行为。</div>'}}</div></section>
+        </div>
+        <div class="creator-row-grid">
+          <section class="creator-panel"><h3>事件类型</h3><div class="creator-event-chips">${{eventCounts.slice(0,18).map(e => `<span class="creator-event-chip">${{escStats(e.event)}} <em>${{e.count || 0}}</em></span>`).join("") || '<div class="stats-empty">还没有事件。</div>'}}</div></section>
+          <section class="creator-panel"><h3>最近事件</h3><div class="creator-table">${{recent.slice(0,10).map(e => row(e.event, `${{e.creator_name || e.creator_id || "匿名"}} · ${{e.created_at || ""}}`, e.script_id ? "脚本" : "页面")).join("") || '<div class="stats-empty">还没有事件流水。</div>'}}</div></section>
+        </div>`;
+    }}
+    async function loadCreatorAnalytics() {{
+      const root = document.getElementById("creator-analytics");
+      if (root) root.innerHTML = '<div class="stats-empty">正在读取 kokocomedy 使用情况...</div>';
+      try {{
+        const res = await fetch(`/api/creator-admin/analytics?days=14&_=${{Date.now()}}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "读取失败");
+        renderCreatorAnalytics(data);
+      }} catch (err) {{
+        if (root) root.innerHTML = `<div class="stats-empty">${{escStats(err.message || err)}}<br>如果你还没登录 Creator 运营后台，请先打开 /creator-admin 登录一次。</div>`;
+      }}
+    }}
+    document.getElementById("refresh-creator-analytics")?.addEventListener("click", loadCreatorAnalytics);
+    loadCreatorAnalytics();
   </script>
 </body>
 </html>"""
@@ -16296,6 +16377,18 @@ class AppHandler(BaseHTTPRequestHandler):
                     payload["from_cache"] = True
                     payload["remote_error"] = payload.get("remote_error") or "Creator remote list is temporarily unavailable."
                     status = 200
+            self.send_json(payload, status=status)
+            return
+        if parsed.path == "/api/creator-admin/analytics":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台后查看 kokocomedy 使用情况。"}, status=401)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                days = max(1, min(90, int((query.get("days") or ["14"])[0] or "14")))
+            except Exception:
+                days = 14
+            status, payload = creator_admin_remote_json(f"/api/admin/analytics?{urllib.parse.urlencode({'days': days})}")
             self.send_json(payload, status=status)
             return
         if parsed.path == "/api/creator-admin/creators":
