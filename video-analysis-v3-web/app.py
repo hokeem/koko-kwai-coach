@@ -1189,6 +1189,10 @@ def load_library_entries() -> list[dict[str, Any]]:
             entry["storyboard_cover_url"] = storyboard_url
         if not entry.get("duration_bucket"):
             entry.update(creator_duration_fields(str(entry.get("entry_id") or "")))
+        if str(entry.get("location_tag") or "").strip() not in LOCATION_TAGS:
+            entry.update(infer_location_tag_fields(entry))
+        elif not entry.get("location_tag_pt"):
+            entry["location_tag_pt"] = LOCATION_TAG_PT.get(str(entry.get("location_tag") or "").strip(), "")
         share_url = creator_script_share_url(entry.get("entry_id"))
         if share_url:
             entry["creator_share_url"] = share_url
@@ -1716,6 +1720,114 @@ CREATOR_DURATION_LABELS = {
     "dur_60_120": {"pt": "1-2 min", "zh": "1-2 分钟"},
     "dur_120_plus": {"pt": "Mais de 2 min", "zh": "2 分钟以上"},
 }
+
+LOCATION_TAG_OPTIONS = [
+    {"zh": "室内房间", "pt": "Cômodo interno"},
+    {"zh": "乡村院子", "pt": "Quintal / rural"},
+    {"zh": "工地", "pt": "Obra / construção"},
+    {"zh": "酒馆", "pt": "Bar / boteco"},
+    {"zh": "超市", "pt": "Supermercado"},
+    {"zh": "药店", "pt": "Farmácia"},
+    {"zh": "房屋内外结合", "pt": "Casa: interno + externo"},
+]
+LOCATION_TAG_PT = {item["zh"]: item["pt"] for item in LOCATION_TAG_OPTIONS}
+LOCATION_TAGS = {item["zh"] for item in LOCATION_TAG_OPTIONS}
+
+
+def location_has_word(text: str, term: str) -> bool:
+    if re.search(r"[\u4e00-\u9fff]", term):
+        return term in text
+    return bool(re.search(rf"(?<![\wÀ-ÿ]){re.escape(term)}(?![\wÀ-ÿ])", text, flags=re.I))
+
+
+def location_score(text: str, terms: list[str]) -> int:
+    return sum(1 for term in terms if location_has_word(text, term))
+
+
+def flatten_script_text(value: Any, limit: int = 40000) -> str:
+    chunks: list[str] = []
+
+    def walk(item: Any) -> None:
+        if len(" ".join(chunks)) > limit:
+            return
+        if isinstance(item, dict):
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+        elif isinstance(item, str):
+            chunks.append(item)
+
+    walk(value)
+    return " ".join(chunks)[:limit]
+
+
+def library_script_json(entry_id: object) -> dict[str, Any]:
+    output_dir = RESULTS_ROOT / str(entry_id or "")
+    return (
+        read_json(output_dir / "script_table_pt.json")
+        or read_json(output_dir / "script_table.json")
+        or read_json(output_dir / "analysis_result.json")
+        or {}
+    )
+
+
+def infer_location_tag_fields(entry: dict[str, Any], script_json: dict[str, Any] | None = None) -> dict[str, str]:
+    current = str(entry.get("location_tag") or "").strip()
+    if current in LOCATION_TAGS:
+        return {
+            "location_tag": current,
+            "location_tag_pt": str(entry.get("location_tag_pt") or LOCATION_TAG_PT.get(current) or ""),
+            "location_tag_confidence": str(entry.get("location_tag_confidence") or "manual"),
+            "location_tag_source": str(entry.get("location_tag_source") or "existing"),
+            "location_tag_reasoning": str(entry.get("location_tag_reasoning") or "Existing location tag."),
+        }
+    text = " ".join(
+        [
+            str(entry.get("title") or ""),
+            str(entry.get("whole_video_summary") or ""),
+            str(entry.get("summary") or ""),
+            str(entry.get("content_type_reasoning") or ""),
+            flatten_script_text(script_json or library_script_json(entry.get("entry_id"))),
+        ]
+    ).lower()
+    terms = {
+        "室内房间": ["quarto", "sala", "cozinha", "banheiro", "cama", "sofá", "sofa", "mesa", "tapete", "lavanderia", "casa", "apartamento", "hospital", "consultório", "consultorio", "室内", "房间", "卧室", "客厅", "厨房", "浴室", "卫生间", "床", "沙发", "洗衣房", "医院", "诊所"],
+        "乡村院子": ["quintal", "roça", "roca", "rural", "fazenda", "sítio", "sitio", "terreiro", "milho", "plantação", "plantacao", "horta", "campo", "curral", "galinha", "院子", "乡村", "农村", "农田", "玉米地", "田地", "菜地", "后院", "农家"],
+        "工地": ["obra", "construção", "construcao", "pedreiro", "cimento", "tijolo", "andaime", "reforma", "capacete", "martelo", "工地", "施工", "建筑", "装修", "水泥", "砖", "脚手架", "安全帽"],
+        "酒馆": ["bar", "boteco", "pub", "balcão do bar", "balcao do bar", "mesa de bar", "bebida no bar", "cerveja no bar", "酒馆", "酒吧", "吧台", "啤酒馆"],
+        "超市": ["supermercado", "mercado", "mercearia", "caixa do mercado", "carrinho de compras", "prateleira", "corredor do mercado", "compras no mercado", "超市", "便利店", "商店", "货架", "收银台", "购物车"],
+        "药店": ["farmácia", "farmacia", "balcão da farmácia", "balcao da farmacia", "atendente da farmácia", "atendente da farmacia", "药店", "药房"],
+    }
+    scores = {label: location_score(text, values) for label, values in terms.items()}
+    indoor = scores.get("室内房间", 0)
+    outdoor = (
+        scores.get("乡村院子", 0)
+        + location_score(text, ["rua", "portão", "portao", "porta de casa", "fora de casa", "sai de casa", "calçada", "calcada", "estrada", "门口", "大门", "户外", "屋外", "出门", "街道"])
+    )
+    if indoor >= 2 and outdoor >= 2:
+        tag = "房屋内外结合"
+        confidence = "high" if indoor + outdoor >= 5 else "medium"
+        reason = f"室内信号 {indoor} 个，室外/门口信号 {outdoor} 个。"
+    else:
+        priority = ["药店", "工地", "酒馆", "超市", "乡村院子", "室内房间"]
+        tag = max(priority, key=lambda label: (scores.get(label, 0), -priority.index(label)))
+        best = scores.get(tag, 0)
+        if best <= 0:
+            tag = "室内房间"
+            confidence = "low"
+            reason = "未识别到明确地点词，按常见室内短剧兜底。"
+        else:
+            confidence = "high" if best >= 3 else "medium" if best >= 2 else "low"
+            reason = f"命中 {tag} 地点词 {best} 个。"
+    return {
+        "location_tag": tag,
+        "location_tag_pt": LOCATION_TAG_PT.get(tag, ""),
+        "location_tag_confidence": confidence,
+        "location_tag_source": "summary+storyboard",
+        "location_tag_reasoning": reason,
+    }
 
 
 def parse_script_timecode_seconds(value: object) -> float:
@@ -3815,6 +3927,7 @@ def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "source": "creator_direct_import",
         "published": bool(entry.get("published", True)),
     }
+    imported_entry.update(infer_location_tag_fields(imported_entry, script_json))
     append_creator_online_entry(imported_entry)
     return {"ok": True, "entry": imported_entry, "share_url": f"/script/{entry_id}"}
 
@@ -3858,7 +3971,7 @@ def imported_creator_entry(
     content_type = content_type if content_type in ALLOWED_CONTENT_TYPES else DEFAULT_CONTENT_TYPE
     duration_seconds = script_duration_seconds(script_json)
     duration_bucket = creator_duration_bucket(duration_seconds)
-    return {
+    entry = {
         "entry_id": item_id,
         "parent_job_id": f"creator_import_{item_id}",
         "created_at": now_iso(),
@@ -3880,6 +3993,8 @@ def imported_creator_entry(
         "source": "creator_excel_import",
         "saved_at": now_iso(),
     }
+    entry.update(infer_location_tag_fields(entry, script_json))
+    return entry
 
 
 def process_creator_import_script(item: dict[str, Any], *, content_type: str = DEFAULT_CONTENT_TYPE) -> dict[str, Any]:
@@ -7629,6 +7744,7 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
         "storyboard_cover_url": item.get("storyboard_cover_url") or existing.get("storyboard_cover_url") or "",
         "storyboard_updated_at": item.get("storyboard_updated_at") or existing.get("storyboard_updated_at") or "",
     }
+    entry.update(infer_location_tag_fields(entry, script))
     return entry
 
 
@@ -14539,10 +14655,20 @@ def library_html() -> str:
     if changed_entries:
         save_library_entries(entries)
     counts = Counter(entry.get("content_type") or DEFAULT_CONTENT_TYPE for entry in entries)
+    duration_counts = Counter(entry.get("duration_bucket") or "" for entry in entries)
+    location_counts = Counter(entry.get("location_tag") or "" for entry in entries)
     ordered_counts = [(label, counts.get(label, 0)) for label in LIBRARY_FILTER_LABELS]
     filter_options = "".join(
         f"<option value='{html_escape(label)}' data-content-type-option='{html_escape(label)}'>{html_escape(label)} ({count})</option>"
         for label, count in ordered_counts
+    )
+    duration_filter_options = "".join(
+        f"<option value='{html_escape(bucket)}' data-duration-option='{html_escape(bucket)}'>{html_escape(labels.get('zh') or labels.get('pt') or bucket)} ({duration_counts.get(bucket, 0)})</option>"
+        for bucket, labels in CREATOR_DURATION_LABELS.items()
+    )
+    location_filter_options = "".join(
+        f"<option value='{html_escape(item['zh'])}' data-location-option='{html_escape(item['zh'])}'>{html_escape(item['zh'])} ({location_counts.get(item['zh'], 0)})</option>"
+        for item in LOCATION_TAG_OPTIONS
     )
     content_type_options = "".join(
         f"<option value='{html_escape(label)}'>{html_escape(label)}</option>"
@@ -14561,17 +14687,26 @@ def library_html() -> str:
         created_at = format_beijing_time(entry.get("created_at") or "")
         content_type = entry.get("content_type") or DEFAULT_CONTENT_TYPE
         content_type_source = entry.get("content_type_source") or "auto"
+        duration_bucket = str(entry.get("duration_bucket") or "")
+        duration_label = str(entry.get("duration_label_zh") or entry.get("duration_label_pt") or "")
+        location_tag = str(entry.get("location_tag") or "")
         creator_share_url = creator_script_share_url(entry_id)
         manual_badge = "<span class='library-time' data-manual-badge='true'>Manual</span>" if content_type_source == "manual" else "<span class='library-time' data-manual-badge='true' hidden>Manual</span>"
         cards.append(
-            f"<article class='library-card' data-entry-id='{html_escape(entry_id)}' data-content-type='{html_escape(content_type)}'>"
+            f"<article class='library-card' data-entry-id='{html_escape(entry_id)}' data-content-type='{html_escape(content_type)}' data-duration-bucket='{html_escape(duration_bucket)}' data-location-tag='{html_escape(location_tag)}'>"
             "<label class='library-select'><input type='checkbox' data-library-select><span>选择</span></label>"
             "<div class='library-card-top'>"
             f"<button class='batch-chip batch-chip-button' type='button' data-edit-content-type='{html_escape(entry.get('entry_id') or '')}' data-current-content-type='{html_escape(content_type)}'>{html_escape(content_type)}</button>"
             f"<span class='library-time' data-created-at>{html_escape(created_at or 'Unknown time')}</span>"
             "</div>"
-            f"{manual_badge}"
-            f"<a class='video-origin-link' href='{html_escape(entry.get('video_url') or '')}' target='_blank' rel='noreferrer'>{html_escape(entry.get('video_url') or '')}</a>"
+            + (
+                "<div class='library-meta-pills'>"
+                + (f"<span class='batch-chip'>{html_escape(duration_label)}</span>" if duration_label else "")
+                + (f"<span class='batch-chip'>{html_escape(location_tag)}</span>" if location_tag else "")
+                + "</div>"
+            )
+            + f"{manual_badge}"
+            + f"<a class='video-origin-link' href='{html_escape(entry.get('video_url') or '')}' target='_blank' rel='noreferrer'>{html_escape(entry.get('video_url') or '')}</a>"
             + (
                 f"<div class='video-frame-wrap'><img class='video-frame' src='{html_escape(preview_image_url)}' alt='' loading='lazy'></div>"
                 if preview_image_url
@@ -14651,9 +14786,10 @@ def library_html() -> str:
     .library-stats {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; }}
     .library-toolbar {{ display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap; margin-top:42px; margin-bottom:14px; }}
     .bulk-actions {{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }}
+    .filter-group {{ display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; }}
     .filter-label {{ display:flex; flex-direction:column; gap:8px; font-size:13px; font-weight:700; }}
     .filter-select {{
-      min-width:220px; border:1px solid rgba(255,130,0,.18); border-radius:16px; padding:12px 14px;
+      min-width:180px; border:1px solid rgba(255,130,0,.18); border-radius:16px; padding:12px 14px;
       font-size:14px; color:#FF8200; background:rgba(255,255,255,.64); outline:none;
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
@@ -14668,6 +14804,7 @@ def library_html() -> str:
       -webkit-backdrop-filter: blur(18px);
     }}
     .library-card-top {{ display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }}
+    .library-meta-pills {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:-8px; }}
     .library-select {{ display:none; align-items:center; gap:8px; width:max-content; border-radius:999px; padding:8px 12px; color:#FF8200; background:rgba(255,255,255,.72); border:1px solid rgba(255,130,0,.18); font-size:12px; font-weight:800; cursor:pointer; }}
     .library-select input {{ accent-color:#FF8200; }}
     body.bulk-mode .library-select {{ display:inline-flex; }}
@@ -14746,13 +14883,29 @@ def library_html() -> str:
           <button class="action-link action-link-danger" id="bulk-delete-approve" type="button" hidden disabled>删除选中 0</button>
           <button class="action-link" id="bulk-cancel" type="button" hidden>取消</button>
         </div>
-        <label class="filter-label">
-          <span>Filter by template</span>
-          <select id="content-filter" class="filter-select">
-            <option value="">All templates</option>
-            {filter_options}
-          </select>
-        </label>
+        <div class="filter-group" aria-label="脚本筛选">
+          <label class="filter-label">
+            <span>第一层：类型</span>
+            <select id="content-filter" class="filter-select">
+              <option value="">全部类型</option>
+              {filter_options}
+            </select>
+          </label>
+          <label class="filter-label">
+            <span>第二层：时间</span>
+            <select id="duration-filter" class="filter-select">
+              <option value="">全部时间</option>
+              {duration_filter_options}
+            </select>
+          </label>
+          <label class="filter-label">
+            <span>第三层：地点</span>
+            <select id="location-filter" class="filter-select">
+              <option value="">全部地点</option>
+              {location_filter_options}
+            </select>
+          </label>
+        </div>
       </div>
       <div class="library-grid">{cards_html}</div>
     </section>
@@ -14796,6 +14949,8 @@ def library_html() -> str:
   <script>
     const backHomeButton = document.getElementById("back-home");
     const contentFilter = document.getElementById("content-filter");
+    const durationFilter = document.getElementById("duration-filter");
+    const locationFilter = document.getElementById("location-filter");
     const deleteConfirmOverlay = document.getElementById("delete-confirm-overlay");
     const deleteConfirmCancel = document.getElementById("delete-confirm-cancel");
     const deleteConfirmApprove = document.getElementById("delete-confirm-approve");
@@ -14812,6 +14967,8 @@ def library_html() -> str:
     const bulkDeleteApprove = document.getElementById("bulk-delete-approve");
     const bulkCancel = document.getElementById("bulk-cancel");
     const libraryFilterLabels = {json.dumps(LIBRARY_FILTER_LABELS, ensure_ascii=False)};
+    const durationFilterLabels = {json.dumps(CREATOR_DURATION_LABELS, ensure_ascii=False)};
+    const locationFilterLabels = {json.dumps([item["zh"] for item in LOCATION_TAG_OPTIONS], ensure_ascii=False)};
     let pendingDeleteButton = null;
     let pendingExportChoice = null;
     let pendingContentTypeEntryId = "";
@@ -14861,9 +15018,15 @@ def library_html() -> str:
 
     function refreshLibraryCounts() {{
       const counts = Object.fromEntries(libraryFilterLabels.map((label) => [label, 0]));
+      const durationCounts = Object.fromEntries(Object.keys(durationFilterLabels).map((label) => [label, 0]));
+      const locationCounts = Object.fromEntries(locationFilterLabels.map((label) => [label, 0]));
       document.querySelectorAll(".library-card").forEach((card) => {{
         const label = card.getAttribute("data-content-type") || "{DEFAULT_CONTENT_TYPE}";
         counts[label] = (counts[label] || 0) + 1;
+        const duration = card.getAttribute("data-duration-bucket") || "";
+        if (duration) durationCounts[duration] = (durationCounts[duration] || 0) + 1;
+        const location = card.getAttribute("data-location-tag") || "";
+        if (location) locationCounts[location] = (locationCounts[location] || 0) + 1;
       }});
       document.querySelectorAll("[data-content-type-option]").forEach((option) => {{
         const label = option.getAttribute("data-content-type-option") || "";
@@ -14872,6 +15035,15 @@ def library_html() -> str:
       document.querySelectorAll("[data-content-type-chip]").forEach((chip) => {{
         const label = chip.getAttribute("data-content-type-chip") || "";
         chip.textContent = `${{label}} · ${{counts[label] || 0}}`;
+      }});
+      document.querySelectorAll("[data-duration-option]").forEach((option) => {{
+        const bucket = option.getAttribute("data-duration-option") || "";
+        const label = durationFilterLabels[bucket]?.zh || durationFilterLabels[bucket]?.pt || bucket;
+        option.textContent = `${{label}} (${{durationCounts[bucket] || 0}})`;
+      }});
+      document.querySelectorAll("[data-location-option]").forEach((option) => {{
+        const label = option.getAttribute("data-location-option") || "";
+        option.textContent = `${{label}} (${{locationCounts[label] || 0}})`;
       }});
     }}
 
@@ -14955,15 +15127,28 @@ def library_html() -> str:
     }}
 
     function applyLibraryFilter() {{
-      const value = contentFilter ? contentFilter.value : "";
+      const contentValue = contentFilter ? contentFilter.value : "";
+      const durationValue = durationFilter ? durationFilter.value : "";
+      const locationValue = locationFilter ? locationFilter.value : "";
       document.querySelectorAll(".library-card").forEach((card) => {{
         const contentType = card.getAttribute("data-content-type") || "";
-        card.style.display = !value || value === contentType ? "" : "none";
+        const duration = card.getAttribute("data-duration-bucket") || "";
+        const location = card.getAttribute("data-location-tag") || "";
+        const visible = (!contentValue || contentValue === contentType)
+          && (!durationValue || durationValue === duration)
+          && (!locationValue || locationValue === location);
+        card.style.display = visible ? "" : "none";
       }});
     }}
 
     if (contentFilter) {{
       contentFilter.addEventListener("change", applyLibraryFilter);
+    }}
+    if (durationFilter) {{
+      durationFilter.addEventListener("change", applyLibraryFilter);
+    }}
+    if (locationFilter) {{
+      locationFilter.addEventListener("change", applyLibraryFilter);
     }}
 
     if (creatorSyncNow) {{
@@ -15242,7 +15427,7 @@ def creator_admin_html(initial_tab: str = "scripts", *, library_mode: bool = Fal
 .creator-searchbar{{display:grid;grid-template-columns:180px minmax(0,1fr) 132px;gap:0;margin:14px auto 18px;width:min(820px,100%);border:1px solid rgba(255,130,0,.28);border-radius:999px;overflow:hidden;background:#fff;box-shadow:0 14px 34px rgba(255,130,0,.12)}}.creator-searchbar select,.creator-searchbar input,.creator-searchbar button{{border:0;border-radius:0;min-height:52px;background:#fff}}.creator-searchbar select,.creator-searchbar button{{background:#ff8200;color:white;font-weight:900;text-align:center}}.creator-searchbar input{{padding:0 22px;font-size:16px}}.creator-toolbar{{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:10px 0 18px}}.creator-toolbar-left,.creator-toolbar-right{{display:flex;gap:10px;align-items:center;flex-wrap:wrap}}.creator-results-meta{{font-weight:900;color:#1f1f1f}}.creator-results-meta b{{color:#ff8200}}.creator-card-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}}.creator-tile{{min-width:0;border:1px solid rgba(31,41,55,.10);border-radius:14px;background:rgba(255,255,255,.82);padding:18px;box-shadow:0 10px 28px rgba(31,41,55,.05);cursor:pointer;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease}}.creator-tile:hover{{transform:translateY(-2px);border-color:rgba(255,130,0,.34);box-shadow:0 18px 38px rgba(255,130,0,.12)}}.creator-tile-head{{display:grid;grid-template-columns:58px minmax(0,1fr);gap:14px;align-items:center}}.creator-tile .avatar{{width:58px;height:58px}}.creator-tile-name{{margin:0;font-size:17px;line-height:1.2;color:#111827;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.creator-badge{{display:inline-flex;align-items:center;border-radius:6px;background:#dcfce7;color:#16a34a;padding:4px 10px;font-size:13px;font-weight:900}}.creator-field-lines{{display:grid;gap:7px;margin-top:14px;padding-top:14px;border-top:1px solid rgba(31,41,55,.10)}}.creator-field-line{{display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;color:#8a8f98;font-weight:800}}.creator-field-line span:last-child{{color:#1f1f1f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.creator-stats-row{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid rgba(31,41,55,.10)}}.creator-stat{{display:grid;gap:3px;color:#8a8f98;font-weight:800}}.creator-stat b{{color:#1f1f1f;font-size:16px}}.creator-pagination{{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:18px}}.creator-pagination button{{min-width:40px;border-radius:10px}}.creator-detail-top{{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px}}.creator-detail-hero{{display:grid;grid-template-columns:88px minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid rgba(255,130,0,.16);border-radius:24px;background:rgba(255,255,255,.80);padding:18px}}.creator-detail-hero .avatar{{width:88px;height:88px}}.creator-detail-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}}.creator-modal-form{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.creator-modal-form textarea{{grid-column:1/-1}}.modal-card.wide{{width:min(760px,100%)}}@media(max-width:980px){{.creator-card-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.creator-detail-grid{{grid-template-columns:1fr}}}}@media(max-width:640px){{.creator-searchbar{{grid-template-columns:1fr}}.creator-card-grid{{grid-template-columns:1fr}}.creator-detail-hero,.creator-modal-form{{grid-template-columns:1fr}}}}
 .share-line{{display:grid;gap:4px;margin-top:10px;padding:9px 10px;border:1px solid rgba(255,130,0,.14);border-radius:14px;background:#fffaf5}}.share-line b{{color:#99520f;font-size:12px}}.share-line a{{color:#ff5f00;font-size:12px;font-weight:850;word-break:break-all;text-decoration:none}}.multi-select{{min-height:92px}}.tag-text{{display:inline-flex;gap:6px;flex-wrap:wrap}}.creator-detail-stack{{display:grid;gap:14px;margin-top:14px}}.creator-recommend-panel{{grid-column:1/-1}}.creator-script-grid{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:12px}}.creator-script-card{{display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;padding:10px;border:1px solid rgba(255,130,0,.20);border-radius:18px;background:#fffaf5;text-decoration:none;color:#1f1f1f;min-width:0;transition:transform .16s ease,border-color .16s ease}}.creator-script-card:hover{{transform:translateY(-2px);border-color:#ff8200}}.creator-script-card img{{width:100%;aspect-ratio:1/1;border-radius:14px;object-fit:cover;background:#f4eee7}}.creator-script-card b{{display:block;font-size:15px;line-height:1.25}}.creator-script-card p{{margin:6px 0 0;color:#6f737a;font-size:12px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}}.recommend-footer{{display:flex;justify-content:center;margin-top:12px}}.metrics-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}.metric-card{{padding:14px;border:1px solid rgba(255,130,0,.16);border-radius:18px;background:#fffaf5}}.metric-card span{{display:block;color:#6f737a;font-size:12px;font-weight:800}}.metric-card b{{display:block;margin:6px 0 4px;font-size:28px;line-height:1;color:#1f1f1f}}.delta-up{{color:#e11d48;font-weight:950}}.delta-down{{color:#16a34a;font-weight:950}}.mini-import{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end;margin-top:12px}}.feed-stats{{display:flex;gap:10px;flex-wrap:wrap}}.feed-list{{display:grid;gap:12px;margin-top:12px}}.feed-card{{display:grid;grid-template-columns:150px minmax(0,1.7fr) minmax(220px,.8fr);gap:14px;padding:14px;border:1px solid rgba(255,130,0,.18);border-radius:20px;background:rgba(255,255,255,.82)}}.feed-card img{{width:100%;aspect-ratio:1/1;border-radius:16px;object-fit:cover;background:#f4eee7}}.feed-card h4{{margin:0 0 8px;font-size:18px;line-height:1.25}}.feed-card p{{margin:0;color:#4b5563;font-size:14px;line-height:1.55}}.feed-controls{{display:grid;gap:8px}}.return-preview{{display:grid;grid-template-columns:64px minmax(0,1fr);gap:10px;align-items:center;padding:8px;border-radius:14px;background:#fff7f0;border:1px solid rgba(255,130,0,.12)}}.return-preview img{{width:64px;height:64px;border-radius:12px;object-fit:cover}}@media(max-width:1120px){{.creator-script-grid{{grid-template-columns:repeat(3,minmax(0,1fr))}}.metrics-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.feed-card{{grid-template-columns:120px minmax(0,1fr)}}.feed-controls{{grid-column:1/-1}}}}@media(max-width:640px){{.creator-script-grid,.metrics-grid,.mini-import,.feed-card{{grid-template-columns:1fr}}}}
 </style></head><body><main id="app"></main><div class="modal" id="edit-modal"><form class="modal-card" id="edit-form"><h2>修改脚本标签</h2><p class="copy" style="margin-bottom:14px">这里只调整脚本分类标签；完整脚本内容请从列表里的“修改脚本”进入内容中台。</p><div class="fields"><select name="content_type"></select></div><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存标签</button></div></form></div><div class="modal" id="creator-modal"><form class="modal-card wide" id="creator-form"><h2>导入创作者</h2><p class="copy" style="margin-bottom:14px">粘贴 Kwai 作者主页，补充账号和标签后保存。资料抓取仍由后端处理。</p><div class="creator-modal-form"><input name="kwai_url" placeholder="Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><input name="display_name" placeholder="作者名称"><input name="kwai_id" placeholder="Kwai ID"><input name="phone" placeholder="手机号/登录电话"><input name="uid" placeholder="UID"><select name="poc"><option value="">POC 待分配</option><option>denghaoqing</option><option>zhaozhe</option></select><select name="category"></select><select class="multi-select" name="identity" multiple><option>夫妻</option><option>情侣</option><option>家庭</option><option>朋友</option></select><select class="multi-select" name="location" multiple><option>家里</option><option>乡村</option><option>城市</option></select><select name="cooperation_level"><option>待标注</option><option>高</option><option>中</option><option>低</option><option>待观察</option></select><textarea name="creator_description" placeholder="具体作者描述：可手动输入作者风格、限制、偏好等"></textarea></div><div class="modal-actions"><button type="button" id="creator-cancel">取消</button><button class="primary" type="submit">保存创作者</button></div></form></div><div class="modal" id="creator-tags-modal"><form class="modal-card wide" id="creator-tags-form" data-creator-tags=""><h2>编辑创作者标签</h2><p class="copy" style="margin-bottom:14px">身份和地点支持多选。保存后，详情页点击“查看推荐脚本”会按新标签重新计算。</p><div class="creator-modal-form"><input type="hidden" name="kwai_url"><input type="hidden" name="display_name"><input type="hidden" name="kwai_id"><input type="hidden" name="phone"><input type="hidden" name="uid"><select name="poc"></select><select name="category"></select><select class="multi-select" name="identity" multiple></select><select class="multi-select" name="location" multiple></select><select name="cooperation_level"></select><textarea name="creator_description" placeholder="具体作者描述：可手动输入作者风格、限制、偏好等"></textarea></div><div class="modal-actions"><button type="button" id="creator-tags-cancel">取消</button><button class="primary" type="submit">保存标签</button></div></form></div><script>
-const libraryMode=__LIBRARY_MODE__;const labels=["夫妻整蛊/冲突","夫妻暧昧","家庭整蛊","朋友整蛊"];const creatorPocOptions=["denghaoqing","zhaozhe"];let entries=[];let creators=[];let accounts=[];let submissions=[];let intakes=[];let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptScope="portal_visible";let activeCreatorPoc="";let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let scriptVisibleLimit=20;let scriptIndex={{}};let scriptIndexLoaded=false;const SCRIPT_INITIAL_RENDER_LIMIT=20;const SCRIPT_RENDER_INCREMENT=50;const CREATOR_PAGE_SIZE=18;const creatorPathMatch=location.pathname.match(/^\\/creator-admin\\/creators\\/([0-9a-f]{{32}})$/);let creatorPage=1;let selectedCreatorId=(creatorPathMatch&&creatorPathMatch[1])||new URLSearchParams(location.search).get("creator")||"";let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");const creatorModal=document.querySelector("#creator-modal");const creatorForm=document.querySelector("#creator-form");const creatorTagsModal=document.querySelector("#creator-tags-modal");const creatorTagsForm=document.querySelector("#creator-tags-form");
+const libraryMode=__LIBRARY_MODE__;const labels=["夫妻整蛊/冲突","夫妻暧昧","家庭整蛊","朋友整蛊"];const durationOptions=[["dur_1_20","1-20 秒"],["dur_20_60","20 秒-1 分钟"],["dur_60_120","1-2 分钟"],["dur_120_plus","2 分钟以上"]];const locationOptions=["室内房间","乡村院子","工地","酒馆","超市","药店","房屋内外结合"];const creatorPocOptions=["denghaoqing","zhaozhe"];let entries=[];let creators=[];let accounts=[];let submissions=[];let intakes=[];let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptDuration="";let activeScriptLocation="";let activeScriptScope="portal_visible";let activeCreatorPoc="";let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let scriptVisibleLimit=20;let scriptIndex={{}};let scriptIndexLoaded=false;const SCRIPT_INITIAL_RENDER_LIMIT=20;const SCRIPT_RENDER_INCREMENT=50;const CREATOR_PAGE_SIZE=18;const creatorPathMatch=location.pathname.match(/^\\/creator-admin\\/creators\\/([0-9a-f]{{32}})$/);let creatorPage=1;let selectedCreatorId=(creatorPathMatch&&creatorPathMatch[1])||new URLSearchParams(location.search).get("creator")||"";let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");const creatorModal=document.querySelector("#creator-modal");const creatorForm=document.querySelector("#creator-form");const creatorTagsModal=document.querySelector("#creator-tags-modal");const creatorTagsForm=document.querySelector("#creator-tags-form");
 function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}}[c]))}}
 async function api(url,opts={{}}){{const r=await fetch(url,{{credentials:"same-origin",headers:{{"Content-Type":"application/json"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}
 function loginView(msg=""){{app.innerHTML=`<section class="login"><form id="login-form"><span class="kicker">Koko 内部后台</span><h1>${{libraryMode?"脚本管理":"Creator 运营后台"}}</h1><p class="copy">${{libraryMode?"这里统一管理 Koko 入库脚本和 kokocomedy 前台脚本。":"这里管理创作者前台展示的脚本、标签、上下架和同步。"}}</p><input name="password" type="password" placeholder="后台密码" autofocus style="margin-top:16px"><button class="primary" style="width:100%;margin-top:12px" type="submit">进入后台</button><p class="status">${{esc(msg)}}</p></form></section>`}}
@@ -15252,16 +15437,21 @@ function adminCopy(){{return libraryMode?"这里是 Koko 内容中台的统一�
 function adminNav(){{return libraryMode?`<a class="btn" href="/studio">返回内容中台</a><a class="btn" href="/creator-admin/imports">导入脚本</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a>`:`<a class="btn" href="/studio">返回内容中台</a><a class="btn" href="/library">脚本管理</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a>`}}
 function adminTabs(){{return libraryMode?`<div class="ops-tabs"><a class="active" href="/library">脚本管理</a></div>`:`<div class="ops-tabs"><a class="${{activeTab==="creators"?"active":""}}" href="/creator-admin/creators">创作者管理</a><a class="${{activeTab==="submissions"?"active":""}}" href="/creator-admin/submissions">回传数据</a><a class="${{activeTab==="intakes"?"active":""}}" href="/creator-admin/intakes">作者信息收集</a></div>`}}
 function adminView(){{app.innerHTML=`<section class="shell"><div class="panel"><div class="top"><div><span class="kicker">${{adminKicker()}}</span><h1>${{adminTitle()}}</h1><p class="copy">${{adminCopy()}}</p></div><div class="nav">${{adminNav()}}</div></div>${{adminTabs()}}<div id="tab-body"></div></div></section>`;renderActiveTab()}}
-function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="imports"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">导入标准脚本 Excel</h2><p class="copy">上传包含 Vídeo original / Conteúdo principal / Pontos principais / Partes que podem ser adaptadas / Tempo / Imagem / Ações / Diálogos 的 .xlsx。系统会自动拆分多条脚本，生成葡语脚本页，调用 Gemini 慢慢生成 3x3 分镜图，并同步到 Creator 前台。分类选择如果保留在“待分类”，后台会自动用大模型判断脚本类型；如果你手动选择了具体类型，则优先按手动类型导入。</p></div><form class="import-form" id="import-form"><input id="import-file" type="file" accept=".xlsx"><select id="import-content-type">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">上传并导入</button></form><p id="status" class="status"></p><div id="import-job"></div></section>`;document.querySelector("#import-form").addEventListener("submit",submitImport);renderImportJob();return}}if(activeTab==="creators"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">创作者管理</h2></div><div class="creator-searchbar"><select id="creator-search-scope"><option value="all">所有结果</option><option value="kwai">Kwai ID</option><option value="name">用户名</option><option value="phone">手机号</option><option value="uid">UID</option></select><input id="creator-search" placeholder="输入作者名称、ID、手机号或 UID"><button class="primary" id="creator-search-button" type="button">Search</button></div><div id="creator-poc-filters" class="quick-filters"></div><div class="creator-toolbar"><div class="creator-toolbar-left"><span id="creator-results-meta" class="creator-results-meta"></span></div><div class="creator-toolbar-right"><button class="primary" id="open-creator-modal" type="button">导入创作者</button><button id="refresh-creators" type="button">刷新</button><button id="logout" type="button">退出</button></div></div><p id="status" class="status"></p><div id="creator-list"></div></section>`;document.querySelector("#creator-search").addEventListener("input",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#creator-search-scope").addEventListener("change",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#creator-search-button").addEventListener("click",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#open-creator-modal").addEventListener("click",openCreatorModal);document.querySelector("#refresh-creators").addEventListener("click",loadCreators);document.querySelector("#logout").addEventListener("click",logout);renderCreatorPocFilters();renderCreators();return}}if(activeTab==="accounts"){{body.innerHTML=`<form class="creator-form" id="account-form"><input name="account" placeholder="输入手机号、数字或字母账号，例如 88998411165 / creator01"><input name="display_name" placeholder="显示名称（可选）"><button class="primary" type="submit">创建账号</button></form><div class="toolbar"><input id="account-search" placeholder="搜索账号、显示名、回传链接"><button id="refresh-accounts" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="account-list" class="grid"></div>`;document.querySelector("#account-form").addEventListener("submit",createAccount);document.querySelector("#account-search").addEventListener("input",renderAccounts);document.querySelector("#refresh-accounts").addEventListener("click",loadAccounts);document.querySelector("#logout").addEventListener("click",logout);renderAccounts();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",loadSubmissions);document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><div id="script-scope-filters" class="quick-filters"></div><div id="script-type-filters" class="quick-filters"></div><p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",()=>{{scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderList()}});document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderScriptScopeFilters();renderScriptTypeFilters();renderList()}}
+function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="imports"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">导入标准脚本 Excel</h2><p class="copy">上传包含 Vídeo original / Conteúdo principal / Pontos principais / Partes que podem ser adaptadas / Tempo / Imagem / Ações / Diálogos 的 .xlsx。系统会自动拆分多条脚本，生成葡语脚本页，调用 Gemini 慢慢生成 3x3 分镜图，并同步到 Creator 前台。分类选择如果保留在“待分类”，后台会自动用大模型判断脚本类型；如果你手动选择了具体类型，则优先按手动类型导入。</p></div><form class="import-form" id="import-form"><input id="import-file" type="file" accept=".xlsx"><select id="import-content-type">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">上传并导入</button></form><p id="status" class="status"></p><div id="import-job"></div></section>`;document.querySelector("#import-form").addEventListener("submit",submitImport);renderImportJob();return}}if(activeTab==="creators"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">创作者管理</h2></div><div class="creator-searchbar"><select id="creator-search-scope"><option value="all">所有结果</option><option value="kwai">Kwai ID</option><option value="name">用户名</option><option value="phone">手机号</option><option value="uid">UID</option></select><input id="creator-search" placeholder="输入作者名称、ID、手机号或 UID"><button class="primary" id="creator-search-button" type="button">Search</button></div><div id="creator-poc-filters" class="quick-filters"></div><div class="creator-toolbar"><div class="creator-toolbar-left"><span id="creator-results-meta" class="creator-results-meta"></span></div><div class="creator-toolbar-right"><button class="primary" id="open-creator-modal" type="button">导入创作者</button><button id="refresh-creators" type="button">刷新</button><button id="logout" type="button">退出</button></div></div><p id="status" class="status"></p><div id="creator-list"></div></section>`;document.querySelector("#creator-search").addEventListener("input",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#creator-search-scope").addEventListener("change",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#creator-search-button").addEventListener("click",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#open-creator-modal").addEventListener("click",openCreatorModal);document.querySelector("#refresh-creators").addEventListener("click",loadCreators);document.querySelector("#logout").addEventListener("click",logout);renderCreatorPocFilters();renderCreators();return}}if(activeTab==="accounts"){{body.innerHTML=`<form class="creator-form" id="account-form"><input name="account" placeholder="输入手机号、数字或字母账号，例如 88998411165 / creator01"><input name="display_name" placeholder="显示名称（可选）"><button class="primary" type="submit">创建账号</button></form><div class="toolbar"><input id="account-search" placeholder="搜索账号、显示名、回传链接"><button id="refresh-accounts" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="account-list" class="grid"></div>`;document.querySelector("#account-form").addEventListener("submit",createAccount);document.querySelector("#account-search").addEventListener("input",renderAccounts);document.querySelector("#refresh-accounts").addEventListener("click",loadAccounts);document.querySelector("#logout").addEventListener("click",logout);renderAccounts();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",loadSubmissions);document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、时间、地点、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><div id="script-scope-filters" class="quick-filters"></div><div id="script-type-filters" class="quick-filters"></div><div id="script-duration-filters" class="quick-filters"></div><div id="script-location-filters" class="quick-filters"></div><p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",()=>{{scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderList()}});document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderScriptScopeFilters();renderScriptTypeFilters();renderScriptDurationFilters();renderScriptLocationFilters();renderList()}}
 function scriptScopeOptions(){{return [{{key:"portal_visible",label:"前台展示中"}},{{key:"hidden",label:"已下架"}},{{key:"incomplete",label:"信息不完整"}},{{key:"all",label:"全部"}}]}}
 function renderScriptScopeFilters(){{const box=document.querySelector("#script-scope-filters");if(!box)return;box.innerHTML=scriptScopeOptions().map(option=>`<button class="quick-filter-chip ${{activeScriptScope===option.key?"active":""}}" type="button" data-scope-filter="${{option.key}}"><span>${{option.label}}</span> <small>${{Number(scriptScopeCounts?.[option.key]||0)}}</small></button>`).join("")}}
 function scriptTypeCounts(){{const counts=new Map();for(const entry of entries){{const key=String(entry.content_type||"待分类").trim()||"待分类";counts.set(key,(counts.get(key)||0)+1)}}return counts}}
 function scriptTypeOptions(){{const counts=scriptTypeCounts();const ordered=[];for(const label of labels){{if(counts.has(label))ordered.push([label,counts.get(label)])}}for(const [label,count] of [...counts.entries()].sort((a,b)=>String(a[0]).localeCompare(String(b[0]),"zh-CN"))){{if(!labels.includes(label))ordered.push([label,count])}}return ordered}}
 function renderScriptTypeFilters(){{const box=document.querySelector("#script-type-filters");if(!box)return;const options=scriptTypeOptions();box.innerHTML=[`<button class="quick-filter-chip ${{!activeScriptType?"active":""}}" type="button" data-type-filter=""><span>全部</span> <small>${{entries.length}}</small></button>`,...options.map(([label,count])=>`<button class="quick-filter-chip ${{activeScriptType===label?"active":""}}" type="button" data-type-filter="${{esc(label)}}"><span>${{esc(label)}}</span> <small>${{count}}</small></button>`)].join("")}}
-function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();return entries.filter(e=>{{const matchesType=!activeScriptType||String(e.content_type||"待分类").trim()===activeScriptType;if(!matchesType)return false;if(!q)return true;return [e.title,e.summary,e.content_type,e.video_url].join(" ").toLowerCase().includes(q)}})}}
+function scriptDurationCounts(){{const counts=new Map();for(const entry of entries){{const key=String(entry.duration_bucket||"").trim();if(key)counts.set(key,(counts.get(key)||0)+1)}}return counts}}
+function renderScriptDurationFilters(){{const box=document.querySelector("#script-duration-filters");if(!box)return;const counts=scriptDurationCounts();box.innerHTML=[`<button class="quick-filter-chip ${{!activeScriptDuration?"active":""}}" type="button" data-duration-filter=""><span>全部时间</span> <small>${{entries.length}}</small></button>`,...durationOptions.map(([bucket,label])=>`<button class="quick-filter-chip ${{activeScriptDuration===bucket?"active":""}}" type="button" data-duration-filter="${{esc(bucket)}}"><span>${{esc(label)}}</span> <small>${{Number(counts.get(bucket)||0)}}</small></button>`)].join("")}}
+function scriptLocationCounts(){{const counts=new Map();for(const entry of entries){{const key=String(entry.location_tag||entry.location_tag_pt||"").trim();if(key)counts.set(key,(counts.get(key)||0)+1)}}return counts}}
+function renderScriptLocationFilters(){{const box=document.querySelector("#script-location-filters");if(!box)return;const counts=scriptLocationCounts();box.innerHTML=[`<button class="quick-filter-chip ${{!activeScriptLocation?"active":""}}" type="button" data-location-filter=""><span>全部地点</span> <small>${{entries.length}}</small></button>`,...locationOptions.map(label=>`<button class="quick-filter-chip ${{activeScriptLocation===label?"active":""}}" type="button" data-location-filter="${{esc(label)}}"><span>${{esc(label)}}</span> <small>${{Number(counts.get(label)||0)}}</small></button>`)].join("")}}
+function locationTag(e){{return String(e.location_tag||e.location_tag_pt||"").trim()}}
+function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();return entries.filter(e=>{{const matchesType=!activeScriptType||String(e.content_type||"待分类").trim()===activeScriptType;if(!matchesType)return false;const matchesDuration=!activeScriptDuration||String(e.duration_bucket||"").trim()===activeScriptDuration;if(!matchesDuration)return false;const matchesLocation=!activeScriptLocation||locationTag(e)===activeScriptLocation;if(!matchesLocation)return false;if(!q)return true;return [e.title,e.summary,e.content_type,e.duration_bucket,e.duration_label_pt,e.duration_label_zh,e.location_tag,e.location_tag_pt,e.video_url].join(" ").toLowerCase().includes(q)}})}}
 function durationTag(e){{const map={{dur_1_20:"1-20 s",dur_20_60:"20 s-1 min",dur_60_120:"1-2 min",dur_120_plus:"Mais de 2 min"}};return e.duration_label_pt||map[e.duration_bucket]||""}}
-function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}const visibleRows=rows.slice(0,Math.max(SCRIPT_INITIAL_RENDER_LIMIT,scriptVisibleLimit));const remaining=Math.max(0,rows.length-visibleRows.length);const cards=visibleRows.map(e=>{{const share=scriptShareUrl(e.entry_id);const duration=durationTag(e);return `<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span>${{duration?`<span class="pill">${{esc(duration)}}</span>`:""}}<span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span></div><div class="share-line"><b>kokocomedy 外链</b><a href="${{esc(share)}}" target="_blank" rel="noopener">${{esc(share)}}</a></div></div><div class="actions"><a class="btn" href="${{esc(share)}}" target="_blank" rel="noopener">打开外链</a><button type="button" data-copy="${{esc(share)}}">复制外链</button><button class="primary" type="button" data-script-edit="${{esc(e.entry_id)}}">修改脚本</button><button type="button" data-edit="${{esc(e.entry_id)}}">修改标签</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`}}).join("");const more=remaining?`<div class="empty"><b>已显示 ${{visibleRows.length}} / ${{rows.length}} 条</b><br><br><button class="primary" type="button" data-load-more-scripts>继续展开 50 条</button></div>`:`<div class="empty">已显示全部 ${{rows.length}} 条脚本。</div>`;list.innerHTML=cards+more;const s=document.querySelector("#status");if(s){{const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} 条，当前显示 ${{visibleRows.length}} / ${{rows.length}} 条${{activeScriptType?` · 分类：${{activeScriptType}}`:""}}`}}}}
-async function loadEntries(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载中...");const params=new URLSearchParams({{limit:"10000",scope:activeScriptScope}});const d=await api(`/api/creator-admin/scripts?${{params.toString()}}`);entries=d.entries||[];scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;scriptScopeCounts=d.scope_counts||{{portal_visible:0,hidden:0,incomplete:0,all:entries.length}};activeScriptScope=d.scope||activeScriptScope;if(activeScriptType&&!entries.some(e=>String(e.content_type||"待分类").trim()===activeScriptType))activeScriptType="";adminView();const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const total=Number(scriptScopeCounts[activeScriptScope]||entries.length);const s=document.querySelector("#status");if(s)s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} / ${{total}} 条，默认显示前 ${{Math.min(SCRIPT_INITIAL_RENDER_LIMIT,entries.length)}} 条`}}catch(e){{loginView(e.message)}}}}
+function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}const visibleRows=rows.slice(0,Math.max(SCRIPT_INITIAL_RENDER_LIMIT,scriptVisibleLimit));const remaining=Math.max(0,rows.length-visibleRows.length);const cards=visibleRows.map(e=>{{const share=scriptShareUrl(e.entry_id);const duration=durationTag(e);const location=locationTag(e);return `<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span>${{duration?`<span class="pill">${{esc(duration)}}</span>`:""}}${{location?`<span class="pill">${{esc(location)}}</span>`:""}}<span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span></div><div class="share-line"><b>kokocomedy 外链</b><a href="${{esc(share)}}" target="_blank" rel="noopener">${{esc(share)}}</a></div></div><div class="actions"><a class="btn" href="${{esc(share)}}" target="_blank" rel="noopener">打开外链</a><button type="button" data-copy="${{esc(share)}}">复制外链</button><button class="primary" type="button" data-script-edit="${{esc(e.entry_id)}}">修改脚本</button><button type="button" data-edit="${{esc(e.entry_id)}}">修改标签</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`}}).join("");const more=remaining?`<div class="empty"><b>已显示 ${{visibleRows.length}} / ${{rows.length}} 条</b><br><br><button class="primary" type="button" data-load-more-scripts>继续展开 50 条</button></div>`:`<div class="empty">已显示全部 ${{rows.length}} 条脚本。</div>`;list.innerHTML=cards+more;const s=document.querySelector("#status");if(s){{const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const filters=[activeScriptType&&`类型：${{activeScriptType}}`,activeScriptDuration&&`时间：${{durationOptions.find(x=>x[0]===activeScriptDuration)?.[1]||activeScriptDuration}}`,activeScriptLocation&&`地点：${{activeScriptLocation}}`].filter(Boolean).join(" · ");s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} 条，当前显示 ${{visibleRows.length}} / ${{rows.length}} 条${{filters?` · ${{filters}}`:""}}`}}}}
+async function loadEntries(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载中...");const params=new URLSearchParams({{limit:"10000",scope:activeScriptScope}});const d=await api(`/api/creator-admin/scripts?${{params.toString()}}`);entries=d.entries||[];scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;scriptScopeCounts=d.scope_counts||{{portal_visible:0,hidden:0,incomplete:0,all:entries.length}};activeScriptScope=d.scope||activeScriptScope;if(activeScriptType&&!entries.some(e=>String(e.content_type||"待分类").trim()===activeScriptType))activeScriptType="";if(activeScriptDuration&&!entries.some(e=>String(e.duration_bucket||"").trim()===activeScriptDuration))activeScriptDuration="";if(activeScriptLocation&&!entries.some(e=>locationTag(e)===activeScriptLocation))activeScriptLocation="";adminView();const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const total=Number(scriptScopeCounts[activeScriptScope]||entries.length);const s=document.querySelector("#status");if(s)s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} / ${{total}} 条，默认显示前 ${{Math.min(SCRIPT_INITIAL_RENDER_LIMIT,entries.length)}} 条`}}catch(e){{loginView(e.message)}}}}
 async function ensureScriptIndex(){{if(scriptIndexLoaded)return scriptIndex;const d=await api("/api/creator-admin/scripts?limit=10000&scope=all");const rows=d.entries||[];scriptIndex=Object.fromEntries(rows.map(x=>[String(x.entry_id||""),x]).filter(x=>x[0]));scriptIndexLoaded=true;return scriptIndex}}
 async function loadCreators(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载作者中...");const d=await api("/api/creator-admin/creators");creators=d.creators||[];activeTab="creators";adminView();document.querySelector("#status").textContent=`共 ${{creators.length}} 个创作者`}}catch(e){{loginView(e.message)}}}}
 async function loadAccounts(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载账号中...");const d=await api("/api/creator-admin/accounts");accounts=d.accounts||[];activeTab="accounts";adminView();document.querySelector("#status").textContent=`共 ${{accounts.length}} 个账号`}}catch(e){{loginView(e.message)}}}}
@@ -15339,7 +15529,7 @@ async function bulkDelete(){{const ids=[...document.querySelectorAll("[data-pick
 async function syncNow(){{const s=document.querySelector("#status");s.textContent="同步中...";const d=await api("/api/creator-admin/sync",{{method:"POST",body:"{}"}});await loadCurrentTab();alert(`Creator 已同步：${{d.entries_count||"-"}} 条脚本`)}}
 async function logout(){{await api("/creator-admin/logout",{{method:"POST",body:"{}"}}).catch(()=>null);location.reload()}}
 document.addEventListener("submit",async e=>{{const creatorTags=e.target.closest("[data-creator-tags]");if(creatorTags){{e.preventDefault();await saveCreatorTags(creatorTags);return}}if(e.target.id==="login-form"){{e.preventDefault();try{{await api("/creator-admin/login",{{method:"POST",body:JSON.stringify({{password:new FormData(e.target).get("password")}})}});await loadCurrentTab()}}catch(err){{loginView(err.message)}}}}}});
-document.addEventListener("click",async e=>{{const tab=e.target.closest("[data-tab-main]");if(tab){{activeTab=tab.dataset.tabMain;if(activeTab==="creators"){{await loadCreators()}}else if(activeTab==="accounts"){{await loadAccounts()}}else if(activeTab==="submissions"){{await loadSubmissions()}}else if(activeTab==="intakes"){{await loadIntakes()}}else adminView();return}}const tile=e.target.closest("[data-open-creator]");if(tile){{selectCreator(tile.dataset.openCreator);return}}const backCreators=e.target.closest("[data-back-creators]");if(backCreators){{backToCreatorList();return}}const pageBtn=e.target.closest("[data-creator-page]");if(pageBtn){{creatorPage+=pageBtn.dataset.creatorPage==="next"?1:-1;renderCreators();return}}const pocFilter=e.target.closest("[data-poc-filter]");if(pocFilter){{activeCreatorPoc=pocFilter.dataset.pocFilter||"";creatorPage=1;selectedCreatorId="";renderCreatorPocFilters();renderCreators();return}}const editCreator=e.target.closest("[data-edit-creator-tags]");if(editCreator){{openCreatorTags(editCreator.dataset.editCreatorTags);return}}const loadCreator=e.target.closest("[data-load-creator-scripts]");if(loadCreator){{await loadCreatorScripts(loadCreator.dataset.loadCreatorScripts);return}}const loadMoreCreator=e.target.closest("[data-load-more-creator-scripts]");if(loadMoreCreator){{await loadCreatorScripts(loadMoreCreator.dataset.loadMoreCreatorScripts,true);return}}const saveMetrics=e.target.closest("[data-save-creator-metrics]");if(saveMetrics){{saveCreatorMetrics(saveMetrics.dataset.saveCreatorMetrics);return}}const saveFeeds=e.target.closest("[data-save-creator-feeds]");if(saveFeeds){{await saveCreatorFeeds(saveFeeds.dataset.saveCreatorFeeds);return}}const moreScripts=e.target.closest("[data-load-more-scripts]");if(moreScripts){{scriptVisibleLimit+=SCRIPT_RENDER_INCREMENT;renderList();return}}const scopeFilter=e.target.closest("[data-scope-filter]");if(scopeFilter){{activeScriptScope=scopeFilter.dataset.scopeFilter||"portal_visible";activeScriptType="";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;await loadEntries();return}}const typeFilter=e.target.closest("[data-type-filter]");if(typeFilter){{activeScriptType=typeFilter.dataset.typeFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptTypeFilters();renderList();return}}const copy=e.target.closest("[data-copy]");if(copy){{await navigator.clipboard?.writeText(copy.dataset.copy).catch(()=>null);copy.textContent="已复制";return}}const scriptEdit=e.target.closest("[data-script-edit]");if(scriptEdit){{location.assign(`/studio?library_entry=${{encodeURIComponent(scriptEdit.dataset.scriptEdit)}}#split-panel`);return}}const delCreator=e.target.closest("[data-delete-creator]");if(delCreator){{if(confirm("确定删除这个创作者吗？")){{await api(`/api/creator-admin/creators/${{delCreator.dataset.deleteCreator}}`,{{method:"DELETE"}});selectedCreatorId="";await loadCreators()}}return}}const refresh=e.target.closest("[data-refresh-creator]");if(refresh){{const c=creators.find(x=>x.profile_id===refresh.dataset.refreshCreator);if(c){{await api(`/api/creator-admin/creators/${{c.profile_id}}`,{{method:"POST",body:JSON.stringify({{kwai_url:c.kwai_url,categories:c.categories||[],poc:creatorPocValue(c)}})}});await loadCreators()}}return}}const edit=e.target.closest("[data-edit]");if(edit)openEdit(edit.dataset.edit);const toggle=e.target.closest("[data-toggle]");if(toggle)togglePublish(toggle.dataset.toggle)}});document.addEventListener("change",e=>{{const status=e.target.closest("[data-feed-status]");const date=e.target.closest("[data-feed-date]");const ret=e.target.closest("[data-feed-return-url]");if(status||date||ret){{const target=status||date||ret;const id=selectedCreatorId;const entry=target.dataset.feedStatus||target.dataset.feedDate||target.dataset.feedReturnUrl;if(id&&entry)updateCreatorFeed(id,entry,status?{{status:target.value}}:date?{{date:target.value}}:{{return_url:target.value,status:target.value?"已回传":"未完成",return_time:target.value?new Date().toISOString():""}})}}}});window.addEventListener("popstate",()=>{{const match=location.pathname.match(/^\\/creator-admin\\/creators\\/([0-9a-f]{{32}})$/);selectedCreatorId=(match&&match[1])||"";renderCreators()}});document.querySelector("#edit-cancel").addEventListener("click",()=>modal.classList.remove("open"));document.querySelector("#creator-cancel").addEventListener("click",()=>creatorModal.classList.remove("open"));document.querySelector("#creator-tags-cancel").addEventListener("click",()=>creatorTagsModal.classList.remove("open"));form.addEventListener("submit",saveEdit);creatorForm.addEventListener("submit",createCreator);loadCurrentTab();
+document.addEventListener("click",async e=>{{const tab=e.target.closest("[data-tab-main]");if(tab){{activeTab=tab.dataset.tabMain;if(activeTab==="creators"){{await loadCreators()}}else if(activeTab==="accounts"){{await loadAccounts()}}else if(activeTab==="submissions"){{await loadSubmissions()}}else if(activeTab==="intakes"){{await loadIntakes()}}else adminView();return}}const tile=e.target.closest("[data-open-creator]");if(tile){{selectCreator(tile.dataset.openCreator);return}}const backCreators=e.target.closest("[data-back-creators]");if(backCreators){{backToCreatorList();return}}const pageBtn=e.target.closest("[data-creator-page]");if(pageBtn){{creatorPage+=pageBtn.dataset.creatorPage==="next"?1:-1;renderCreators();return}}const pocFilter=e.target.closest("[data-poc-filter]");if(pocFilter){{activeCreatorPoc=pocFilter.dataset.pocFilter||"";creatorPage=1;selectedCreatorId="";renderCreatorPocFilters();renderCreators();return}}const editCreator=e.target.closest("[data-edit-creator-tags]");if(editCreator){{openCreatorTags(editCreator.dataset.editCreatorTags);return}}const loadCreator=e.target.closest("[data-load-creator-scripts]");if(loadCreator){{await loadCreatorScripts(loadCreator.dataset.loadCreatorScripts);return}}const loadMoreCreator=e.target.closest("[data-load-more-creator-scripts]");if(loadMoreCreator){{await loadCreatorScripts(loadMoreCreator.dataset.loadMoreCreatorScripts,true);return}}const saveMetrics=e.target.closest("[data-save-creator-metrics]");if(saveMetrics){{saveCreatorMetrics(saveMetrics.dataset.saveCreatorMetrics);return}}const saveFeeds=e.target.closest("[data-save-creator-feeds]");if(saveFeeds){{await saveCreatorFeeds(saveFeeds.dataset.saveCreatorFeeds);return}}const moreScripts=e.target.closest("[data-load-more-scripts]");if(moreScripts){{scriptVisibleLimit+=SCRIPT_RENDER_INCREMENT;renderList();return}}const scopeFilter=e.target.closest("[data-scope-filter]");if(scopeFilter){{activeScriptScope=scopeFilter.dataset.scopeFilter||"portal_visible";activeScriptType="";activeScriptDuration="";activeScriptLocation="";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;await loadEntries();return}}const typeFilter=e.target.closest("[data-type-filter]");if(typeFilter){{activeScriptType=typeFilter.dataset.typeFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptTypeFilters();renderList();return}}const durationFilter=e.target.closest("[data-duration-filter]");if(durationFilter){{activeScriptDuration=durationFilter.dataset.durationFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptDurationFilters();renderList();return}}const locationFilter=e.target.closest("[data-location-filter]");if(locationFilter){{activeScriptLocation=locationFilter.dataset.locationFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptLocationFilters();renderList();return}}const copy=e.target.closest("[data-copy]");if(copy){{await navigator.clipboard?.writeText(copy.dataset.copy).catch(()=>null);copy.textContent="已复制";return}}const scriptEdit=e.target.closest("[data-script-edit]");if(scriptEdit){{location.assign(`/studio?library_entry=${{encodeURIComponent(scriptEdit.dataset.scriptEdit)}}#split-panel`);return}}const delCreator=e.target.closest("[data-delete-creator]");if(delCreator){{if(confirm("确定删除这个创作者吗？")){{await api(`/api/creator-admin/creators/${{delCreator.dataset.deleteCreator}}`,{{method:"DELETE"}});selectedCreatorId="";await loadCreators()}}return}}const refresh=e.target.closest("[data-refresh-creator]");if(refresh){{const c=creators.find(x=>x.profile_id===refresh.dataset.refreshCreator);if(c){{await api(`/api/creator-admin/creators/${{c.profile_id}}`,{{method:"POST",body:JSON.stringify({{kwai_url:c.kwai_url,categories:c.categories||[],poc:creatorPocValue(c)}})}});await loadCreators()}}return}}const edit=e.target.closest("[data-edit]");if(edit)openEdit(edit.dataset.edit);const toggle=e.target.closest("[data-toggle]");if(toggle)togglePublish(toggle.dataset.toggle)}});document.addEventListener("change",e=>{{const status=e.target.closest("[data-feed-status]");const date=e.target.closest("[data-feed-date]");const ret=e.target.closest("[data-feed-return-url]");if(status||date||ret){{const target=status||date||ret;const id=selectedCreatorId;const entry=target.dataset.feedStatus||target.dataset.feedDate||target.dataset.feedReturnUrl;if(id&&entry)updateCreatorFeed(id,entry,status?{{status:target.value}}:date?{{date:target.value}}:{{return_url:target.value,status:target.value?"已回传":"未完成",return_time:target.value?new Date().toISOString():""}})}}}});window.addEventListener("popstate",()=>{{const match=location.pathname.match(/^\\/creator-admin\\/creators\\/([0-9a-f]{{32}})$/);selectedCreatorId=(match&&match[1])||"";renderCreators()}});document.querySelector("#edit-cancel").addEventListener("click",()=>modal.classList.remove("open"));document.querySelector("#creator-cancel").addEventListener("click",()=>creatorModal.classList.remove("open"));document.querySelector("#creator-tags-cancel").addEventListener("click",()=>creatorTagsModal.classList.remove("open"));form.addEventListener("submit",saveEdit);creatorForm.addEventListener("submit",createCreator);loadCurrentTab();
 </script></body></html>"""
     html = (
         template.replace("{{", "{")
