@@ -1789,7 +1789,7 @@ def infer_location_tag_fields(entry: dict[str, Any], script_json: dict[str, Any]
             str(entry.get("whole_video_summary") or ""),
             str(entry.get("summary") or ""),
             str(entry.get("content_type_reasoning") or ""),
-            flatten_script_text(script_json or library_script_json(entry.get("entry_id"))),
+            flatten_script_text(script_json or {}),
         ]
     ).lower()
     terms = {
