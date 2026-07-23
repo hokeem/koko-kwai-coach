@@ -1264,6 +1264,11 @@ def split_video_urls(raw: str) -> list[str]:
     return unique_urls_from_values(extract_http_urls(raw))
 
 
+def sanitize_analysis_prompt(value: Any, limit: int = 1200) -> str:
+    prompt = re.sub(r"\s+", " ", str(value or "").strip())
+    return prompt[:limit]
+
+
 def extract_http_urls(raw: str) -> list[str]:
     text = str(raw or "")
     candidates = re.findall(r"https?://[^\s<>'\"）)\]}]+", text, flags=re.IGNORECASE)
@@ -6144,6 +6149,7 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "id": item.get("id"),
         "index": item.get("index"),
         "video_url": item.get("video_url"),
+        "user_prompt": item.get("user_prompt") or "",
         "status": item.get("status"),
         "updated_at": item.get("updated_at"),
         "completed_at": item.get("completed_at"),
@@ -6212,6 +6218,7 @@ def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
         "updated_at": job.get("updated_at"),
         "video_url": job.get("video_url"),
         "video_urls": job.get("video_urls") or [],
+        "user_prompt": job.get("user_prompt") or "",
         "error": job.get("error"),
         "html_url": job.get("html_url"),
         "report_url": job.get("report_url"),
@@ -8340,6 +8347,9 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
             "--model",
             model_name,
         ]
+        analysis_prompt = sanitize_analysis_prompt(item.get("user_prompt") or "")
+        if analysis_prompt:
+            cmd.extend(["--user-prompt", analysis_prompt])
         tried.append(model_name)
         update_job_item(
             parent_job_id,
@@ -8575,9 +8585,10 @@ def run_job_batch(job_id: str) -> None:
         update_job(job_id, status="failed", error=friendly_error(str(exc)), completed_at=now_iso(), stage="failed", stage_message="Batch failed.")
 
 
-def create_job(video_urls: list[str], mode: str = "") -> dict[str, Any]:
+def create_job(video_urls: list[str], mode: str = "", user_prompt: str = "") -> dict[str, Any]:
     normalized_mode = str(mode or "").strip().lower()
     job_mode = "understanding" if normalized_mode == "understanding" else ("batch" if len(video_urls) > 1 else "single")
+    analysis_prompt = sanitize_analysis_prompt(user_prompt)
     job_id = uuid4().hex
     items = []
     for index, video_url in enumerate(video_urls):
@@ -8587,6 +8598,7 @@ def create_job(video_urls: list[str], mode: str = "") -> dict[str, Any]:
                 "id": item_id,
                 "index": index,
                 "video_url": video_url,
+                "user_prompt": analysis_prompt,
                 "status": "queued",
                 "stage": "queued",
                 "stage_message": "Queued.",
@@ -8627,6 +8639,7 @@ def create_job(video_urls: list[str], mode: str = "") -> dict[str, Any]:
         "mode": job_mode,
         "video_url": video_urls[0] if len(video_urls) == 1 else "",
         "video_urls": video_urls,
+        "user_prompt": analysis_prompt,
         "status": "queued",
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -9276,6 +9289,28 @@ def studio_html() -> str:
       border-color: rgba(255,130,0,.45);
       box-shadow: 0 0 0 4px rgba(255,130,0,.10);
       transform: translateY(-1px);
+    }}
+    .analysis-prompt-box {{
+      margin-top: 18px;
+      padding: 16px;
+      border: 1px solid rgba(255,130,0,.16);
+      border-radius: 22px;
+      background: rgba(255,255,255,.58);
+    }}
+    .analysis-prompt-box label {{
+      display: block;
+      margin-bottom: 8px;
+    }}
+    .analysis-prompt {{
+      min-height: 92px;
+      font-size: 15px;
+    }}
+    .analysis-prompt-note {{
+      margin: 8px 0 0;
+      color: rgba(31,31,31,.56);
+      font-size: 13px;
+      line-height: 1.55;
+      font-weight: 650;
     }}
     .composer-head {{
       display: block;
@@ -11702,6 +11737,11 @@ def studio_html() -> str:
               </div>
               <label for="video-url">视频链接 <span style="font-weight:500;color:rgba(31,31,31,.50)">（每行粘贴一个链接）</span></label>
               <textarea id="video-url" placeholder="每行粘贴一个链接&#10;https://www.kwai.com/@.../video/...&#10;https://www.kwai.com/@.../video/..."></textarea>
+              <div class="analysis-prompt-box">
+                <label for="analysis-prompt">增加一些提示词 <span style="font-weight:500;color:rgba(31,31,31,.50)">（选填）</span></label>
+                <textarea class="analysis-prompt" id="analysis-prompt" placeholder="例如：重点往夫妻误会方向拆；不要写成单纯出轨；强化结尾反转，适配巴西创作者复拍。"></textarea>
+                <p class="analysis-prompt-note">填写后，这段方向会参与 Gemini 主分析、本地对照分析、最终整理和叙述逻辑审查；如果最终故事偏离方向，系统会要求复核。</p>
+              </div>
               <div class="studio-helper-chips" aria-label="任务提示">
                 <span class="studio-helper-chip">🔗 支持 Kwai 链接</span>
                 <span class="studio-helper-chip">▤ 最多 50 条</span>
@@ -11832,6 +11872,7 @@ def studio_html() -> str:
     const translationSubmitBtn = document.getElementById("translation-submit-btn");
     const translationStatusBox = document.getElementById("translation-status-box");
     const videoInput = document.getElementById("video-url");
+    const analysisPromptInput = document.getElementById("analysis-prompt");
     const submitBtn = document.getElementById("submit-btn");
     const stopAllBtn = document.getElementById("stop-all-btn");
     const statusBox = document.getElementById("status-box");
@@ -14083,10 +14124,11 @@ def studio_html() -> str:
       submitBtn.disabled = true;
       setStatus("正在创建任务...");
       try {{
+        const userPrompt = String(analysisPromptInput?.value || "").trim();
         const res = await fetch("/api/jobs", {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ video_urls: videoUrls }})
+          body: JSON.stringify({{ video_urls: videoUrls, user_prompt: userPrompt }})
         }});
         const data = await readJsonSafely(res);
         if (!res.ok) {{
@@ -17173,8 +17215,14 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"error": f"Missing pipeline entrypoint: {AUTO_ANALYZE}"}, status=500)
             return
         mode = str(payload.get("mode") or "").strip().lower()
+        user_prompt = sanitize_analysis_prompt(
+            payload.get("user_prompt")
+            or payload.get("analysis_prompt")
+            or payload.get("extra_prompt")
+            or ""
+        )
         try:
-            job = create_job(video_urls, mode=mode)
+            job = create_job(video_urls, mode=mode, user_prompt=user_prompt)
         except Exception as exc:
             log_runtime_warning("analysis_job_create_failed", "Failed to create analysis job.", error=str(exc))
             status = 507 if is_no_space_error(exc) else 500

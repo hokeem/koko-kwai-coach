@@ -419,9 +419,15 @@ LOGIC_AUDIT_PROMPT = """你现在负责做“故事逻辑审查”，不是总�
   "fact_consistency": {"status": "pass/fail", "issues": ["..."]},
   "story_structure": {"status": "pass/fail", "issues": ["..."]},
   "causal_coherence": {"status": "pass/fail", "issues": ["..."]},
+  "user_direction_alignment": {"status": "pass/fail/not_applicable", "issues": ["..."]},
   "recommended_action": "proceed/force_recheck/prefer_v2/prefer_gemini/conservative_merge",
   "reasoning": "为什么"
 }
+
+如果输入中提供了 user_prompt / 用户额外分析方向：
+- 必须单独检查最终候选故事是否贴近这个方向
+- 只要候选故事明显偏离用户方向，user_direction_alignment.status 必须是 fail
+- user_direction_alignment.status 为 fail 时，recommended_action 必须是 force_recheck
 """
 
 
@@ -1555,6 +1561,51 @@ def harden_logic_audit(primary_result: dict, v2_local_result: dict, logic_audit:
     return audit
 
 
+def clean_user_prompt(value: str, limit: int = 1200) -> str:
+    prompt = re.sub(r"\s+", " ", str(value or "").strip())
+    return prompt[:limit]
+
+
+def user_prompt_block(user_prompt: str) -> str:
+    prompt = clean_user_prompt(user_prompt)
+    if not prompt:
+        return ""
+    return (
+        "\n\n【用户额外分析方向】\n"
+        f"{prompt}\n"
+        "这段方向来自 Koko 运营人员，优先级高于默认拆解倾向。"
+        "你必须在不违背视频事实的前提下，围绕这个方向理解人物关系、冲突、反转、标题、摘要和脚本表。"
+        "如果视频事实与该方向明显冲突，必须明确指出冲突，不能硬编。"
+    )
+
+
+def attach_user_prompt(payload: dict, user_prompt: str) -> dict:
+    data = dict(payload or {})
+    if user_prompt:
+        data["user_prompt"] = user_prompt
+    return data
+
+
+def harden_user_prompt_alignment(user_prompt: str, logic_audit: dict) -> dict:
+    if not user_prompt:
+        return dict(logic_audit or {})
+    audit = dict(logic_audit or {})
+    alignment = audit.get("user_direction_alignment")
+    if not isinstance(alignment, dict):
+        alignment = {}
+    status = str(alignment.get("status") or alignment.get("alignment") or "").strip().lower()
+    failed_values = {"fail", "failed", "conflict", "off_track", "misaligned", "not_aligned"}
+    if status in failed_values:
+        alignment["status"] = "fail"
+        audit["user_direction_alignment"] = alignment
+        audit["recommended_action"] = "force_recheck"
+        reasoning = str(audit.get("reasoning") or "").strip()
+        audit["reasoning"] = " ".join(
+            filter(None, [reasoning, "用户额外分析方向未被当前候选故事满足，因此强制进入复核。"])
+        ).strip()
+    return audit
+
+
 def main() -> int:
     try:
         ap = argparse.ArgumentParser()
@@ -1564,10 +1615,15 @@ def main() -> int:
         ap.add_argument("--supplement-model", default="gemini-2.5-flash-lite")
         ap.add_argument("--api-key")
         ap.add_argument("--api-key-file")
+        ap.add_argument("--user-prompt", default="", help="Optional operator guidance for story analysis.")
         args = ap.parse_args()
 
         out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
+        user_prompt = clean_user_prompt(args.user_prompt)
+        direction_block = user_prompt_block(user_prompt)
+        if user_prompt:
+            (out_dir / "user_prompt.txt").write_text(user_prompt, encoding="utf-8")
         write_progress(out_dir, "download", "正在下载视频")
         scripts_dir = Path(__file__).resolve().parent
         download_script = scripts_dir / "download_video.py"
@@ -1611,10 +1667,12 @@ def main() -> int:
 
         write_progress(out_dir, "gemini_analysis", "正在运行 Gemini 主分析链")
         primary_result, primary_raw, primary_model_used = run_video_json_prompt_with_fallback(
-            video, key, primary_models, PRIMARY_PROMPT, "primary analysis"
+            video, key, primary_models, PRIMARY_PROMPT + direction_block, "primary analysis"
         )
         primary_result = normalize_script_payload(primary_result, args.source_path)
         primary_result["primary_model_used"] = primary_model_used
+        if user_prompt:
+            primary_result["user_prompt"] = user_prompt
         primary_json_path.write_text(json.dumps(primary_result, ensure_ascii=False, indent=2), encoding="utf-8")
         primary_raw_path.write_text(json.dumps(primary_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1635,46 +1693,58 @@ def main() -> int:
             video,
             key,
             supplement_models,
-            V2_LOCAL_PROMPT + "\n\nmedia_probe:\n" + json.dumps(media_probe, ensure_ascii=False) + "\n\ntype_router:\n" + json.dumps(type_router, ensure_ascii=False),
+            V2_LOCAL_PROMPT
+            + direction_block
+            + "\n\nmedia_probe:\n"
+            + json.dumps(media_probe, ensure_ascii=False)
+            + "\n\ntype_router:\n"
+            + json.dumps(type_router, ensure_ascii=False),
             "v2 local analysis",
         )
         v2_local_result = normalize_script_payload(v2_local_payload, args.source_path)
         v2_local_result["v2_local_model_used"] = v2_local_model_used
+        if user_prompt:
+            v2_local_result["user_prompt"] = user_prompt
         v2_local_json_path.write_text(json.dumps(v2_local_result, ensure_ascii=False, indent=2), encoding="utf-8")
         v2_local_raw_path.write_text(json.dumps(v2_local_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
         write_progress(out_dir, "consistency_audit", "正在做 Gemini 与 v2 的一致性审查")
         comparison_report, comparison_raw, comparison_model_used = run_text_json_prompt_with_fallback(
-            {
+            attach_user_prompt({
                 "source_metadata": metadata,
                 "media_probe": media_probe,
                 "gemini_result": primary_result,
                 "v2_result": v2_local_result,
-            },
+            }, user_prompt),
             key,
             supplement_models,
-            COMPARISON_PROMPT,
+            COMPARISON_PROMPT + direction_block,
             "comparison report",
         )
         comparison_report = harden_comparison_report(primary_result, v2_local_result, comparison_report)
         comparison_report["comparison_model_used"] = comparison_model_used
+        if user_prompt:
+            comparison_report["user_prompt"] = user_prompt
         comparison_report_path.write_text(json.dumps(comparison_report, ensure_ascii=False, indent=2), encoding="utf-8")
         comparison_raw_path.write_text(json.dumps(comparison_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
         logic_audit, logic_audit_raw, logic_audit_model_used = run_text_json_prompt_with_fallback(
-            {
+            attach_user_prompt({
                 "source_metadata": metadata,
                 "gemini_result": primary_result,
                 "v2_result": v2_local_result,
                 "comparison_report": comparison_report,
-            },
+            }, user_prompt),
             key,
             supplement_models,
-            LOGIC_AUDIT_PROMPT,
+            LOGIC_AUDIT_PROMPT + direction_block,
             "logic audit",
         )
         logic_audit = harden_logic_audit(primary_result, v2_local_result, logic_audit, comparison_report)
+        logic_audit = harden_user_prompt_alignment(user_prompt, logic_audit)
         logic_audit["logic_audit_model_used"] = logic_audit_model_used
+        if user_prompt:
+            logic_audit["user_prompt"] = user_prompt
         logic_audit_path.write_text(json.dumps(logic_audit, ensure_ascii=False, indent=2), encoding="utf-8")
         logic_audit_raw_path.write_text(json.dumps(logic_audit_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1722,6 +1792,7 @@ def main() -> int:
         if windows:
             write_progress(out_dir, "targeted_recheck", "正在补充关键证据")
             supplement_prompt = SUPPLEMENT_PROMPT + "\n需要重点检查的窗口如下：\n" + json.dumps(windows, ensure_ascii=False)
+            supplement_prompt += direction_block
             supplement_result, supplement_raw, supplement_model_used = run_video_json_prompt_with_fallback(
                 video, key, supplement_models, supplement_prompt, "supplement evidence"
             )
@@ -1740,6 +1811,7 @@ def main() -> int:
                 + json.dumps(comparison_report, ensure_ascii=False)
                 + "\n\nlogic_audit:\n"
                 + json.dumps(logic_audit, ensure_ascii=False)
+                + direction_block
             )
             conflict_recheck, conflict_recheck_raw, conflict_recheck_model_used = run_video_json_prompt_with_fallback(
                 video, key, supplement_models, conflict_prompt, "conflict recheck"
@@ -1753,26 +1825,28 @@ def main() -> int:
 
         write_progress(out_dir, "arbitration", "正在仲裁 Gemini 与 v2 的差异")
         arbitration_result, arbitration_raw, arbitration_model_used = run_text_json_prompt_with_fallback(
-            {
+            attach_user_prompt({
                 "source_metadata": metadata,
                 "gemini_result": primary_result,
                 "v2_result": v2_local_result,
                 "comparison_report": comparison_report,
                 "logic_audit": logic_audit,
                 "conflict_recheck": conflict_recheck,
-            },
+            }, user_prompt),
             key,
             refine_models,
-            ARBITRATION_PROMPT,
+            ARBITRATION_PROMPT + direction_block,
             "arbitration",
         )
         arbitration_result["arbitration_model_used"] = arbitration_model_used
+        if user_prompt:
+            arbitration_result["user_prompt"] = user_prompt
         arbitration_path.write_text(json.dumps(arbitration_result, ensure_ascii=False, indent=2), encoding="utf-8")
         arbitration_raw_path.write_text(json.dumps(arbitration_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
         write_progress(out_dir, "final_output", "正在整理最终脚本并生成输出")
         final_result, final_raw, refine_model_used = run_text_json_prompt_with_fallback(
-            {
+            attach_user_prompt({
                 "source_metadata": json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {},
                 "primary_draft": primary_result,
                 "gemini_primary_draft": primary_result,
@@ -1785,13 +1859,15 @@ def main() -> int:
                 "logic_audit": logic_audit,
                 "arbitration_result": arbitration_result,
                 "conflict_recheck": conflict_recheck,
-            },
+            }, user_prompt),
             key,
             refine_models,
-            REFINE_PROMPT,
+            REFINE_PROMPT + direction_block,
             "final refine",
         )
         final_result = normalize_script_payload(final_result, args.source_path)
+        if user_prompt:
+            final_result["user_prompt"] = user_prompt
         final_result["primary_model_used"] = primary_model_used
         final_result["v2_local_model_used"] = v2_local_model_used
         final_result["supplement_model_used"] = supplement_model_used
