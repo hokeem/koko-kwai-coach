@@ -8103,11 +8103,15 @@ def regenerate_item_outputs(
     output_dir = RESULTS_ROOT / item_id
     output_dir.mkdir(parents=True, exist_ok=True)
     if target_language == "pt":
-        pt_script = translate_script_to_portuguese(
-            json.loads(json.dumps(script_json or {}, ensure_ascii=False)),
-            GOOGLE_API_KEY,
-            unique_models(*STABLE_VIDEO_MODELS, *MODEL_CANDIDATES, *PRIMARY_FALLBACK_MODELS, *SUPPLEMENT_FALLBACK_MODELS),
-        )
+        source_script = json.loads(json.dumps(script_json or {}, ensure_ascii=False))
+        if str(source_script.get("display_language") or "").strip().lower() == "pt":
+            pt_script = source_script
+        else:
+            pt_script = translate_script_to_portuguese(
+                source_script,
+                GOOGLE_API_KEY,
+                unique_models(*STABLE_VIDEO_MODELS, *MODEL_CANDIDATES, *PRIMARY_FALLBACK_MODELS, *SUPPLEMENT_FALLBACK_MODELS),
+            )
         pt_variant = generate_script_variant_outputs(output_dir, item_id, pt_script, video_url, locale="pt")
         with job_lock:
             existing_item = jobs[parent_job_id]["items"][item_index]
@@ -8215,6 +8219,77 @@ def regenerate_item_outputs(
     elif library_entry_exists(item_id):
         sync_library_entry_from_item(parent_job_id, item, use_llm=False, delete_source=False)
     return public_item_view(item)
+
+
+def save_item_edits_to_library(
+    parent_job_id: str,
+    item_index: int,
+    item_id: str,
+    updated_script: dict[str, Any],
+    *,
+    target_language: str,
+) -> dict[str, Any]:
+    target_language = "pt" if str(target_language or "").strip().lower() == "pt" else "zh"
+    with job_lock:
+        current_item = json.loads(json.dumps(jobs[parent_job_id]["items"][item_index], ensure_ascii=False))
+    video_url = current_item.get("video_url") or ""
+    if target_language == "pt":
+        output_dir = RESULTS_ROOT / item_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pt_variant = generate_script_variant_outputs(output_dir, item_id, updated_script, video_url, locale="pt")
+        with job_lock:
+            existing_item = jobs[parent_job_id]["items"][item_index]
+            zh_result_json = existing_item.get("zh_result_json") or {}
+            zh_html_url = existing_item.get("zh_html_url") or ""
+            zh_docx_url = existing_item.get("zh_docx_url") or ""
+        update_payload = {
+            "pt_result_json": pt_variant["script_json"],
+            "pt_html_url": pt_variant["html_url"],
+            "pt_docx_url": pt_variant["docx_url"],
+            "result_json": pt_variant["script_json"],
+            "html_url": pt_variant["html_url"],
+            "docx_url": pt_variant["docx_url"],
+            "zh_result_json": zh_result_json,
+            "zh_html_url": zh_html_url,
+            "zh_docx_url": zh_docx_url,
+            "display_language": "pt",
+            "title": pt_variant["script_json"].get("title") or "Roteiro do vídeo",
+            "edited": True,
+            "saved_to_library_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        update_job_item(parent_job_id, item_index, **update_payload)
+        with job_lock:
+            job = jobs.get(parent_job_id)
+            if job and (job.get("id") == item_id or len(job.get("items") or []) == 1):
+                job.update(update_payload)
+                save_jobs()
+            item = jobs[parent_job_id]["items"][item_index]
+        persist_library_entry(parent_job_id, item, use_llm=True)
+        return public_item_view(item)
+
+    regenerate_item_outputs(
+        parent_job_id,
+        item_index,
+        item_id,
+        video_url,
+        updated_script,
+        persist_library=False,
+        target_language="zh",
+    )
+    refreshed_context = find_item_context(item_id)
+    if not refreshed_context:
+        raise RuntimeError("Script item not found.")
+    parent_job_id, item_index, item = refreshed_context
+    return regenerate_item_outputs(
+        parent_job_id,
+        item_index,
+        item_id,
+        item.get("video_url") or video_url,
+        item.get("zh_result_json") or item.get("result_json") or {},
+        persist_library=True,
+        target_language="pt",
+    )
 
 
 def set_item_display_language(item_id: str, language: str) -> dict[str, Any]:
@@ -12980,8 +13055,10 @@ def studio_html() -> str:
           <div class="library-confirm-card done" data-library-confirm-card="${{item.id}}">
             <div class="library-confirm-copy">
               <div class="library-confirm-title">已入库</div>
-              <div class="library-confirm-note">这条脚本已经进入脚本管理，后续可以统一编辑、上下架、导出或删除。</div>
+              <div class="library-confirm-note">这条脚本已在脚本库中。修改下方内容后，可以随时点击右侧按钮完整覆盖脚本库版本。</div>
             </div>
+            ${{manualTagPickerMarkup(item)}}
+            <button class="action-link primary" type="button" data-save-library="${{item.id}}">保存当前版本并更新入库</button>
             <a class="action-link" href="/library">打开脚本管理</a>
           </div>
         `;
@@ -17252,54 +17329,13 @@ class AppHandler(BaseHTTPRequestHandler):
                     raise RuntimeError("Script item not found.")
                 parent_job_id, item_index, item = refreshed_context
                 if action == "save-to-library":
-                    if target_language == "pt":
-                        pt_item = regenerate_item_outputs(
-                            parent_job_id,
-                            item_index,
-                            item_id,
-                            item.get("video_url") or "",
-                            updated_script,
-                            persist_library=False,
-                            target_language="pt",
-                        )
-                        ensure_storyboard_cover_ready(item_id)
-                        refreshed_context = find_item_context(item_id)
-                        if not refreshed_context:
-                            raise RuntimeError("Script item not found.")
-                        parent_job_id, item_index, item = refreshed_context
-                        updated_item = regenerate_item_outputs(
-                            parent_job_id,
-                            item_index,
-                            item_id,
-                            item.get("video_url") or "",
-                            item.get("pt_result_json") or pt_item.get("pt_result_json") or item.get("result_json") or {},
-                            persist_library=True,
-                            target_language="pt",
-                        )
-                    else:
-                        regenerate_item_outputs(
-                            parent_job_id,
-                            item_index,
-                            item_id,
-                            item.get("video_url") or "",
-                            updated_script,
-                            persist_library=False,
-                            target_language="zh",
-                        )
-                        ensure_storyboard_cover_ready(item_id)
-                        refreshed_context = find_item_context(item_id)
-                        if not refreshed_context:
-                            raise RuntimeError("Script item not found.")
-                        parent_job_id, item_index, item = refreshed_context
-                        updated_item = regenerate_item_outputs(
-                            parent_job_id,
-                            item_index,
-                            item_id,
-                            item.get("video_url") or "",
-                            item.get("zh_result_json") or item.get("result_json") or {},
-                            persist_library=True,
-                            target_language="pt",
-                        )
+                    updated_item = save_item_edits_to_library(
+                        parent_job_id,
+                        item_index,
+                        item_id,
+                        updated_script,
+                        target_language=target_language,
+                    )
                 else:
                     updated_item = regenerate_item_outputs(
                         parent_job_id,
