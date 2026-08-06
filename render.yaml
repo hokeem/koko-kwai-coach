@@ -10,6 +10,8 @@ services:
         value: "3.11.9"
       - key: GOOGLE_API_KEY
         sync: false
+      - key: APIFY_TOKEN
+        sync: false
       - key: VIDEO_ANALYSIS_WEB_DATA_DIR
         value: /var/data
       - key: VIDEO_ANALYSIS_MAX_CONCURRENT_JOBS

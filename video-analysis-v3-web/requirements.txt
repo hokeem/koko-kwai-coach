@@ -1,5 +1,5 @@
 # Web app runtime dependency.
 python-docx==1.1.2
-yt-dlp==2025.4.30
+yt-dlp==2025.10.14
 imageio-ffmpeg==0.5.1
 Pillow==10.4.0

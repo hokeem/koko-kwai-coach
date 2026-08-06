@@ -19,6 +19,11 @@ import urllib.request
 from pathlib import Path
 
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/123 Safari/537.36"
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
+APIFY_API_BASE = os.environ.get("APIFY_API_BASE", "https://api.apify.com/v2").rstrip("/")
+APIFY_INSTAGRAM_ACTOR = os.environ.get("APIFY_INSTAGRAM_ACTOR", "apify~instagram-scraper").strip()
+APIFY_TIKTOK_ACTOR = os.environ.get("APIFY_TIKTOK_ACTOR", "clockworks~tiktok-scraper").strip()
+APIFY_TIMEOUT_SECONDS = max(30, int(os.environ.get("APIFY_TIMEOUT_SECONDS", "180")))
 RETRYABLE_ERRORS = (
     urllib.error.URLError,
     ssl.SSLError,
@@ -268,6 +273,143 @@ def download_url(url: str, dest: Path, referer: str, timeout: int = 120, attempt
         raise RuntimeError(f"mp4 download failed: {exc}") from exc
 
 
+def social_platform(url: str) -> str:
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+    if host == "instagram.com" or host.endswith(".instagram.com"):
+        return "instagram"
+    if host == "tiktok.com" or host.endswith(".tiktok.com"):
+        return "tiktok"
+    return ""
+
+
+def apify_actor_items(actor_id: str, payload: dict) -> list[dict]:
+    if not APIFY_TOKEN:
+        return []
+    endpoint = (
+        f"{APIFY_API_BASE}/acts/{urllib.parse.quote(actor_id, safe='~')}/"
+        f"run-sync-get-dataset-items?token={urllib.parse.quote(APIFY_TOKEN, safe='')}"
+    )
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": UA},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=APIFY_TIMEOUT_SECONDS) as response:
+            result = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"Apify returned HTTP {exc.code}: {detail}") from exc
+    if not isinstance(result, list):
+        raise RuntimeError("Apify returned an unexpected dataset response")
+    return [item for item in result if isinstance(item, dict)]
+
+
+def first_http_url(values: object) -> str:
+    if isinstance(values, str) and values.startswith(("http://", "https://")):
+        return values
+    if isinstance(values, list):
+        for value in values:
+            found = first_http_url(value)
+            if found:
+                return found
+    return ""
+
+
+def apify_media_url(platform: str, item: dict) -> str:
+    if platform == "instagram":
+        direct = first_http_url(item.get("videoUrl"))
+        if direct:
+            return direct
+        for child in item.get("childPosts") or []:
+            if isinstance(child, dict):
+                direct = first_http_url(child.get("videoUrl"))
+                if direct:
+                    return direct
+        return ""
+
+    video_meta = item.get("videoMeta") if isinstance(item.get("videoMeta"), dict) else {}
+    for candidate in (
+        item.get("downloadAddr"),
+        item.get("videoDownloadUrl"),
+        item.get("mediaUrls"),
+        video_meta.get("downloadAddr"),
+    ):
+        direct = first_http_url(candidate)
+        if direct:
+            return direct
+    return ""
+
+
+def apify_download_url(media_url: str) -> str:
+    parsed = urllib.parse.urlparse(media_url)
+    if parsed.hostname != "api.apify.com" or not APIFY_TOKEN:
+        return media_url
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if not any(key == "token" for key, _ in query):
+        query.append(("token", APIFY_TOKEN))
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
+
+
+def try_apify(url: str, source: Path, meta: dict) -> bool:
+    platform = social_platform(url)
+    if not platform or not APIFY_TOKEN:
+        return False
+    if platform == "instagram":
+        actor_id = APIFY_INSTAGRAM_ACTOR
+        payload = {"directUrls": [url], "resultsType": "posts", "resultsLimit": 1}
+    else:
+        actor_id = APIFY_TIKTOK_ACTOR
+        payload = {
+            "postURLs": [url],
+            "resultsPerPage": 1,
+            "scrapeRelatedVideos": False,
+            "shouldDownloadVideos": True,
+            "shouldDownloadCovers": False,
+        }
+    if not actor_id:
+        return False
+    try:
+        items = apify_actor_items(actor_id, payload)
+        if not items:
+            raise RuntimeError("Apify returned no video records")
+        item = items[0]
+        media_url = apify_media_url(platform, item)
+        if not media_url:
+            error = item.get("error") or item.get("errorDescription") or item.get("errorMessage")
+            raise RuntimeError(str(error or "Apify returned no downloadable video URL"))
+        size = download_url(apify_download_url(media_url), source, url, timeout=APIFY_TIMEOUT_SECONDS)
+        video_meta = item.get("videoMeta") if isinstance(item.get("videoMeta"), dict) else {}
+        author_meta = item.get("authorMeta") if isinstance(item.get("authorMeta"), dict) else {}
+        meta.update({
+            "local_video": str(source),
+            "route": f"apify-{platform}",
+            "platform": platform,
+            "provider": "apify",
+            "provider_actor": actor_id,
+            "video_url": media_url,
+            "downloaded_bytes": size,
+            "platform_video_id": str(item.get("id") or item.get("shortCode") or ""),
+            "title": str(item.get("caption") or item.get("text") or item.get("title") or ""),
+            "author": str(
+                item.get("ownerUsername")
+                or author_meta.get("name")
+                or author_meta.get("nickName")
+                or ""
+            ),
+            "cover_url": str(item.get("displayUrl") or video_meta.get("coverUrl") or ""),
+        })
+        return True
+    except Exception as exc:
+        meta["apify_error"] = re.sub(r"token=[^&\s]+", "token=***", str(exc))[:700]
+        return False
+
+
 def try_ytdlp(url: str, dest: Path) -> bool:
     if not shutil.which("yt-dlp"):
         return False
@@ -305,7 +447,19 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     inp = args.input
     source = out / "source.mp4"
+    metadata_path = out / "source_metadata.json"
     meta = {"input": inp, "source_url": inp if inp.startswith(("http://", "https://")) else None}
+
+    if source.exists() and source.stat().st_size > 0 and metadata_path.exists():
+        try:
+            cached_meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached_meta = {}
+        if cached_meta.get("input") == inp:
+            cached_meta["local_video"] = str(source)
+            cached_meta["cache_hit"] = True
+            print(json.dumps(cached_meta, ensure_ascii=False, indent=2))
+            return 0
 
     if Path(inp).exists():
         src = Path(inp)
@@ -317,6 +471,8 @@ def main() -> int:
             pass
         elif try_ytdlp(inp, out):
             meta.update({"local_video": str(source), "route": "yt-dlp"})
+        elif try_apify(inp, source, meta):
+            pass
         else:
             page = fetch_html(inp, out)
             meta["title"] = extract_title(page)
@@ -330,7 +486,7 @@ def main() -> int:
     if "size" not in meta and source.exists():
         meta["size"] = source.stat().st_size
     meta.setdefault("mime_type", mimetypes.guess_type(str(source))[0] or "video/mp4")
-    (out / "source_metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    metadata_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(meta, ensure_ascii=False, indent=2))
     return 0
 
