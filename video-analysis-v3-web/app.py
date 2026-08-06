@@ -7592,32 +7592,10 @@ def generate_storyboard_preview(item_id: str, prompt_override: str = "", edits_p
         raise RuntimeError("Only completed scripts can generate storyboard covers.")
     if not GOOGLE_API_KEY:
         raise RuntimeError("Missing GOOGLE_API_KEY for storyboard generation.")
-    has_edits = isinstance(edits_payload, dict) and any(
-        key in edits_payload
-        for key in ["title", "whole_video_summary", "mechanism_reason", "core_viral_points", "replaceable_parts", "rows"]
-    )
-    if has_edits:
-        edited_script = apply_script_edits(item.get("result_json") or {}, edits_payload or {})
-        target_language = "pt" if str(item.get("display_language") or "").strip().lower() == "pt" else "zh"
-        if target_language == "pt":
-            edited_script["display_language"] = "pt"
-        regenerate_item_outputs(
-            parent_job_id,
-            item_index,
-            item_id,
-            item.get("video_url") or "",
-            edited_script,
-            persist_library=False,
-            target_language=target_language,
-        )
-        refreshed_context = find_item_context(item_id)
-        if not refreshed_context:
-            raise RuntimeError("Script item not found.")
-        parent_job_id, item_index, item = refreshed_context
     output_dir = RESULTS_ROOT / item_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    base_script = item.get("zh_result_json") or item.get("result_json") or {}
-    script_json = base_script
+    base_script = item.get("result_json") or item.get("zh_result_json") or {}
+    script_json = apply_script_edits(base_script, edits_payload or {}) if isinstance(edits_payload, dict) and edits_payload else base_script
     assets = generate_storyboard_assets(item_id, output_dir, script_json, prompt_override=prompt_override)
     state = save_storyboard_state(
         item_id,
@@ -7628,7 +7606,6 @@ def generate_storyboard_preview(item_id: str, prompt_override: str = "", edits_p
     )
     preview_url = state.get("storyboard_preview_url") or f"/results/{item_id}/{assets.get('preview_name') or ''}"
     cover_url = state.get("storyboard_cover_url") or assets.get("cover_url") or preview_url
-    refreshed = apply_storyboard_cover_to_scripts(parent_job_id, item_index, item_id, cover_url)
     update_job_item(
         parent_job_id,
         item_index,
@@ -8144,6 +8121,9 @@ def regenerate_item_outputs(
                 GOOGLE_API_KEY,
                 unique_models(*STABLE_VIDEO_MODELS, *MODEL_CANDIDATES, *PRIMARY_FALLBACK_MODELS, *SUPPLEMENT_FALLBACK_MODELS),
             )
+        for optional_list_field in ("core_viral_points", "replaceable_parts"):
+            if isinstance(source_script.get(optional_list_field), list) and not source_script.get(optional_list_field):
+                pt_script[optional_list_field] = []
         pt_variant = generate_script_variant_outputs(output_dir, item_id, pt_script, video_url, locale="pt")
         with job_lock:
             existing_item = jobs[parent_job_id]["items"][item_index]
@@ -8343,34 +8323,12 @@ def set_item_display_language(item_id: str, language: str, edits_payload: dict[s
         updated_script = apply_script_edits(current_script, edits_payload or {})
         if str(item.get("display_language") or "").strip().lower() == "pt":
             updated_script["display_language"] = "pt"
-            return regenerate_item_outputs(
-                parent_job_id,
-                item_index,
-                item_id,
-                item.get("video_url") or "",
-                updated_script,
-                persist_library=False,
-                target_language="pt",
-            )
-        regenerate_item_outputs(
-            parent_job_id,
-            item_index,
-            item_id,
-            item.get("video_url") or "",
-            updated_script,
-            persist_library=False,
-            target_language="zh",
-        )
-        refreshed_context = find_item_context(item_id)
-        if not refreshed_context:
-            raise RuntimeError("Script item not found.")
-        parent_job_id, item_index, item = refreshed_context
         return regenerate_item_outputs(
             parent_job_id,
             item_index,
             item_id,
             item.get("video_url") or "",
-            item.get("zh_result_json") or item.get("result_json") or {},
+            updated_script,
             persist_library=False,
             target_language="pt",
         )
@@ -12987,7 +12945,7 @@ def studio_html() -> str:
     }}
 
     function normalizeInsightItems(value, fallbackItems = [{{ label: "要点", text: "无" }}]) {{
-      if (Array.isArray(value) && value.length) return value;
+      if (Array.isArray(value)) return value;
       return fallbackItems;
     }}
 
@@ -13690,17 +13648,30 @@ def studio_html() -> str:
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Storyboard generation failed");
-        showToast("示意图已生成", "已经按当前脚本生成新的分镜示意图，并更新为脚本封面。");
-        if (activeJobId) {{
-          pollJob(activeJobId);
-        }} else {{
-          window.location.reload();
+        const item = data.item || {{}};
+        const previewUrl = item.storyboard_preview_url || item.storyboard_cover_url || "";
+        if (previewUrl) {{
+          const panel = trigger?.closest(".storyboard-panel") || document.querySelector(`[data-storyboard-prompt="${{itemId}}"]`)?.closest(".storyboard-panel");
+          const versioned = versionedResultUrl(previewUrl, item);
+          const previewHtml = `<div class="storyboard-preview-wrap"><img class="storyboard-preview" src="${{escapeHtml(versioned)}}" alt="分解示意图"></div>`;
+          const existingWrap = panel?.querySelector(".storyboard-preview-wrap");
+          const empty = panel?.querySelector(".storyboard-empty");
+          if (existingWrap) existingWrap.outerHTML = previewHtml;
+          else if (empty) empty.outerHTML = previewHtml;
+          if (trigger) trigger.textContent = "重新生成示意图";
         }}
+        if (promptField && item.storyboard_prompt) promptField.value = item.storyboard_prompt;
+        showToast("示意图已生成", "已经按当前脚本生成新的分镜示意图，并更新为脚本封面。");
       }} catch (error) {{
         showToast("生成失败", String(error.message || error));
         if (trigger) {{
           trigger.disabled = false;
           trigger.textContent = original;
+        }}
+      }} finally {{
+        if (trigger) {{
+          trigger.disabled = false;
+          if (trigger.textContent === "生成中...") trigger.textContent = original;
         }}
       }}
     }}
