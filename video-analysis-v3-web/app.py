@@ -7583,7 +7583,7 @@ def generate_storyboard_assets(
     raise RuntimeError(friendly_error(str(last_error or "Storyboard generation failed.")))
 
 
-def generate_storyboard_preview(item_id: str, prompt_override: str = "") -> dict[str, Any]:
+def generate_storyboard_preview(item_id: str, prompt_override: str = "", edits_payload: dict[str, Any] | None = None) -> dict[str, Any]:
     context = find_item_context(item_id)
     if not context:
         raise RuntimeError("Script item not found.")
@@ -7592,9 +7592,32 @@ def generate_storyboard_preview(item_id: str, prompt_override: str = "") -> dict
         raise RuntimeError("Only completed scripts can generate storyboard covers.")
     if not GOOGLE_API_KEY:
         raise RuntimeError("Missing GOOGLE_API_KEY for storyboard generation.")
+    has_edits = isinstance(edits_payload, dict) and any(
+        key in edits_payload
+        for key in ["title", "whole_video_summary", "mechanism_reason", "core_viral_points", "replaceable_parts", "rows"]
+    )
+    if has_edits:
+        edited_script = apply_script_edits(item.get("result_json") or {}, edits_payload or {})
+        target_language = "pt" if str(item.get("display_language") or "").strip().lower() == "pt" else "zh"
+        if target_language == "pt":
+            edited_script["display_language"] = "pt"
+        regenerate_item_outputs(
+            parent_job_id,
+            item_index,
+            item_id,
+            item.get("video_url") or "",
+            edited_script,
+            persist_library=False,
+            target_language=target_language,
+        )
+        refreshed_context = find_item_context(item_id)
+        if not refreshed_context:
+            raise RuntimeError("Script item not found.")
+        parent_job_id, item_index, item = refreshed_context
     output_dir = RESULTS_ROOT / item_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    script_json = item.get("zh_result_json") or item.get("result_json") or {}
+    base_script = item.get("zh_result_json") or item.get("result_json") or {}
+    script_json = base_script
     assets = generate_storyboard_assets(item_id, output_dir, script_json, prompt_override=prompt_override)
     state = save_storyboard_state(
         item_id,
@@ -7603,11 +7626,15 @@ def generate_storyboard_preview(item_id: str, prompt_override: str = "") -> dict
         cover_name=assets.get("cover_name") or "",
         model=assets.get("image_model") or assets.get("prompt_model") or "",
     )
+    preview_url = state.get("storyboard_preview_url") or f"/results/{item_id}/{assets.get('preview_name') or ''}"
+    cover_url = state.get("storyboard_cover_url") or assets.get("cover_url") or preview_url
+    refreshed = apply_storyboard_cover_to_scripts(parent_job_id, item_index, item_id, cover_url)
     update_job_item(
         parent_job_id,
         item_index,
         storyboard_prompt=state.get("storyboard_prompt") or assets.get("prompt") or "",
-        storyboard_preview_url=state.get("storyboard_preview_url") or f"/results/{item_id}/{assets.get('preview_name') or ''}",
+        storyboard_preview_url=preview_url,
+        storyboard_cover_url=cover_url,
         storyboard_updated_at=state.get("storyboard_updated_at") or now_iso(),
     )
     with job_lock:
@@ -8297,7 +8324,7 @@ def save_item_edits_to_library(
     )
 
 
-def set_item_display_language(item_id: str, language: str) -> dict[str, Any]:
+def set_item_display_language(item_id: str, language: str, edits_payload: dict[str, Any] | None = None) -> dict[str, Any]:
     context = find_item_context(item_id)
     if not context:
         raise RuntimeError("Script item not found.")
@@ -8307,6 +8334,46 @@ def set_item_display_language(item_id: str, language: str) -> dict[str, Any]:
     if language not in {"zh", "pt"}:
         raise RuntimeError("Unsupported language.")
     output_dir = RESULTS_ROOT / item_id
+    has_edits = isinstance(edits_payload, dict) and any(
+        key in edits_payload
+        for key in ["title", "whole_video_summary", "mechanism_reason", "core_viral_points", "replaceable_parts", "rows"]
+    )
+    if has_edits and language == "pt":
+        current_script = item.get("result_json") or {}
+        updated_script = apply_script_edits(current_script, edits_payload or {})
+        if str(item.get("display_language") or "").strip().lower() == "pt":
+            updated_script["display_language"] = "pt"
+            return regenerate_item_outputs(
+                parent_job_id,
+                item_index,
+                item_id,
+                item.get("video_url") or "",
+                updated_script,
+                persist_library=False,
+                target_language="pt",
+            )
+        regenerate_item_outputs(
+            parent_job_id,
+            item_index,
+            item_id,
+            item.get("video_url") or "",
+            updated_script,
+            persist_library=False,
+            target_language="zh",
+        )
+        refreshed_context = find_item_context(item_id)
+        if not refreshed_context:
+            raise RuntimeError("Script item not found.")
+        parent_job_id, item_index, item = refreshed_context
+        return regenerate_item_outputs(
+            parent_job_id,
+            item_index,
+            item_id,
+            item.get("video_url") or "",
+            item.get("zh_result_json") or item.get("result_json") or {},
+            persist_library=False,
+            target_language="pt",
+        )
     if language == "pt":
         pt_script = item.get("pt_result_json") or {}
         if not pt_script:
@@ -10397,10 +10464,13 @@ def studio_html() -> str:
       align-items: stretch;
       flex-wrap: wrap;
       gap: 10px;
-      padding: 10px;
+      padding: 16px;
+    }}
+    .confirm-pane {{
+      padding: 18px;
     }}
     .ops-section.final-action {{
-      flex: 1 1 360px;
+      flex: 1 1 100%;
     }}
     .ops-section {{
       flex: 1 1 220px;
@@ -10422,6 +10492,9 @@ def studio_html() -> str:
       margin: 0;
       gap: 8px;
     }}
+    .followup-actions .link-row {{
+      align-items: stretch;
+    }}
     .ops-pane .action-link {{
       min-height: 38px;
       padding: 9px 14px;
@@ -10429,7 +10502,7 @@ def studio_html() -> str:
     .ops-pane .library-confirm-card {{
       min-height: 100%;
       margin: 0;
-      padding: 12px;
+      padding: 18px;
       border-radius: 14px;
       background: rgba(255,255,255,.88);
     }}
@@ -13108,7 +13181,6 @@ def studio_html() -> str:
       const rowsJson = escapeHtml(JSON.stringify(normalizeRows(script)));
       const mechanismReason = (((script.mechanism || {{}}).reason) || "");
       const corePointCards = normalizeInsightItems(script.core_viral_points, []);
-      const librarySaveLabel = (item.saved_to_library_at || item.in_library) ? "保存并更新葡语版本" : "保存并转葡语入库";
       const storyboardPrompt = normalizedText(item.storyboard_prompt || buildStoryboardPrompt(script), "");
       const storyboardPreviewUrl = versionedResultUrl(item.storyboard_preview_url || item.storyboard_cover_url || "", item);
       const renderInsightEditors = (items, kind) => {{
@@ -13169,18 +13241,12 @@ def studio_html() -> str:
                 : `<div class="storyboard-empty">这里会生成分镜稿风格的示意图。默认会根据当前脚本表自动写提示词，你也可以先改下面这段要求，再重新生成。</div>`}}
               <textarea class="structured-editor-textarea storyboard-prompt" data-storyboard-prompt="${{item.id}}">${{escapeHtml(storyboardPrompt)}}</textarea>
               <div class="storyboard-actions">
-                <button class="action-link" type="button" data-generate-storyboard-prompt="${{item.id}}">生成生图提示词</button>
+                <button class="action-link" type="button" data-generate-storyboard-prompt="${{item.id}}">重新生成生图提示词</button>
                 <button class="action-link primary" type="button" data-generate-storyboard="${{item.id}}">${{storyboardPreviewUrl ? "重新生成示意图" : "生成示意图"}}</button>
-                <button class="action-link" type="button" data-confirm-storyboard="${{item.id}}" ${{storyboardPreviewUrl ? "" : "disabled"}}>设为脚本封面</button>
               </div>
             </div>
           </section>
           <input type="hidden" data-edit-field="mechanism_reason" value="${{escapeHtml(normalizedText(mechanismReason))}}">
-          <div class="link-row structured-editor-actions">
-            ${{manualTagPickerMarkup(item, true)}}
-            <button class="action-link primary" type="button" data-save-edits="${{item.id}}">保存当前编辑</button>
-            <button class="action-link" type="button" data-save-library="${{item.id}}">${{librarySaveLabel}}</button>
-          </div>
         </div>
       `;
     }}
@@ -13469,6 +13535,8 @@ def studio_html() -> str:
     }}
 
     async function switchDisplayLanguage(itemId, language, button) {{
+      const payload = collectItemEdits(itemId) || {{}};
+      payload.language = language;
       const original = button.textContent;
       button.disabled = true;
       button.textContent = language === "pt" ? "转换中..." : "切换中...";
@@ -13476,7 +13544,7 @@ def studio_html() -> str:
         const response = await fetch(`/api/items/${{itemId}}/display-language`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ language }}),
+          body: JSON.stringify(payload),
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Language switch failed");
@@ -13607,6 +13675,8 @@ def studio_html() -> str:
     async function generateStoryboard(itemId, trigger) {{
       const promptField = document.querySelector(`[data-storyboard-prompt="${{itemId}}"]`);
       const prompt = String(promptField?.value || "").trim();
+      const payload = collectItemEdits(itemId) || {{}};
+      payload.prompt = prompt;
       const original = trigger ? trigger.textContent : "";
       if (trigger) {{
         trigger.disabled = true;
@@ -13616,11 +13686,11 @@ def studio_html() -> str:
         const response = await fetch(`/api/items/${{itemId}}/storyboard`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ prompt }}),
+          body: JSON.stringify(payload),
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Storyboard generation failed");
-        showToast("示意图已生成", "已经按当前脚本生成新的分镜示意图。");
+        showToast("示意图已生成", "已经按当前脚本生成新的分镜示意图，并更新为脚本封面。");
         if (activeJobId) {{
           pollJob(activeJobId);
         }} else {{
@@ -13718,15 +13788,20 @@ def studio_html() -> str:
                       ${{primaryEditor}}
                     </section>
                   </div>
-                  <aside class="workbench-pane ops-pane">
-                    <div class="ops-section">
+                  <section class="workbench-pane ops-pane">
+                    <div class="ops-section followup-actions">
                       <div class="ops-section-title">后续操作</div>
-                      <div class="link-row">${{links}}</div>
+                      <div class="link-row">
+                        <button class="action-link primary" type="button" data-save-edits="${{item.id}}">保存当前编辑</button>
+                        ${{links}}
+                      </div>
                     </div>
+                  </section>
+                  <section class="workbench-pane ops-pane confirm-pane">
                     <div class="ops-section final-action">
                       ${{libraryConfirm}}
                     </div>
-                  </aside>
+                  </section>
                 </div>
                 <aside class="workbench-pane assistant-sidebar" aria-label="Koko 修稿助手">
                   <section class="assistant-video-block">
@@ -17331,7 +17406,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if action == "display-language":
                 try:
-                    updated_item = set_item_display_language(item_id, str(payload.get("language") or "zh").strip().lower())
+                    updated_item = set_item_display_language(
+                        item_id,
+                        str(payload.get("language") or "zh").strip().lower(),
+                        payload if isinstance(payload, dict) else {},
+                    )
                 except Exception as exc:
                     self.send_json({"error": friendly_error(str(exc))}, status=500)
                     return
@@ -17434,7 +17513,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 if confirm_action:
                     updated_item = confirm_storyboard_cover(item_id)
                 else:
-                    updated_item = generate_storyboard_preview(item_id, str((payload or {}).get("prompt") or "").strip())
+                    updated_item = generate_storyboard_preview(
+                        item_id,
+                        str((payload or {}).get("prompt") or "").strip(),
+                        payload if isinstance(payload, dict) else {},
+                    )
             except Exception as exc:
                 self.send_json({"error": friendly_error(str(exc))}, status=500)
                 return
