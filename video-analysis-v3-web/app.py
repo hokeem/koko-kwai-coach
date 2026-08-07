@@ -17324,6 +17324,18 @@ class AppHandler(BaseHTTPRequestHandler):
             status, result = creator_admin_remote_json("/api/admin/submissions/backfill-creators", method="POST", payload=payload)
             self.send_json(result, status=status)
             return
+        if parsed.path == "/api/creator-admin/submissions/delete":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            status, result = creator_admin_remote_json("/api/admin/submissions/delete", method="POST", payload=payload)
+            self.send_json(result, status=status)
+            return
         creator_ops_update_match = re.fullmatch(r"/api/creator-admin/creators/([0-9a-f]{32})", parsed.path)
         if creator_ops_update_match:
             if not has_creator_admin_access(self):
