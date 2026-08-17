@@ -93,6 +93,9 @@ CREATOR_SUBMISSIONS_FILE = DATA_ROOT / "creator_submissions.json"
 CREATOR_SYNC_META_FILE = DATA_ROOT / "creator_sync_meta.json"
 CREATOR_IMPORT_JOBS_FILE = DATA_ROOT / "creator_import_jobs.json"
 CREATOR_ADMIN_SCRIPTS_CACHE_FILE = DATA_ROOT / "creator_admin_scripts_cache.json"
+CREATOR_ADMIN_CREATORS_CACHE_FILE = DATA_ROOT / "creator_admin_creators_cache.json"
+CREATOR_ADMIN_ACCOUNTS_CACHE_FILE = DATA_ROOT / "creator_admin_accounts_cache.json"
+CREATOR_ADMIN_ANALYTICS_CACHE_FILE = DATA_ROOT / "creator_admin_analytics_cache.json"
 CREATOR_ADMIN_STATE_FILE = DATA_ROOT / "creator_admin_state.json"
 CREATOR_LIBRARY_SOURCE_URL = os.environ.get("CREATOR_LIBRARY_SOURCE_URL", "https://koko-kwai-coach.onrender.com/api/library")
 CREATOR_LIBRARY_SYNC_INTERVAL_SEC = int(os.environ.get("CREATOR_LIBRARY_SYNC_INTERVAL_SEC", "86400"))
@@ -5857,6 +5860,27 @@ def save_creator_admin_scripts_cache(payload: dict[str, Any]) -> None:
     cached = dict(payload)
     cached["cached_at"] = now_iso()
     write_json_atomic(CREATOR_ADMIN_SCRIPTS_CACHE_FILE, cached)
+
+
+def load_creator_admin_cache(path: Path) -> dict[str, Any] | None:
+    data = read_json_file(path, default={})
+    return data if isinstance(data, dict) and data else None
+
+
+def save_creator_admin_cache(path: Path, payload: dict[str, Any]) -> None:
+    cached = dict(payload)
+    cached["cached_at"] = now_iso()
+    write_json_atomic(path, cached)
+
+
+def creator_admin_cached_payload(path: Path, message: str) -> tuple[int, dict[str, Any]] | None:
+    cached = load_creator_admin_cache(path)
+    if not cached:
+        return None
+    payload = dict(cached)
+    payload["from_cache"] = True
+    payload["remote_error"] = message
+    return 200, payload
 
 
 def load_creator_admin_state() -> dict[str, Any]:
@@ -15608,6 +15632,7 @@ const libraryMode=__LIBRARY_MODE__;const labels=["夫妻整蛊/冲突","夫妻�
 function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}}[c]))}}
 function noCacheUrl(url){{const methodUrl=String(url||"");if(!methodUrl.startsWith("/"))return methodUrl;const sep=methodUrl.includes("?")?"&":"?";return `${{methodUrl}}${{sep}}_=${{Date.now()}}`}}
 async function api(url,opts={{}}){{const method=String(opts.method||"GET").toUpperCase();const requestUrl=method==="GET"?noCacheUrl(url):url;const r=await fetch(requestUrl,{{credentials:"same-origin",cache:"no-store",headers:{{"Content-Type":"application/json","Cache-Control":"no-store"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}
+async function safeApi(url,fallback){{try{{return await api(url)}}catch(err){{return {{...(fallback||{{}}),_error:err.message||String(err)}}}}}}
 function loginView(msg=""){{app.innerHTML=`<section class="login"><form id="login-form"><span class="kicker">Koko 内部后台</span><h1>${{libraryMode?"脚本管理":"Creator 运营后台"}}</h1><p class="copy">${{libraryMode?"这里统一管理 Koko 入库脚本和 kokocomedy 前台脚本。":"这里管理创作者前台展示的脚本、标签、上下架和同步。"}}</p><input name="password" type="password" placeholder="后台密码" autofocus style="margin-top:16px"><button class="primary" style="width:100%;margin-top:12px" type="submit">进入后台</button><p class="status">${{esc(msg)}}</p></form></section>`}}
 function adminKicker(){{return libraryMode?"Koko Script Management":"Koko Creator Operations"}}
 function adminTitle(){{return libraryMode?"脚本管理":"Creator 运营后台"}}
@@ -15670,6 +15695,7 @@ function renderAnalytics(){const box=document.querySelector("#analytics-board");
 async function loadAnalytics(includeInactive=false,opts={{}}){{const silent=!!opts.silent;activeTab="analytics";if(!document.querySelector("#analytics-board"))adminView();const status=document.querySelector("#status");const box=document.querySelector("#analytics-board");if(analyticsLoading)return;analyticsLoading=true;if(status&&!silent)status.textContent=includeInactive?"正在加载无行为账号...":"正在加载有行为用户...";if(box&&!analyticsData&&!silent)box.innerHTML=`<div class="empty">正在拉取有行为用户，不会等待无行为账号。</div>`;try{{const data=await api(`/api/creator-admin/analytics?days=180&include_inactive=${{includeInactive?"1":"0"}}`);if(includeInactive&&analyticsData){{analyticsData={{...analyticsData,summary:data.summary||analyticsData.summary,inactive_users:data.inactive_users||[],inactive_loaded:true}};analyticsInactiveLoaded=true}}else{{analyticsData=data;analyticsInactiveLoaded=Boolean(data.inactive_loaded)}}analyticsAutoLoaded=true;renderAnalytics();markRealtimeSynced(silent)}}catch(e){{const msg=e.message||"Creator 数据接口暂时不可用";if(status&&!silent)status.textContent=`数据加载失败：${{msg}}`;if(box&&!analyticsData&&!silent)box.innerHTML=`<div class="empty">数据加载失败：${{esc(msg)}}<br><br><button class="primary" id="retry-analytics" type="button">重新加载有行为用户</button></div>`;document.querySelector("#retry-analytics")?.addEventListener("click",()=>loadAnalytics(false))}}finally{{analyticsLoading=false}}}}
 let creatorsLoadingPromise=null;
 async function loadCreators(opts={{}}){{const silent=!!opts.silent;if(creatorsLoadingPromise)return creatorsLoadingPromise;creatorsLoadingPromise=(async()=>{{try{{const status=document.querySelector("#status");if(status&&!silent)status.textContent="加载注册用户、作者档案和行为数据中...";const [creatorData,accountData,analyticsPayload,cloudData]=await Promise.all([api("/api/creator-admin/creators"),api("/api/creator-admin/accounts"),api("/api/creator-admin/analytics?days=180&include_inactive=1"),api("/api/creator-admin/state")]);creators=creatorData.creators||[];accounts=accountData.accounts||[];analyticsData=analyticsPayload;analyticsAutoLoaded=true;analyticsInactiveLoaded=Boolean(analyticsPayload.inactive_loaded);creatorCloudState=cloudData.state&&cloudData.state.creators?cloudData.state:{{creators:{{}}}};creatorMergeRows();activeTab="creators";if(!silent||!document.querySelector("#creator-list"))adminView();else{{renderCreatorPocFilters();renderCreators()}}const registered=accounts.filter(a=>creatorAccountIsRegistered(a)).length;const nextStatus=document.querySelector("#status");if(nextStatus)nextStatus.textContent=silent?`实时同步完成：${{new Date().toLocaleTimeString("zh-CN",{{hour12:false}})}}`:`已合并 ${{registered}} 个注册用户和 POC 作者档案，共 ${{creatorRows.length}} 条运营对象`;markRealtimeSynced(silent);if(!scriptIndexLoaded)ensureScriptIndex().then(()=>{{if(activeTab==="creators")renderCreators()}}).catch(()=>null)}}catch(e){{if(!silent)loginView(e.message)}}}})().finally(()=>{{creatorsLoadingPromise=null}});return creatorsLoadingPromise}}
+async function loadCreators(opts={{}}){{const silent=!!opts.silent;if(creatorsLoadingPromise)return creatorsLoadingPromise;creatorsLoadingPromise=(async()=>{{const status=document.querySelector("#status");try{{if(status&&!silent)status.textContent="加载注册用户和作者档案中...";const [creatorData,accountData,cloudData]=await Promise.all([safeApi("/api/creator-admin/creators",{{creators:[]}}),safeApi("/api/creator-admin/accounts",{{accounts:[]}}),safeApi("/api/creator-admin/state",{{state:{{creators:{{}}}}}})]);const coreErrors=[creatorData._error,accountData._error].filter(Boolean);if(coreErrors.some(x=>String(x).includes("请先登录")))throw new Error(coreErrors[0]);creators=creatorData.creators||[];accounts=accountData.accounts||[];creatorCloudState=cloudData.state&&cloudData.state.creators?cloudData.state:{{creators:{{}}}};creatorMergeRows();activeTab="creators";if(!silent||!document.querySelector("#creator-list"))adminView();else{{renderCreatorPocFilters();renderCreators()}}const registered=accounts.filter(a=>creatorAccountIsRegistered(a)).length;const nextStatus=document.querySelector("#status");if(nextStatus)nextStatus.textContent=coreErrors.length?`Creator 远端数据暂时慢/不可用，已先打开后台。${{creatorRows.length?`当前显示 ${{creatorRows.length}} 条缓存/本地数据。`:"请稍后点刷新重试。"}}`:(silent?`实时同步完成：${{new Date().toLocaleTimeString("zh-CN",{{hour12:false}})}}`:`已合并 ${{registered}} 个注册用户和 POC 作者档案，共 ${{creatorRows.length}} 条运营对象`);markRealtimeSynced(silent);if(!scriptIndexLoaded)ensureScriptIndex().then(()=>{{if(activeTab==="creators")renderCreators()}}).catch(()=>null);safeApi("/api/creator-admin/analytics?days=180&include_inactive=0",{{summary:{{}},users:[],inactive_users:[]}}).then(data=>{{if(!data._error){{analyticsData=data;analyticsAutoLoaded=true;analyticsInactiveLoaded=Boolean(data.inactive_loaded)}}}}).catch(()=>null)}}catch(e){{if(!silent)loginView(e.message)}}}})().finally(()=>{{creatorsLoadingPromise=null}});return creatorsLoadingPromise}}
 async function loadAccounts(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载账号中...");const d=await api("/api/creator-admin/accounts");accounts=d.accounts||[];activeTab="accounts";adminView();document.querySelector("#status").textContent=`共 ${{accounts.length}} 个账号`}}catch(e){{loginView(e.message)}}}}
 async function loadSubmissions(append=false){{if(submissionsLoading)return;try{{submissionsLoading=true;const status=document.querySelector("#status");if(status)status.textContent=append?"加载更多回传中...":"加载最近回传数据中...";const offset=append?submissionsOffset:0;const d=await api(`/api/creator-admin/submissions?limit=${{SUBMISSIONS_PAGE_SIZE}}&offset=${{offset}}&_=${{Date.now()}}`);const incoming=d.submissions||[];submissions=append?[...submissions,...incoming]:incoming;accessApplications=Array.isArray(d.applications)?d.applications:accessApplications;submissionsTotal=Number(d.total||submissions.length||0);submissionsOffset=submissions.length;activeTab="submissions";adminView();const nextStatus=document.querySelector("#status");if(nextStatus)nextStatus.textContent=`已加载 ${{submissions.length}} / ${{submissionsTotal}} 条回传 · 账号申请 ${{accessApplications.length}} 条`}}catch(e){{loginView(e.message)}}finally{{submissionsLoading=false;renderSubmissionStats()}}}}
 async function loadIntakes(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载作者信息中...");const d=await api("/api/creator-admin/intakes");intakes=d.intakes||[];activeTab="intakes";adminView();document.querySelector("#status").textContent=`共 ${{intakes.length}} 条作者信息`}}catch(e){{loginView(e.message)}}}}
@@ -16973,6 +16999,15 @@ class AppHandler(BaseHTTPRequestHandler):
             include_inactive = (query.get("include_inactive") or ["0"])[0] == "1"
             remote_query = {"days": days, "include_inactive": "1" if include_inactive else "0"}
             status, payload = creator_admin_remote_json(f"/api/admin/analytics?{urllib.parse.urlencode(remote_query)}")
+            if status == 200:
+                save_creator_admin_cache(CREATOR_ADMIN_ANALYTICS_CACHE_FILE, payload)
+            elif status >= 500:
+                cached = creator_admin_cached_payload(
+                    CREATOR_ADMIN_ANALYTICS_CACHE_FILE,
+                    payload.get("error") or "Creator analytics is temporarily unavailable.",
+                )
+                if cached:
+                    status, payload = cached
             self.send_json(payload, status=status)
             return
         if parsed.path == "/api/creator-admin/creators":
@@ -16980,6 +17015,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
                 return
             status, payload = creator_admin_remote_json("/api/admin/creators")
+            if status == 200:
+                save_creator_admin_cache(CREATOR_ADMIN_CREATORS_CACHE_FILE, payload)
+            elif status >= 500:
+                cached = creator_admin_cached_payload(
+                    CREATOR_ADMIN_CREATORS_CACHE_FILE,
+                    payload.get("error") or "Creator profiles are temporarily unavailable.",
+                )
+                if cached:
+                    status, payload = cached
             self.send_json(payload, status=status)
             return
         if parsed.path == "/api/creator-admin/state":
@@ -17013,6 +17057,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
                 return
             status, payload = creator_admin_remote_json("/api/admin/accounts")
+            if status == 200:
+                save_creator_admin_cache(CREATOR_ADMIN_ACCOUNTS_CACHE_FILE, payload)
+            elif status >= 500:
+                cached = creator_admin_cached_payload(
+                    CREATOR_ADMIN_ACCOUNTS_CACHE_FILE,
+                    payload.get("error") or "Creator accounts are temporarily unavailable.",
+                )
+                if cached:
+                    status, payload = cached
             self.send_json(payload, status=status)
             return
         if parsed.path == "/api/creator-admin/submissions":
