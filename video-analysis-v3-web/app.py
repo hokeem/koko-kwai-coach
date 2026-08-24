@@ -267,6 +267,26 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def normalize_library_date(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise ValueError("入库日期格式不正确，请重新选择日期。")
+
+
+def library_date_iso(value: object) -> str:
+    day = normalize_library_date(value)
+    if not day:
+        return ""
+    return datetime.strptime(day, "%Y-%m-%d").replace(
+        hour=12,
+        tzinfo=BEIJING_TZ,
+    ).isoformat()
+
+
 def format_beijing_time(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -3928,6 +3948,8 @@ def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "pt_html_url": f"/results/{entry_id}/script_table_pt.html",
         "zh_html_url": f"/results/{entry_id}/script_table_pt.html",
         "preview_image_url": cover_url,
+        "reference_video_enabled": entry.get("reference_video_enabled") is not False,
+        "library_date": str(entry.get("library_date") or entry.get("saved_at") or entry.get("created_at") or "")[:10],
         "source": "creator_direct_import",
         "published": bool(entry.get("published", True)),
     }
@@ -4401,6 +4423,22 @@ def apply_manual_item_content_type(parent_job_id: str, item_index: int, content_
             job["content_type_confidence"] = "manual"
             job["updated_at"] = now_iso()
         save_jobs()
+
+
+def apply_item_library_options(parent_job_id: str, item_index: int, payload: dict[str, Any]) -> None:
+    if not isinstance(payload, dict):
+        return
+    changes: dict[str, Any] = {}
+    if "reference_video_enabled" in payload:
+        raw_reference = payload.get("reference_video_enabled")
+        if isinstance(raw_reference, str):
+            changes["reference_video_enabled"] = raw_reference.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            changes["reference_video_enabled"] = bool(raw_reference)
+    if "library_date" in payload:
+        changes["library_date"] = normalize_library_date(payload.get("library_date"))
+    if changes:
+        update_job_item(parent_job_id, item_index, **changes)
 
 
 def generate_script_variant_outputs(output_dir: Path, item_id: str, script_json: dict[str, Any], video_url: str, *, locale: str) -> dict[str, Any]:
@@ -6370,6 +6408,8 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "reviewed": bool(item.get("reviewed")),
         "edited": bool(item.get("edited")),
         "saved_to_library_at": item.get("saved_to_library_at") or "",
+        "reference_video_enabled": item.get("reference_video_enabled") is not False,
+        "library_date": normalize_library_date(item.get("library_date")) if item.get("library_date") else "",
         "in_library": bool(item.get("saved_to_library_at")) or library_entry_exists(str(item.get("id") or "")),
         "source_video_available": source_video_available,
         "source_video_url": f"/results/{item_id}/{SOURCE_VIDEO_NAME}" if source_video_available else "",
@@ -7786,10 +7826,15 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
     )
     existing = library_entry_by_id(str(item.get("id") or "")) or {}
     duration_fields = creator_duration_fields(str(item.get("id") or ""), script)
+    selected_library_date = normalize_library_date(item.get("library_date") or existing.get("library_date") or "")
+    selected_library_timestamp = library_date_iso(selected_library_date)
+    reference_video_enabled = item.get("reference_video_enabled")
+    if reference_video_enabled is None:
+        reference_video_enabled = existing.get("reference_video_enabled", True)
     entry = {
         "entry_id": item["id"],
         "parent_job_id": parent_job_id,
-        "created_at": existing.get("created_at") or item.get("completed_at") or now_iso(),
+        "created_at": selected_library_timestamp or existing.get("created_at") or item.get("completed_at") or now_iso(),
         "video_url": item.get("video_url"),
         "title": item.get("title") or script.get("title") or "Untitled Script",
         "content_type": decision["content_type"],
@@ -7808,7 +7853,10 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
         "pt_html_url": item.get("pt_html_url") or "",
         "preview_image_url": library_preview_image_url(item["id"], script, output_dir),
         "source": "edited" if item.get("edited") else "ai",
-        "saved_at": item.get("saved_to_library_at") or now_iso(),
+        "saved_at": selected_library_timestamp or item.get("saved_to_library_at") or now_iso(),
+        "actual_saved_at": now_iso(),
+        "library_date": selected_library_date,
+        "reference_video_enabled": bool(reference_video_enabled),
         "display_language": item.get("display_language") or existing.get("display_language") or "zh",
         "chat_messages": item.get("chat_messages") if isinstance(item.get("chat_messages"), list) else existing.get("chat_messages") or [],
         "reviewed": bool(item.get("reviewed")),
@@ -7886,6 +7934,8 @@ def find_item_context(item_id: str) -> tuple[str, int, dict[str, Any]] | None:
                     "content_type_reasoning": job.get("content_type_reasoning") or "",
                     "content_type_confidence": job.get("content_type_confidence") or "",
                     "title": job.get("title") or "",
+                    "reference_video_enabled": job.get("reference_video_enabled") is not False,
+                    "library_date": job.get("library_date") or "",
                     "display_language": job.get("display_language") or "zh",
                     "review_status": job.get("review_status") or "",
                     "review_message": job.get("review_message") or "",
@@ -7951,6 +8001,8 @@ def ensure_library_edit_context(entry_id: str) -> tuple[str, int, dict[str, Any]
         "reviewed": bool(entry.get("reviewed")),
         "edited": bool(entry.get("edited")),
         "saved_to_library_at": entry.get("saved_at") or entry.get("created_at") or now_iso(),
+        "reference_video_enabled": entry.get("reference_video_enabled") is not False,
+        "library_date": entry.get("library_date") or str(entry.get("saved_at") or entry.get("created_at") or "")[:10],
         "storyboard_prompt": entry.get("storyboard_prompt") or "",
         "storyboard_preview_url": entry.get("storyboard_preview_url") or "",
         "storyboard_cover_url": entry.get("storyboard_cover_url") or "",
@@ -10603,6 +10655,55 @@ def studio_html() -> str:
       font-weight: 800;
       outline: none;
     }}
+    .library-options {{
+      display: grid;
+      grid-template-columns: minmax(190px, 1fr) minmax(170px, 1fr);
+      gap: 10px;
+      min-width: min(390px, 100%);
+    }}
+    .library-option {{
+      min-height: 58px;
+      border: 1px solid rgba(255,130,0,.20);
+      border-radius: 14px;
+      background: rgba(255,255,255,.94);
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    .library-option-copy {{
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+    }}
+    .library-option strong {{
+      color: var(--ink);
+      font-size: 13px;
+    }}
+    .library-option small {{
+      color: var(--muted);
+      font-size: 11px;
+    }}
+    .library-option input[type="checkbox"] {{
+      width: 20px;
+      height: 20px;
+      accent-color: var(--brand);
+      flex: 0 0 auto;
+    }}
+    .library-option input[type="date"] {{
+      width: 100%;
+      min-width: 0;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--ink);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 800;
+    }}
+    @media (max-width: 720px) {{
+      .library-options {{ grid-template-columns: 1fr; width: 100%; }}
+    }}
     .library-confirm-card.done {{
       border-color: rgba(21,115,71,.22);
       background: rgba(240,253,244,.78);
@@ -13107,6 +13208,44 @@ def studio_html() -> str:
       return CONTENT_TYPE_OPTIONS.includes(value) ? value : "";
     }}
 
+    function localDateValue(date = new Date()) {{
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${{year}}-${{month}}-${{day}}`;
+    }}
+
+    function libraryOptionsMarkup(item) {{
+      const referenceEnabled = item.reference_video_enabled !== false;
+      const dateValue = String(item.library_date || item.saved_to_library_at || item.completed_at || "").slice(0, 10) || localDateValue();
+      return `
+        <div class="library-options">
+          <label class="library-option">
+            <input type="checkbox" data-reference-video-enabled="${{item.id}}" ${{referenceEnabled ? "checked" : ""}}>
+            <span class="library-option-copy">
+              <strong>保留参考视频</strong>
+              <small>关闭后，Creator 端不可播放原视频</small>
+            </span>
+          </label>
+          <label class="library-option">
+            <span class="library-option-copy">
+              <small>脚本入库日期</small>
+              <input type="date" data-library-date="${{item.id}}" value="${{escapeHtml(dateValue)}}">
+            </span>
+          </label>
+        </div>
+      `;
+    }}
+
+    function selectedLibraryOptions(itemId, root = document) {{
+      const referenceInput = root.querySelector(`[data-reference-video-enabled="${{itemId}}"]`) || document.querySelector(`[data-reference-video-enabled="${{itemId}}"]`);
+      const dateInput = root.querySelector(`[data-library-date="${{itemId}}"]`) || document.querySelector(`[data-library-date="${{itemId}}"]`);
+      return {{
+        reference_video_enabled: referenceInput ? referenceInput.checked : true,
+        library_date: dateInput?.value || localDateValue(),
+      }};
+    }}
+
     function buildLibraryConfirmMarkup(item) {{
       if (item.status !== "completed" || !item.result_json) return "";
       const alreadySaved = Boolean(item.saved_to_library_at || item.in_library);
@@ -13118,6 +13257,7 @@ def studio_html() -> str:
               <div class="library-confirm-note">这条脚本已在脚本库中。修改下方内容后，可以随时点击右侧按钮完整覆盖脚本库版本。</div>
             </div>
             ${{manualTagPickerMarkup(item)}}
+            ${{libraryOptionsMarkup(item)}}
             <button class="action-link primary" type="button" data-save-library="${{item.id}}">保存当前版本并更新入库</button>
             <a class="action-link" href="/library">打开脚本管理</a>
           </div>
@@ -13130,6 +13270,7 @@ def studio_html() -> str:
             <div class="library-confirm-note">确认这个版本可用后，Koko 会自动生成全葡语版本并写入脚本库。</div>
           </div>
           ${{manualTagPickerMarkup(item)}}
+          ${{libraryOptionsMarkup(item)}}
           <button class="action-link primary" type="button" data-confirm-library="${{item.id}}">转葡语并入库</button>
         </div>
       `;
@@ -13366,6 +13507,7 @@ def studio_html() -> str:
           rows,
           target_language: root.getAttribute("data-editor-lang") || "zh",
           content_type: selectedManualContentType(itemId, root),
+          ...selectedLibraryOptions(itemId),
         }};
         return payload;
       }}
@@ -13387,6 +13529,7 @@ def studio_html() -> str:
           rows: parseScriptRowsDraft(textOf("脚本表"), originalRows),
           target_language: root.getAttribute("data-editor-lang") || "zh",
           content_type: selectedManualContentType(itemId, root),
+          ...selectedLibraryOptions(itemId),
       }};
     }}
 
@@ -13470,7 +13613,10 @@ def studio_html() -> str:
         const response = await fetch(`/api/items/${{itemId}}/confirm-library`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ content_type: selectedManualContentType(itemId, scope) }}),
+          body: JSON.stringify({{
+            content_type: selectedManualContentType(itemId, scope),
+            ...selectedLibraryOptions(itemId, scope),
+          }}),
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Confirm library failed");
@@ -16304,6 +16450,7 @@ def creator_public_entry(entry: dict[str, Any], base_url: str, score: int) -> di
         "content_type": entry.get("content_type") or DEFAULT_CONTENT_TYPE,
         "created_at": format_beijing_time(entry.get("created_at") or entry.get("saved_at") or ""),
         "video_url": creator_abs_url(entry.get("video_url"), ""),
+        "reference_video_enabled": entry.get("reference_video_enabled") is not False,
         "html_url": creator_abs_url(entry.get("zh_html_url") or entry.get("html_url"), base_url),
         "docx_url": creator_abs_url(entry.get("zh_docx_url") or entry.get("docx_url"), base_url),
         "thumbnail_url": f"/api/creator/thumbnail/{entry_id}.svg" if entry_id else "",
@@ -17588,6 +17735,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     apply_manual_item_content_type(parent_job_id, item_index, payload.get("content_type"))
+                    apply_item_library_options(parent_job_id, item_index, payload)
                     refreshed_context = find_item_context(item_id)
                     if not refreshed_context:
                         raise RuntimeError("Script item not found.")
@@ -17621,6 +17769,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 target_language = str(payload.get("target_language") or item.get("display_language") or "zh").strip().lower()
                 updated_script = apply_script_edits(item.get("result_json") or {}, payload)
                 apply_manual_item_content_type(parent_job_id, item_index, payload.get("content_type"))
+                apply_item_library_options(parent_job_id, item_index, payload)
                 refreshed_context = find_item_context(item_id)
                 if not refreshed_context:
                     raise RuntimeError("Script item not found.")
