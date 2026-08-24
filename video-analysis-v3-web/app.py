@@ -1864,6 +1864,15 @@ def parse_script_timecode_seconds(value: object) -> float:
     text = str(value or "").strip()
     if not text:
         return 0.0
+    # Script rows usually contain a range such as ``00:08-00:14``. Parse the
+    # final timecode itself; collecting every digit in the range would turn
+    # the start minute into an hour (for example, 00:08-00:14 -> 28,814s).
+    timecodes = re.findall(r"(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)(?!\d)", text)
+    if timecodes:
+        parts = [int(part) for part in timecodes[-1].split(":")]
+        if len(parts) == 3:
+            return float(parts[0] * 3600 + parts[1] * 60 + parts[2])
+        return float(parts[0] * 60 + parts[1])
     nums = [int(part) for part in re.findall(r"\d+", text)]
     if len(nums) >= 3:
         return float(nums[-3] * 3600 + nums[-2] * 60 + nums[-1])
