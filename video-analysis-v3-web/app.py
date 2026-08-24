@@ -136,6 +136,12 @@ def load_env_file(path: Path) -> None:
 load_env_file(REPO_ROOT / ".env.local")
 load_env_file(BASE / ".env.local")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+KOKO_AGENT_API_KEY = os.environ.get("KOKO_AGENT_API_KEY", "").strip()
+KOKO_AGENT_API_MAX_URLS = max(1, min(50, int(os.environ.get("KOKO_AGENT_API_MAX_URLS", "10"))))
+KOKO_AGENT_API_MAX_PENDING_ITEMS = max(
+    KOKO_AGENT_API_MAX_URLS,
+    int(os.environ.get("KOKO_AGENT_API_MAX_PENDING_ITEMS", "60")),
+)
 FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "1")).strip().lower() in {"1", "true", "yes", "on"}
 FILTER_DURATION_MIN_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MIN_SEC", str(FILTER_DURATION_MIN_SEC)))
 FILTER_DURATION_MAX_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MAX_SEC", str(FILTER_DURATION_MAX_SEC)))
@@ -5887,6 +5893,24 @@ def has_creator_admin_access(handler: BaseHTTPRequestHandler) -> bool:
     )
 
 
+def is_loopback_request(handler: BaseHTTPRequestHandler) -> bool:
+    address = str((handler.client_address or ("", 0))[0] or "").strip().lower()
+    return address in {"127.0.0.1", "::1", "localhost"} or address.startswith("127.")
+
+
+def agent_api_auth_error(handler: BaseHTTPRequestHandler) -> tuple[int, str] | None:
+    if is_loopback_request(handler):
+        return None
+    if not KOKO_AGENT_API_KEY:
+        return 503, "Koko Agent API is not configured. Set KOKO_AGENT_API_KEY on the server."
+    authorization = str(handler.headers.get("Authorization") or "").strip()
+    bearer = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    supplied = bearer or str(handler.headers.get("X-Koko-Agent-Key") or "").strip()
+    if not supplied or not secrets.compare_digest(supplied, KOKO_AGENT_API_KEY):
+        return 401, "Invalid or missing Koko Agent API key."
+    return None
+
+
 def load_creator_admin_scripts_cache() -> dict[str, Any] | None:
     data = read_json_file(CREATOR_ADMIN_SCRIPTS_CACHE_FILE, default={})
     return data if isinstance(data, dict) and isinstance(data.get("entries"), list) else None
@@ -6471,6 +6495,182 @@ def public_job_view(job: dict[str, Any]) -> dict[str, Any]:
     elif job.get("status") == "failed":
         payload["message"] = "分析失败，请检查错误信息。"
     return payload
+
+
+AGENT_STAGE_PROGRESS = {
+    "queued": 0,
+    "starting": 5,
+    "download": 12,
+    "media_prep": 22,
+    "gemini_analysis": 42,
+    "v2_analysis": 62,
+    "consistency_audit": 74,
+    "targeted_recheck": 82,
+    "arbitration": 88,
+    "final_output": 94,
+    "completed": 100,
+    "failed": 100,
+}
+
+AGENT_CONTENT_TYPE_ALIASES = {
+    "夫妻": "夫妻整蛊/冲突",
+    "情侣": "夫妻整蛊/冲突",
+    "夫妻/情侣": "夫妻整蛊/冲突",
+    "couple": "夫妻整蛊/冲突",
+    "casal": "夫妻整蛊/冲突",
+    "夫妻暧昧": "夫妻暧昧",
+    "couple_flirt": "夫妻暧昧",
+    "家庭": "家庭整蛊",
+    "family": "家庭整蛊",
+    "familia": "家庭整蛊",
+    "朋友": "朋友整蛊",
+    "朋友/同事": "朋友整蛊",
+    "friends": "朋友整蛊",
+    "friend": "朋友整蛊",
+    "amigos": "朋友整蛊",
+}
+
+
+def normalize_agent_content_type(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw in ALLOWED_CONTENT_TYPES:
+        return raw
+    return AGENT_CONTENT_TYPE_ALIASES.get(raw, AGENT_CONTENT_TYPE_ALIASES.get(raw.lower(), ""))
+
+
+def agent_pending_item_count() -> int:
+    with job_lock:
+        return sum(
+            1
+            for job in jobs.values()
+            for item in job.get("items") or []
+            if str(item.get("status") or "") in {"queued", "running"}
+        )
+
+
+def agent_item_view(item: dict[str, Any], *, include_script: bool = True) -> dict[str, Any]:
+    public = public_item_view(item)
+    status = str(public.get("status") or "queued")
+    stage = str(public.get("stage") or status or "queued")
+    result: dict[str, Any] = {
+        "id": public.get("id"),
+        "index": public.get("index"),
+        "video_url": public.get("video_url") or "",
+        "status": status,
+        "stage": stage,
+        "stage_message": public.get("stage_message") or "",
+        "progress_percent": AGENT_STAGE_PROGRESS.get(stage, 50 if status == "running" else 0),
+        "created_at": item.get("created_at") or "",
+        "updated_at": public.get("updated_at") or "",
+        "completed_at": public.get("completed_at") or "",
+        "error": public.get("error") or "",
+        "content_type": public.get("content_type") or "",
+        "location_tag": item.get("location_tag") or "",
+        "library_date": public.get("library_date") or "",
+        "reference_video_enabled": public.get("reference_video_enabled") is not False,
+        "manual_tags": item.get("manual_tags") if isinstance(item.get("manual_tags"), dict) else {},
+    }
+    if status != "completed":
+        return result
+    script = public.get("zh_result_json") or public.get("result_json") or {}
+    portuguese_script = public.get("pt_result_json") or {}
+    result["result"] = {
+        "title": public.get("title") or (script.get("title") if isinstance(script, dict) else "") or "",
+        "summary": public.get("understanding_summary") or "",
+        "content_type": public.get("content_type") or "",
+        "display_language": public.get("display_language") or "zh",
+        "reference_video_enabled": public.get("reference_video_enabled") is not False,
+        "library_date": public.get("library_date") or "",
+        "saved_to_library": bool(public.get("in_library")),
+        "artifacts": {
+            "script_html": public.get("html_url") or "",
+            "chinese_html": public.get("zh_html_url") or "",
+            "portuguese_html": public.get("pt_html_url") or "",
+            "report": public.get("report_url") or "",
+            "evidence": public.get("evidence_url") or "",
+            "docx": public.get("docx_url") or "",
+            "chinese_docx": public.get("zh_docx_url") or "",
+            "portuguese_docx": public.get("pt_docx_url") or "",
+            "storyboard_preview": public.get("storyboard_preview_url") or "",
+            "storyboard_cover": public.get("storyboard_cover_url") or "",
+        },
+    }
+    if include_script:
+        result["result"]["script"] = script
+        result["result"]["portuguese_script"] = portuguese_script or None
+    return result
+
+
+def agent_job_view(job: dict[str, Any], *, include_script: bool = True) -> dict[str, Any]:
+    items = [agent_item_view(item, include_script=include_script) for item in job.get("items") or []]
+    completed = sum(1 for item in items if item.get("status") == "completed")
+    failed = sum(1 for item in items if item.get("status") == "failed")
+    progress = round(sum(int(item.get("progress_percent") or 0) for item in items) / max(1, len(items)))
+    return {
+        "ok": True,
+        "api_version": "v1",
+        "job_id": job.get("id"),
+        "request_id": job.get("agent_request_id") or "",
+        "source": job.get("source") or "web",
+        "mode": job.get("mode") or "single",
+        "status": job.get("status") or "queued",
+        "stage": job.get("stage") or "queued",
+        "stage_message": job.get("stage_message") or "",
+        "progress_percent": progress,
+        "created_at": job.get("created_at") or "",
+        "updated_at": job.get("updated_at") or "",
+        "completed_at": job.get("completed_at") or "",
+        "total_items": len(items),
+        "completed_items": completed,
+        "failed_items": failed,
+        "next_poll_seconds": 5 if str(job.get("status") or "") in {"queued", "running"} else 0,
+        "items": items,
+    }
+
+
+def cancel_agent_job(job_id: str) -> dict[str, Any] | None:
+    killed_item_ids: list[str] = []
+    with queue_condition:
+        if job_id in queued_job_ids:
+            queued_job_ids.discard(job_id)
+            try:
+                job_queue.remove(job_id)
+            except ValueError:
+                pass
+    with job_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return None
+        for item in job.get("items") or []:
+            if str(item.get("status") or "") not in {"queued", "running"}:
+                continue
+            item_id = str(item.get("id") or "")
+            item.update({
+                "status": "failed",
+                "stage": "failed",
+                "stage_message": "Cancelled by Agent API.",
+                "error": "任务已由 Agent API 取消。",
+                "completed_at": now_iso(),
+                "updated_at": now_iso(),
+            })
+            mark_item_cancelled(item_id)
+            killed_item_ids.append(item_id)
+        recompute_job_status(job_id)
+        job["error"] = "任务已由 Agent API 取消。"
+        job["updated_at"] = now_iso()
+        save_jobs()
+        snapshot = json.loads(json.dumps(job, ensure_ascii=False))
+    with active_processes_lock:
+        for item_id in killed_item_ids:
+            proc = active_processes.get(item_id)
+            if proc and proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+    return snapshot
 
 
 def public_filter_item_view(item: dict[str, Any]) -> dict[str, Any]:
@@ -7857,6 +8057,9 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
         "actual_saved_at": now_iso(),
         "library_date": selected_library_date,
         "reference_video_enabled": bool(reference_video_enabled),
+        "location_tag": item.get("location_tag") or existing.get("location_tag") or "",
+        "location_tag_pt": item.get("location_tag_pt") or existing.get("location_tag_pt") or "",
+        "manual_tags": item.get("manual_tags") if isinstance(item.get("manual_tags"), dict) else existing.get("manual_tags") or {},
         "display_language": item.get("display_language") or existing.get("display_language") or "zh",
         "chat_messages": item.get("chat_messages") if isinstance(item.get("chat_messages"), list) else existing.get("chat_messages") or [],
         "reviewed": bool(item.get("reviewed")),
@@ -8780,6 +8983,8 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                         output_dir,
                         script_json,
                         read_json(output_dir / "evidence_bundle.json"),
+                        existing_type=item.get("content_type") or "",
+                        existing_source=item.get("content_type_source") or "",
                         use_llm=False,
                     )
                     content_type = decision["content_type"]
@@ -8923,10 +9128,31 @@ def run_job_batch(job_id: str) -> None:
         update_job(job_id, status="failed", error=friendly_error(str(exc)), completed_at=now_iso(), stage="failed", stage_message="Batch failed.")
 
 
-def create_job(video_urls: list[str], mode: str = "", user_prompt: str = "") -> dict[str, Any]:
+def create_job(
+    video_urls: list[str],
+    mode: str = "",
+    user_prompt: str = "",
+    *,
+    source: str = "web",
+    agent_request_id: str = "",
+    reference_video_enabled: bool = True,
+    library_date: str = "",
+    content_type: str = "",
+    location_tag: str = "",
+    manual_tags: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     normalized_mode = str(mode or "").strip().lower()
     job_mode = "understanding" if normalized_mode == "understanding" else ("batch" if len(video_urls) > 1 else "single")
     analysis_prompt = sanitize_analysis_prompt(user_prompt)
+    selected_content_type = normalize_agent_content_type(content_type)
+    selected_location_tag = str(location_tag or "").strip()
+    if selected_location_tag not in LOCATION_TAGS:
+        selected_location_tag = ""
+    selected_manual_tags = dict(manual_tags) if isinstance(manual_tags, dict) else {}
+    if selected_content_type:
+        selected_manual_tags["content_type"] = selected_content_type
+    if selected_location_tag:
+        selected_manual_tags["location_tag"] = selected_location_tag
     job_id = uuid4().hex
     items = []
     for index, video_url in enumerate(video_urls):
@@ -8957,10 +9183,13 @@ def create_job(video_urls: list[str], mode: str = "", user_prompt: str = "") -> 
                 "pt_result_json": None,
                 "original_result_json": None,
                 "display_language": "zh",
-                "content_type": "",
-                "content_type_source": "auto",
-                "content_type_reasoning": "",
-                "content_type_confidence": "",
+                "content_type": selected_content_type,
+                "content_type_source": "manual" if selected_content_type else "auto",
+                "content_type_reasoning": "Agent API manual selection" if selected_content_type else "",
+                "content_type_confidence": "manual" if selected_content_type else "",
+                "location_tag": selected_location_tag,
+                "location_tag_pt": LOCATION_TAG_PT.get(selected_location_tag, ""),
+                "manual_tags": selected_manual_tags,
                 "title": "",
                 "understanding_summary": "",
                 "review_status": "",
@@ -8970,6 +9199,8 @@ def create_job(video_urls: list[str], mode: str = "", user_prompt: str = "") -> 
                 "review_mode": REVIEW_MODE_PARTIAL,
                 "reviewed": False,
                 "edited": False,
+                "reference_video_enabled": bool(reference_video_enabled),
+                "library_date": normalize_library_date(library_date) if library_date else "",
             }
         )
     job = {
@@ -8978,6 +9209,9 @@ def create_job(video_urls: list[str], mode: str = "", user_prompt: str = "") -> 
         "video_url": video_urls[0] if len(video_urls) == 1 else "",
         "video_urls": video_urls,
         "user_prompt": analysis_prompt,
+        "source": str(source or "web").strip() or "web",
+        "agent_request_id": str(agent_request_id or "").strip()[:160],
+        "manual_tags": selected_manual_tags,
         "status": "queued",
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -16937,6 +17171,15 @@ def creator_portal_html() -> str:
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "VideoAnalysisV3Web/0.2"
 
+    def require_agent_api(self) -> bool:
+        auth_error = agent_api_auth_error(self)
+        if not auth_error:
+            return True
+        status, message = auth_error
+        headers = [("WWW-Authenticate", 'Bearer realm="Koko Agent API"')] if status == 401 else []
+        self.send_json({"ok": False, "error": message}, status=status, headers=headers)
+        return False
+
     def send_json(self, payload: Any, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -17084,6 +17327,44 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/agent/v1":
+            if not self.require_agent_api():
+                return
+            self.send_json({
+                "ok": True,
+                "name": "Koko Video Analysis Agent API",
+                "api_version": "v1",
+                "authentication": "Bearer token is required outside localhost.",
+                "endpoints": {
+                    "submit": "POST /api/agent/v1/video-analysis",
+                    "status_and_result": "GET /api/agent/v1/video-analysis/{job_id}",
+                    "cancel": "POST /api/agent/v1/video-analysis/{job_id}/cancel",
+                },
+                "modes": ["full", "understanding"],
+                "content_types": LIBRARY_FILTER_LABELS,
+                "location_tags": sorted(LOCATION_TAGS),
+                "max_urls_per_job": KOKO_AGENT_API_MAX_URLS,
+                "max_pending_items": KOKO_AGENT_API_MAX_PENDING_ITEMS,
+                "analysis_concurrency": MAX_CONCURRENT_ANALYSES,
+            })
+            return
+        agent_job_match = re.fullmatch(r"/api/agent/v1/video-analysis/([0-9a-f]{32})", parsed.path)
+        if agent_job_match:
+            if not self.require_agent_api():
+                return
+            job_id = agent_job_match.group(1)
+            query = urllib.parse.parse_qs(parsed.query)
+            include_script = str((query.get("include_script") or ["1"])[0]).strip().lower() not in {"0", "false", "no"}
+            reconcile_stale_jobs()
+            with job_lock:
+                recompute_job_status(job_id)
+                job = jobs.get(job_id)
+                snapshot = json.loads(json.dumps(job, ensure_ascii=False)) if job else None
+            if not snapshot:
+                self.send_json({"ok": False, "error": "Job not found."}, status=404)
+                return
+            self.send_json(agent_job_view(snapshot, include_script=include_script))
+            return
         if parsed.path == "/":
             self.send_html(page_html())
             return
@@ -17497,6 +17778,146 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/agent/v1/video-analysis":
+            if not self.require_agent_api():
+                return
+            try:
+                payload = self.read_json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"ok": False, "error": "Invalid JSON body."}, status=400)
+                return
+            raw_urls = payload.get("video_urls")
+            if isinstance(raw_urls, list):
+                video_urls = split_video_urls("\n".join(str(url or "") for url in raw_urls))
+            else:
+                video_urls = split_video_urls(str(payload.get("video_url") or ""))
+            if not video_urls:
+                self.send_json({"ok": False, "error": "Provide at least one valid public video URL."}, status=400)
+                return
+            if len(video_urls) > KOKO_AGENT_API_MAX_URLS:
+                self.send_json({
+                    "ok": False,
+                    "error": f"A single Agent API job supports at most {KOKO_AGENT_API_MAX_URLS} URLs.",
+                }, status=400)
+                return
+            requested_mode = str(payload.get("mode") or "full").strip().lower()
+            if requested_mode not in {"full", "understanding"}:
+                self.send_json({"ok": False, "error": "mode must be 'full' or 'understanding'."}, status=400)
+                return
+            if not AUTO_ANALYZE.exists():
+                self.send_json({"ok": False, "error": f"Missing pipeline entrypoint: {AUTO_ANALYZE}"}, status=500)
+                return
+            raw_reference_setting = payload.get("reference_video_enabled", True)
+            if isinstance(raw_reference_setting, str):
+                reference_video_enabled = raw_reference_setting.strip().lower() not in {"0", "false", "no", "off"}
+            else:
+                reference_video_enabled = bool(raw_reference_setting)
+            library_date = str(payload.get("library_date") or payload.get("production_date") or "").strip()
+            if library_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", library_date):
+                self.send_json({"ok": False, "error": "library_date/production_date must use YYYY-MM-DD format."}, status=400)
+                return
+            raw_content_type = payload.get("content_type") or payload.get("relationship") or ""
+            content_type = normalize_agent_content_type(raw_content_type)
+            if raw_content_type and not content_type:
+                self.send_json({
+                    "ok": False,
+                    "error": "Unsupported content_type/relationship.",
+                    "allowed_content_types": LIBRARY_FILTER_LABELS,
+                    "accepted_relationship_aliases": sorted(AGENT_CONTENT_TYPE_ALIASES),
+                }, status=400)
+                return
+            location_tag = str(payload.get("location_tag") or "").strip()
+            if location_tag and location_tag not in LOCATION_TAGS:
+                self.send_json({
+                    "ok": False,
+                    "error": "Unsupported location_tag.",
+                    "allowed_location_tags": sorted(LOCATION_TAGS),
+                }, status=400)
+                return
+            raw_tags = payload.get("tags")
+            if isinstance(raw_tags, dict):
+                manual_tags = json.loads(json.dumps(raw_tags, ensure_ascii=False))
+            elif isinstance(raw_tags, list):
+                manual_tags = {"labels": [str(value or "").strip()[:80] for value in raw_tags[:20] if str(value or "").strip()]}
+            elif raw_tags in {None, ""}:
+                manual_tags = {}
+            else:
+                self.send_json({"ok": False, "error": "tags must be an object or an array."}, status=400)
+                return
+            if len(json.dumps(manual_tags, ensure_ascii=False)) > 8000:
+                self.send_json({"ok": False, "error": "tags payload is too large."}, status=400)
+                return
+            supplied_request_id = str(payload.get("request_id") or self.headers.get("Idempotency-Key") or "").strip()[:160]
+            request_id = supplied_request_id or uuid4().hex
+            user_prompt = sanitize_analysis_prompt(
+                payload.get("user_prompt")
+                or payload.get("analysis_prompt")
+                or ""
+            )
+            if supplied_request_id:
+                with job_lock:
+                    existing = next(
+                        (
+                            json.loads(json.dumps(candidate, ensure_ascii=False))
+                            for candidate in jobs.values()
+                            if str(candidate.get("source") or "") == "agent_api"
+                            and str(candidate.get("agent_request_id") or "") == supplied_request_id
+                        ),
+                        None,
+                    )
+                if existing:
+                    response = agent_job_view(existing, include_script=False)
+                    response["idempotent_replay"] = True
+                    response["status_url"] = f"/api/agent/v1/video-analysis/{existing.get('id')}"
+                    response["cancel_url"] = f"/api/agent/v1/video-analysis/{existing.get('id')}/cancel"
+                    self.send_json(response, status=200)
+                    return
+            pending_items = agent_pending_item_count()
+            if pending_items + len(video_urls) > KOKO_AGENT_API_MAX_PENDING_ITEMS:
+                self.send_json({
+                    "ok": False,
+                    "error": "Koko is at its safe queue limit. Retry after existing analyses finish.",
+                    "pending_items": pending_items,
+                    "max_pending_items": KOKO_AGENT_API_MAX_PENDING_ITEMS,
+                }, status=429, headers=[("Retry-After", "30")])
+                return
+            try:
+                created = create_job(
+                    video_urls,
+                    mode="understanding" if requested_mode == "understanding" else "",
+                    user_prompt=user_prompt,
+                    source="agent_api",
+                    agent_request_id=request_id,
+                    reference_video_enabled=reference_video_enabled,
+                    library_date=library_date,
+                    content_type=content_type,
+                    location_tag=location_tag,
+                    manual_tags=manual_tags,
+                )
+                job_id = str(created.get("id") or "")
+                with job_lock:
+                    job = jobs.get(job_id)
+                    snapshot = json.loads(json.dumps(job, ensure_ascii=False)) if job else None
+            except Exception as exc:
+                log_runtime_warning("agent_analysis_job_create_failed", "Agent API failed to create analysis job.", error=str(exc))
+                status = 507 if is_no_space_error(exc) else 500
+                self.send_json({"ok": False, "error": friendly_error(str(exc))}, status=status)
+                return
+            response = agent_job_view(snapshot or {}, include_script=False)
+            response["status_url"] = f"/api/agent/v1/video-analysis/{job_id}"
+            response["cancel_url"] = f"/api/agent/v1/video-analysis/{job_id}/cancel"
+            self.send_json(response, status=202)
+            return
+        agent_cancel_match = re.fullmatch(r"/api/agent/v1/video-analysis/([0-9a-f]{32})/cancel", parsed.path)
+        if agent_cancel_match:
+            if not self.require_agent_api():
+                return
+            cancelled = cancel_agent_job(agent_cancel_match.group(1))
+            if not cancelled:
+                self.send_json({"ok": False, "error": "Job not found."}, status=404)
+                return
+            self.send_json(agent_job_view(cancelled, include_script=False))
+            return
         if parsed.path == "/koko_admin_2026-kwai/login":
             try:
                 payload = self.read_json()
