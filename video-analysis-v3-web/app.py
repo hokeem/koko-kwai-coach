@@ -646,6 +646,96 @@ def cleanup_orphan_result_dirs() -> dict[str, int]:
     return summary
 
 
+UNDERSTANDING_RESULT_FIELDS = {
+    "html_url",
+    "zh_html_url",
+    "pt_html_url",
+    "report_url",
+    "evidence_url",
+    "docx_url",
+    "zh_docx_url",
+    "pt_docx_url",
+    "storyboard_prompt",
+    "storyboard_preview_url",
+    "storyboard_cover_url",
+    "storyboard_updated_at",
+}
+
+
+def cleanup_understanding_job_artifacts(job_id: str, *, persist: bool = True) -> dict[str, int]:
+    """Keep only the lightweight summary for a finished video-understanding job."""
+    job = jobs.get(job_id)
+    if not isinstance(job, dict) or str(job.get("mode") or "").strip() != "understanding":
+        return {"deleted_dirs": 0, "compacted_items": 0, "freed_bytes": 0}
+
+    deleted_dirs = 0
+    compacted_items = 0
+    freed_bytes = 0
+    for item in job.get("items") or []:
+        if str(item.get("status") or "").strip() in {"queued", "running"}:
+            continue
+        item_id = str(item.get("id") or "").strip()
+        output_dir = RESULTS_ROOT / item_id
+        if item_id and output_dir.is_dir():
+            for path in output_dir.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    freed_bytes += path.stat().st_size
+                except FileNotFoundError:
+                    pass
+            shutil.rmtree(output_dir, ignore_errors=True)
+            if not output_dir.exists():
+                deleted_dirs += 1
+
+        for field in UNDERSTANDING_RESULT_FIELDS:
+            item[field] = ""
+        item["artifacts"] = {}
+        item["result_json"] = None
+        item["zh_result_json"] = None
+        item["pt_result_json"] = None
+        item["original_result_json"] = None
+        compacted_items += 1
+
+    for field in UNDERSTANDING_RESULT_FIELDS:
+        job[field] = ""
+    job["artifacts"] = {}
+    job["result_json"] = None
+    job["zh_result_json"] = None
+    job["pt_result_json"] = None
+    job["updated_at"] = now_iso()
+    if persist and compacted_items:
+        save_jobs()
+    return {
+        "deleted_dirs": deleted_dirs,
+        "compacted_items": compacted_items,
+        "freed_bytes": freed_bytes,
+    }
+
+
+def cleanup_finished_understanding_jobs() -> dict[str, int]:
+    summary = {"jobs": 0, "deleted_dirs": 0, "compacted_items": 0, "freed_bytes": 0}
+    changed = False
+    for job_id, job in list(jobs.items()):
+        if not isinstance(job, dict) or str(job.get("mode") or "").strip() != "understanding":
+            continue
+        result = cleanup_understanding_job_artifacts(job_id, persist=False)
+        if result["compacted_items"]:
+            summary["jobs"] += 1
+            changed = True
+        for key in ("deleted_dirs", "compacted_items", "freed_bytes"):
+            summary[key] += result[key]
+    if changed:
+        save_jobs()
+    summary["freed_mb"] = round(summary.pop("freed_bytes") / 1024 / 1024, 2)
+    log_runtime_info(
+        "understanding_cleanup_complete",
+        "Removed finished video-understanding artifacts while preserving summaries.",
+        **summary,
+    )
+    return summary
+
+
 def load_jobs() -> None:
     global jobs
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -653,6 +743,10 @@ def load_jobs() -> None:
     jobs = read_json_file(JOBS_FILE, default={})
     if not isinstance(jobs, dict):
         jobs = {}
+    try:
+        cleanup_finished_understanding_jobs()
+    except Exception as exc:
+        log_runtime_warning("understanding_cleanup_skipped", "Could not clean old video-understanding artifacts.", error=str(exc))
     try:
         emergency_cleanup_result_artifacts()
     except Exception as exc:
@@ -9135,6 +9229,26 @@ def run_job_batch(job_id: str) -> None:
         )
     except Exception as exc:
         update_job(job_id, status="failed", error=friendly_error(str(exc)), completed_at=now_iso(), stage="failed", stage_message="Batch failed.")
+    finally:
+        job = jobs.get(job_id)
+        if isinstance(job, dict) and str(job.get("mode") or "").strip() == "understanding":
+            try:
+                cleanup_result = cleanup_understanding_job_artifacts(job_id)
+                log_runtime_info(
+                    "understanding_job_cleaned",
+                    "Removed temporary video-understanding files after the task finished.",
+                    job_id=job_id,
+                    deleted_dirs=cleanup_result["deleted_dirs"],
+                    compacted_items=cleanup_result["compacted_items"],
+                    freed_mb=round(cleanup_result["freed_bytes"] / 1024 / 1024, 2),
+                )
+            except Exception as cleanup_exc:
+                log_runtime_warning(
+                    "understanding_job_cleanup_failed",
+                    "Could not remove temporary video-understanding files after the task finished.",
+                    job_id=job_id,
+                    error=str(cleanup_exc),
+                )
 
 
 def create_job(
@@ -16040,9 +16154,10 @@ function renderScriptDurationFilters(){{const box=document.querySelector("#scrip
 function scriptLocationCounts(){{const counts=new Map();for(const entry of entries){{const key=String(entry.location_tag||entry.location_tag_pt||"").trim();if(key)counts.set(key,(counts.get(key)||0)+1)}}return counts}}
 function renderScriptLocationFilters(){{const box=document.querySelector("#script-location-filters");if(!box)return;const counts=scriptLocationCounts();box.innerHTML=[`<button class="quick-filter-chip ${{!activeScriptLocation?"active":""}}" type="button" data-location-filter=""><span>全部地点</span> <small>${{entries.length}}</small></button>`,...locationOptions.map(label=>`<button class="quick-filter-chip ${{activeScriptLocation===label?"active":""}}" type="button" data-location-filter="${{esc(label)}}"><span>${{esc(label)}}</span> <small>${{Number(counts.get(label)||0)}}</small></button>`)].join("")}}
 function locationTag(e){{return String(e.location_tag||e.location_tag_pt||"").trim()}}
-function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();return entries.filter(e=>{{const matchesType=!activeScriptType||String(e.content_type||"待分类").trim()===activeScriptType;if(!matchesType)return false;const matchesDuration=!activeScriptDuration||String(e.duration_bucket||"").trim()===activeScriptDuration;if(!matchesDuration)return false;const matchesLocation=!activeScriptLocation||locationTag(e)===activeScriptLocation;if(!matchesLocation)return false;if(!q)return true;return [e.title,e.summary,e.content_type,e.duration_bucket,e.duration_label_pt,e.duration_label_zh,e.location_tag,e.location_tag_pt,e.video_url].join(" ").toLowerCase().includes(q)}})}}
+function scriptPublicationTime(e){{const raw=String(e.publish_datetime||e.library_date||e.created_at||e.saved_at||"").trim().replaceAll("/","-");const value=Date.parse(raw);return Number.isFinite(value)?value:0}}
+function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();return entries.filter(e=>{{const matchesType=!activeScriptType||String(e.content_type||"待分类").trim()===activeScriptType;if(!matchesType)return false;const matchesDuration=!activeScriptDuration||String(e.duration_bucket||"").trim()===activeScriptDuration;if(!matchesDuration)return false;const matchesLocation=!activeScriptLocation||locationTag(e)===activeScriptLocation;if(!matchesLocation)return false;if(!q)return true;return [e.title,e.summary,e.content_type,e.duration_bucket,e.duration_label_pt,e.duration_label_zh,e.location_tag,e.location_tag_pt,e.video_url,e.publish_datetime,e.library_date,e.created_at].join(" ").toLowerCase().includes(q)}}).sort((a,b)=>scriptPublicationTime(b)-scriptPublicationTime(a)||String(b.entry_id||"").localeCompare(String(a.entry_id||"")))}}
 function durationTag(e){{const map={{dur_1_20:"1-20 s",dur_20_60:"20 s-1 min",dur_60_120:"1-2 min",dur_120_plus:"Mais de 2 min"}};return e.duration_label_pt||map[e.duration_bucket]||""}}
-function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}const visibleRows=rows.slice(0,Math.max(SCRIPT_INITIAL_RENDER_LIMIT,scriptVisibleLimit));const remaining=Math.max(0,rows.length-visibleRows.length);const cards=visibleRows.map(e=>{{const share=scriptShareUrl(e.entry_id);const duration=durationTag(e);const location=locationTag(e);return `<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span>${{duration?`<span class="pill">${{esc(duration)}}</span>`:""}}${{location?`<span class="pill">${{esc(location)}}</span>`:""}}<span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span></div><div class="share-line"><b>kokocomedy 外链</b><a href="${{esc(share)}}" target="_blank" rel="noopener">${{esc(share)}}</a></div></div><div class="actions"><a class="btn" href="${{esc(share)}}" target="_blank" rel="noopener">打开外链</a><button type="button" data-copy="${{esc(share)}}">复制外链</button><button class="primary" type="button" data-script-edit="${{esc(e.entry_id)}}">修改脚本</button><button type="button" data-edit="${{esc(e.entry_id)}}">修改标签</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`}}).join("");const more=remaining?`<div class="empty"><b>已显示 ${{visibleRows.length}} / ${{rows.length}} 条</b><br><br><button class="primary" type="button" data-load-more-scripts>继续展开 50 条</button></div>`:`<div class="empty">已显示全部 ${{rows.length}} 条脚本。</div>`;list.innerHTML=cards+more;const s=document.querySelector("#status");if(s){{const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const filters=[activeScriptType&&`类型：${{activeScriptType}}`,activeScriptDuration&&`时间：${{durationOptions.find(x=>x[0]===activeScriptDuration)?.[1]||activeScriptDuration}}`,activeScriptLocation&&`地点：${{activeScriptLocation}}`].filter(Boolean).join(" · ");s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} 条，当前显示 ${{visibleRows.length}} / ${{rows.length}} 条${{filters?` · ${{filters}}`:""}}`}}}}
+function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}const visibleRows=rows.slice(0,Math.max(SCRIPT_INITIAL_RENDER_LIMIT,scriptVisibleLimit));const remaining=Math.max(0,rows.length-visibleRows.length);const cards=visibleRows.map(e=>{{const share=scriptShareUrl(e.entry_id);const duration=durationTag(e);const location=locationTag(e);const publicationDate=String(e.library_date||e.publish_datetime||e.created_at||"").slice(0,10);return `<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span>${{duration?`<span class="pill">${{esc(duration)}}</span>`:""}}${{location?`<span class="pill">${{esc(location)}}</span>`:""}}${{publicationDate?`<span class="pill">发布日期 ${{esc(publicationDate)}}</span>`:""}}<span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span></div><div class="share-line"><b>kokocomedy 外链</b><a href="${{esc(share)}}" target="_blank" rel="noopener">${{esc(share)}}</a></div></div><div class="actions"><a class="btn" href="${{esc(share)}}" target="_blank" rel="noopener">打开外链</a><button type="button" data-copy="${{esc(share)}}">复制外链</button><button class="primary" type="button" data-script-edit="${{esc(e.entry_id)}}">修改脚本</button><button type="button" data-edit="${{esc(e.entry_id)}}">修改标签</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`}}).join("");const more=remaining?`<div class="empty"><b>已显示 ${{visibleRows.length}} / ${{rows.length}} 条</b><br><br><button class="primary" type="button" data-load-more-scripts>继续展开 50 条</button></div>`:`<div class="empty">已显示全部 ${{rows.length}} 条脚本。</div>`;list.innerHTML=cards+more;const s=document.querySelector("#status");if(s){{const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const filters=[activeScriptType&&`类型：${{activeScriptType}}`,activeScriptDuration&&`时间：${{durationOptions.find(x=>x[0]===activeScriptDuration)?.[1]||activeScriptDuration}}`,activeScriptLocation&&`地点：${{activeScriptLocation}}`].filter(Boolean).join(" · ");s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} 条，当前显示 ${{visibleRows.length}} / ${{rows.length}} 条${{filters?` · ${{filters}}`:""}}`}}}}
 async function loadEntries(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载中...");const params=new URLSearchParams({{limit:"10000",scope:activeScriptScope}});const d=await api(`/api/creator-admin/scripts?${{params.toString()}}`);entries=d.entries||[];scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;scriptScopeCounts=d.scope_counts||{{portal_visible:0,hidden:0,incomplete:0,all:entries.length}};activeScriptScope=d.scope||activeScriptScope;if(activeScriptType&&!entries.some(e=>String(e.content_type||"待分类").trim()===activeScriptType))activeScriptType="";if(activeScriptDuration&&!entries.some(e=>String(e.duration_bucket||"").trim()===activeScriptDuration))activeScriptDuration="";if(activeScriptLocation&&!entries.some(e=>locationTag(e)===activeScriptLocation))activeScriptLocation="";adminView();const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const total=Number(scriptScopeCounts[activeScriptScope]||entries.length);const s=document.querySelector("#status");if(s)s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} / ${{total}} 条，默认显示前 ${{Math.min(SCRIPT_INITIAL_RENDER_LIMIT,entries.length)}} 条`}}catch(e){{loginView(e.message)}}}}
 async function ensureScriptIndex(){{if(scriptIndexLoaded)return scriptIndex;const d=await api("/api/creator-admin/scripts?limit=10000&scope=all");const rows=d.entries||[];scriptIndex=Object.fromEntries(rows.map(x=>[String(x.entry_id||""),x]).filter(x=>x[0]));scriptIndexLoaded=true;return scriptIndex}}
 async function loadCreatorCloudState(){{const d=await api("/api/creator-admin/state");creatorCloudState=d.state&&d.state.creators?d.state:{{creators:{{}}}}}}
