@@ -4645,6 +4645,17 @@ def friendly_error(error_text: str) -> str:
         return "分析失败，未返回具体错误。"
     if "no space left on device" in text.lower() or "enospc" in text.lower():
         return "服务器存储空间不足，暂时无法创建新任务。请先清理历史结果或扩容后重试。"
+    if any(
+        marker in text.lower()
+        for marker in (
+            "memoryerror",
+            "cannot allocate memory",
+            "out of memory",
+            "oom-kill",
+            "killed by signal 9",
+        )
+    ):
+        return "服务器运行内存不足，当前任务已停止。系统会继续串行处理任务，请缩短视频或稍后重试。"
     upper = text.upper()
     if (
         "HTTP 429" in text

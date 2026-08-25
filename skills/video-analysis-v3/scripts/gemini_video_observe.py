@@ -6,7 +6,9 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import time
 import urllib.error
@@ -348,13 +350,52 @@ def upload_file(video: Path, key: str, mime: str) -> dict:
             raise RuntimeError(f"Gemini upload start HTTP {exc.code}: {detail}") from exc
 
     upload_url = retry_call("Gemini upload start", _start, attempts=2, sleep_sec=2)
-    upload = urllib.request.Request(
-        upload_url,
-        data=video.read_bytes(),
-        headers={"Content-Length": str(video.stat().st_size), "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize"},
-        method="POST",
-    )
     def _upload():
+        curl = shutil.which("curl")
+        if curl:
+            proc = subprocess.run(
+                [
+                    curl,
+                    "--silent",
+                    "--show-error",
+                    "--fail-with-body",
+                    "--connect-timeout",
+                    "60",
+                    "--max-time",
+                    "300",
+                    "--request",
+                    "POST",
+                    "--header",
+                    f"Content-Length: {video.stat().st_size}",
+                    "--header",
+                    "X-Goog-Upload-Offset: 0",
+                    "--header",
+                    "X-Goog-Upload-Command: upload, finalize",
+                    "--data-binary",
+                    f"@{video}",
+                    upload_url,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=330,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or proc.stdout or f"curl exited with {proc.returncode}").strip())
+            return json.loads(proc.stdout)
+
+        # Local fallback for environments without curl. Production uses the
+        # streaming curl path so large videos are not duplicated in RAM.
+        upload = urllib.request.Request(
+            upload_url,
+            data=video.read_bytes(),
+            headers={
+                "Content-Length": str(video.stat().st_size),
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+            },
+            method="POST",
+        )
         try:
             with urllib.request.urlopen(upload, timeout=300) as resp:
                 return json.loads(resp.read().decode())
