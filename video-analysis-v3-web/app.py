@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import resource
 import shutil
 import secrets
 import subprocess
@@ -43,8 +44,12 @@ REVIEW_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_REVIEW_STALE_SEC", "9
 PROCESSLESS_TASK_STALE_SEC = int(os.environ.get("VIDEO_ANALYSIS_PROCESSLESS_STALE_SEC", "180"))
 RESTORE_PENDING_MAX_AGE_SEC = int(os.environ.get("VIDEO_ANALYSIS_RESTORE_PENDING_MAX_AGE_SEC", "1800"))
 WATCHDOG_INTERVAL_SEC = int(os.environ.get("VIDEO_ANALYSIS_WATCHDOG_INTERVAL_SEC", "15"))
-SOURCE_VIDEO_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTION_DAYS", "2"))
-RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "14"))
+SOURCE_VIDEO_RETENTION_DAYS = max(0.0, float(os.environ.get("VIDEO_ANALYSIS_SOURCE_RETENTION_DAYS", "0.25")))
+RAW_ARTIFACT_RETENTION_DAYS = max(0.0, float(os.environ.get("VIDEO_ANALYSIS_RAW_RETENTION_DAYS", "2")))
+RESOURCE_CLEANUP_INTERVAL_SEC = max(60, int(os.environ.get("VIDEO_ANALYSIS_RESOURCE_CLEANUP_INTERVAL_SEC", "300")))
+MIN_FREE_DISK_MB = max(128, int(os.environ.get("VIDEO_ANALYSIS_MIN_FREE_DISK_MB", "384")))
+AGGRESSIVE_FREE_DISK_MB = max(MIN_FREE_DISK_MB, int(os.environ.get("VIDEO_ANALYSIS_AGGRESSIVE_FREE_DISK_MB", "768")))
+COMPLETED_JOB_FULL_HISTORY_LIMIT = max(10, int(os.environ.get("VIDEO_ANALYSIS_FULL_JOB_HISTORY_LIMIT", "30")))
 MAX_CONCURRENT_FILTERS = max(1, int(os.environ.get("VIDEO_FILTER_MAX_CONCURRENT_JOBS", "1")))
 FILTER_USE_LLM = str(os.environ.get("VIDEO_FILTER_USE_LLM", "1")).strip().lower() in {"1", "true", "yes", "on"}
 FILTER_DURATION_MIN_SEC = int(os.environ.get("VIDEO_FILTER_DURATION_MIN_SEC", "30"))
@@ -209,12 +214,13 @@ RAW_ARTIFACT_NAMES = {
     "observations_raw_gemini.json",
 }
 
-job_lock = threading.Lock()
+job_lock = threading.RLock()
 jobs: dict[str, dict[str, Any]] = {}
 job_queue: deque[str] = deque()
 queued_job_ids: set[str] = set()
 queue_condition = threading.Condition()
 analysis_slots = threading.BoundedSemaphore(MAX_CONCURRENT_ANALYSES)
+resource_cleanup_lock = threading.Lock()
 active_processes_lock = threading.Lock()
 active_processes: dict[str, subprocess.Popen[str]] = {}
 cancelled_item_ids_lock = threading.Lock()
@@ -331,26 +337,19 @@ def read_json_file(path: Path, *, default: Any, backup_on_error: bool = True) ->
     if not path.exists():
         return default
     try:
-        raw = path.read_text(encoding="utf-8")
-    except Exception:
-        return default
-    if not raw.strip():
-        if backup_on_error:
-            try:
-                broken = path.with_suffix(path.suffix + f".empty-{int(time.time())}.bak")
-                path.replace(broken)
-            except Exception:
-                pass
-        return default
-    try:
-        return json.loads(raw)
-    except Exception:
+        if path.stat().st_size == 0:
+            raise ValueError("empty JSON file")
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
         if backup_on_error:
             try:
                 broken = path.with_suffix(path.suffix + f".broken-{int(time.time())}.bak")
                 path.replace(broken)
             except Exception:
                 pass
+        return default
+    except OSError:
         return default
 
 
@@ -362,7 +361,22 @@ def write_text_atomic(path: Path, content: str) -> None:
 
 
 def write_json_atomic(path: Path, payload: Any) -> None:
-    write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.parent / f"{path.name}.{uuid4().hex}.tmp"
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            # Streaming avoids holding a second, often very large, JSON string in
+            # memory while an analysis subprocess is running.
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
 
 def env_flag(name: str, default: str = "0") -> bool:
@@ -403,7 +417,15 @@ def best_timestamp_from_values(*values: object) -> datetime | None:
 
 def collect_cleanup_metadata() -> dict[str, dict[str, Any]]:
     metadata: dict[str, dict[str, Any]] = {}
-    for job_id, job in jobs.items():
+    library_data = read_json_file(LIBRARY_FILE, default=[], backup_on_error=False)
+    library_ids = {
+        str((entry or {}).get("entry_id") or (entry or {}).get("id") or "").strip()
+        for entry in (library_data if isinstance(library_data, list) else [])
+        if isinstance(entry, dict)
+    }
+    with job_lock:
+        job_records = list(jobs.items())
+    for job_id, job in job_records:
         items = job.get("items") or []
         if items:
             for item in items:
@@ -414,7 +436,7 @@ def collect_cleanup_metadata() -> dict[str, dict[str, Any]]:
                     "status": str(item.get("status") or "").strip(),
                     "reviewed": bool(item.get("reviewed")) or str(item.get("review_status") or "").strip() == "completed",
                     "edited": bool(item.get("edited")),
-                    "in_library": bool(item.get("saved_to_library_at")) or library_entry_exists(item_id),
+                    "in_library": bool(item.get("saved_to_library_at")) or item_id in library_ids,
                     "saved_to_library_at": best_timestamp_from_values(item.get("saved_to_library_at")),
                     "updated_at": best_timestamp_from_values(
                         item.get("completed_at"),
@@ -427,7 +449,7 @@ def collect_cleanup_metadata() -> dict[str, dict[str, Any]]:
                 "status": str(job.get("status") or "").strip(),
                 "reviewed": bool(job.get("reviewed")) or str(job.get("review_status") or "").strip() == "completed",
                 "edited": bool(job.get("edited")),
-                "in_library": bool(job.get("saved_to_library_at")) or library_entry_exists(job_id),
+                "in_library": bool(job.get("saved_to_library_at")) or job_id in library_ids,
                 "saved_to_library_at": best_timestamp_from_values(job.get("saved_to_library_at")),
                 "updated_at": best_timestamp_from_values(
                     job.get("completed_at"),
@@ -579,6 +601,231 @@ def emergency_cleanup_result_artifacts() -> dict[str, int]:
     }
     log_runtime_warning("emergency_cleanup_results_complete", "Finished emergency cleanup after disk pressure.", **summary)
     return summary
+
+
+def runtime_resource_snapshot() -> dict[str, Any]:
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(DATA_ROOT)
+    rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Linux reports KiB; macOS reports bytes.
+    rss_mb = rss_raw / (1024 * 1024) if sys.platform == "darwin" else rss_raw / 1024
+    with job_lock:
+        job_records = list(jobs.values())
+    return {
+        "disk_total_mb": round(usage.total / 1024 / 1024, 1),
+        "disk_used_mb": round(usage.used / 1024 / 1024, 1),
+        "disk_free_mb": round(usage.free / 1024 / 1024, 1),
+        "disk_used_percent": round((usage.used / usage.total * 100) if usage.total else 0, 1),
+        "process_peak_rss_mb": round(rss_mb, 1),
+        "analysis_concurrency": MAX_CONCURRENT_ANALYSES,
+        "queued_items": sum(
+            1
+            for job in job_records
+            for item in (job.get("items") or [])
+            if str(item.get("status") or "").strip() in {"queued", "running"}
+        ),
+    }
+
+
+def _path_tree_size(path: Path) -> int:
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except FileNotFoundError:
+            return 0
+    total = 0
+    if path.is_dir():
+        for child in path.rglob("*"):
+            if child.is_file():
+                try:
+                    total += child.stat().st_size
+                except FileNotFoundError:
+                    pass
+    return total
+
+
+def _delete_artifact(path: Path) -> int:
+    size = _path_tree_size(path)
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except Exception as exc:
+        log_runtime_warning("artifact_cleanup_failed", "Could not remove a temporary analysis artifact.", path=str(path), error=str(exc))
+        return 0
+    return size if not path.exists() else 0
+
+
+def _file_sha256(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
+def cleanup_finished_heavy_artifacts(*, aggressive: bool = False) -> dict[str, Any]:
+    """Remove reproducible working files while preserving scripts, covers and HTML."""
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    metadata = collect_cleanup_metadata()
+    freed_bytes = 0
+    deleted_paths = 0
+    skipped_running = 0
+    now_dt = datetime.now(timezone.utc)
+
+    for output_dir in RESULTS_ROOT.iterdir():
+        if not output_dir.is_dir():
+            continue
+        info = metadata.get(output_dir.name) or {}
+        status = str(info.get("status") or "").strip()
+        if status in {"queued", "running"}:
+            skipped_running += 1
+            continue
+        updated_at = info.get("updated_at")
+        if not isinstance(updated_at, datetime):
+            try:
+                updated_at = datetime.fromtimestamp(output_dir.stat().st_mtime, timezone.utc)
+            except OSError:
+                updated_at = now_dt
+        age_hours = max(0.0, (now_dt - updated_at).total_seconds() / 3600.0)
+
+        candidates: list[Path] = []
+        # Extracted frames are not referenced by the generated script HTML. They
+        # can be recreated from the source and otherwise consume several MB/job.
+        for dirname in ("selected_frames", "selected_frames_end"):
+            frame_dir = output_dir / dirname
+            if frame_dir.exists():
+                html_path = output_dir / "script_table.html"
+                html_references_frames = False
+                try:
+                    html_references_frames = html_path.exists() and dirname in html_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    pass
+                if aggressive or not html_references_frames:
+                    candidates.append(frame_dir)
+
+        for raw_name in RAW_ARTIFACT_NAMES:
+            raw_path = output_dir / raw_name
+            if raw_path.exists() and (aggressive or bool(info.get("in_library")) or age_hours >= 24):
+                candidates.append(raw_path)
+
+        source_path = output_dir / SOURCE_VIDEO_NAME
+        if source_path.exists():
+            source_reason = source_video_cleanup_reason(info, output_dir, now_dt)
+            if source_reason or status == "failed" or (aggressive and age_hours >= 1):
+                candidates.append(source_path)
+
+        # Interrupted atomic writes and downloads are always disposable after
+        # the owning task has stopped.
+        for child in output_dir.iterdir():
+            if child.is_file() and (child.name.endswith(".tmp") or child.name.endswith(".part")):
+                candidates.append(child)
+
+        for candidate in dict.fromkeys(candidates):
+            released = _delete_artifact(candidate)
+            if released:
+                freed_bytes += released
+                deleted_paths += 1
+
+        # Generated preview and cover are frequently byte-identical. A hardlink
+        # keeps both public URLs valid without storing the bitmap twice.
+        cover = next((p for p in output_dir.glob("storyboard_cover.*") if p.is_file()), None)
+        preview = next((p for p in output_dir.glob("storyboard_preview.*") if p.is_file()), None)
+        if cover and preview and cover.suffix.lower() == preview.suffix.lower():
+            try:
+                if cover.stat().st_ino != preview.stat().st_ino and cover.stat().st_size == preview.stat().st_size:
+                    if _file_sha256(cover) == _file_sha256(preview):
+                        preview_size = preview.stat().st_size
+                        preview.unlink()
+                        os.link(cover, preview)
+                        freed_bytes += preview_size
+                        deleted_paths += 1
+            except OSError:
+                pass
+
+    FILTER_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    with filter_jobs_lock:
+        active_filter_jobs = {
+            str(job_id)
+            for job_id, job in filter_jobs.items()
+            if str((job or {}).get("status") or "").strip() in {"queued", "running"}
+        }
+    for filter_job_dir in FILTER_CACHE_ROOT.iterdir():
+        if not filter_job_dir.is_dir() or filter_job_dir.name in active_filter_jobs:
+            continue
+        for media_path in filter_job_dir.rglob("*"):
+            if not media_path.is_file():
+                continue
+            is_heavy_media = (
+                media_path.name in {"source.mp4", "full_audio.mp3"}
+                or media_path.suffix.lower() in {".jpg", ".jpeg", ".webp", ".wav", ".m4a"}
+            )
+            if not is_heavy_media:
+                continue
+            try:
+                age_hours = max(0.0, (time.time() - media_path.stat().st_mtime) / 3600.0)
+            except OSError:
+                age_hours = 24
+            if aggressive or age_hours >= 1:
+                released = _delete_artifact(media_path)
+                if released:
+                    freed_bytes += released
+                    deleted_paths += 1
+
+    summary = {
+        "aggressive": aggressive,
+        "deleted_paths": deleted_paths,
+        "freed_mb": round(freed_bytes / 1024 / 1024, 2),
+        "skipped_running_dirs": skipped_running,
+    }
+    log_runtime_info("heavy_artifact_cleanup_complete", "Finished cleaning reproducible analysis artifacts.", **summary)
+    return summary
+
+
+def compact_completed_job_history() -> int:
+    """Keep recent jobs editable while dropping duplicate JSON from old jobs."""
+    finished = [
+        job
+        for job in jobs.values()
+        if str(job.get("status") or "").strip() in {"completed", "failed"}
+    ]
+    finished.sort(
+        key=lambda job: best_timestamp_from_values(job.get("completed_at"), job.get("updated_at"), job.get("created_at"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    changed = 0
+    for job in finished[COMPLETED_JOB_FULL_HISTORY_LIMIT:]:
+        for field in ("result_json", "zh_result_json", "pt_result_json", "original_result_json", "artifacts"):
+            empty_value: Any = {} if field == "artifacts" else None
+            if job.get(field) not in (None, {}, ""):
+                job[field] = empty_value
+                changed += 1
+        for item in job.get("items") or []:
+            for field in ("result_json", "zh_result_json", "pt_result_json", "original_result_json", "artifacts"):
+                empty_value = {} if field == "artifacts" else None
+                if item.get(field) not in (None, {}, ""):
+                    item[field] = empty_value
+                    changed += 1
+            item.pop("command", None)
+            raw_error = str(item.get("raw_error") or "")
+            if len(raw_error) > 2000:
+                item["raw_error"] = raw_error[:2000]
+                changed += 1
+    return changed
+
+
+def ensure_capacity_for_new_job() -> dict[str, Any]:
+    with resource_cleanup_lock:
+        snapshot = runtime_resource_snapshot()
+        if snapshot["disk_free_mb"] < AGGRESSIVE_FREE_DISK_MB:
+            cleanup_finished_heavy_artifacts(aggressive=True)
+            cleanup_orphan_result_dirs()
+            snapshot = runtime_resource_snapshot()
+        if snapshot["disk_free_mb"] < MIN_FREE_DISK_MB:
+            raise OSError(errno.ENOSPC, f"Only {snapshot['disk_free_mb']} MB free after automatic cleanup")
+        return snapshot
 
 
 def collect_tracked_result_ids() -> set[str]:
@@ -753,6 +1000,10 @@ def load_jobs() -> None:
     except Exception as exc:
         log_runtime_warning("emergency_cleanup_results_skipped", "Emergency result cleanup failed during startup.", error=str(exc))
     try:
+        cleanup_finished_heavy_artifacts(aggressive=runtime_resource_snapshot()["disk_free_mb"] < AGGRESSIVE_FREE_DISK_MB)
+    except Exception as exc:
+        log_runtime_warning("heavy_cleanup_startup_skipped", "Heavy artifact cleanup failed during startup.", error=str(exc))
+    try:
         backfill_completed_jobs()
     except Exception as exc:
         if is_no_space_error(exc):
@@ -767,6 +1018,7 @@ def load_jobs() -> None:
 
 
 def save_jobs() -> None:
+    compact_completed_job_history()
     write_json_atomic(JOBS_FILE, jobs)
 
 
@@ -1291,6 +1543,29 @@ def start_job_workers() -> None:
 
 def start_watchdog() -> None:
     threading.Thread(target=watchdog_loop, name="koko-task-watchdog", daemon=True).start()
+
+
+def resource_janitor_loop() -> None:
+    while True:
+        time.sleep(RESOURCE_CLEANUP_INTERVAL_SEC)
+        try:
+            with resource_cleanup_lock:
+                before = runtime_resource_snapshot()
+                aggressive = before["disk_free_mb"] < AGGRESSIVE_FREE_DISK_MB
+                cleanup_finished_heavy_artifacts(aggressive=aggressive)
+                if aggressive:
+                    cleanup_orphan_result_dirs()
+                with job_lock:
+                    if compact_completed_job_history():
+                        write_json_atomic(JOBS_FILE, jobs)
+                after = runtime_resource_snapshot()
+            log_runtime_info("resource_janitor_complete", "Periodic resource cleanup completed.", before=before, after=after)
+        except Exception as exc:
+            log_runtime_warning("resource_janitor_failed", "Periodic resource cleanup failed and will retry.", error=str(exc))
+
+
+def start_resource_janitor() -> None:
+    threading.Thread(target=resource_janitor_loop, name="koko-resource-janitor", daemon=True).start()
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -9005,6 +9280,12 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
     output_dir = RESULTS_ROOT / item["id"]
     progress_path = output_dir / "progress.json"
     proc_env = os.environ.copy()
+    # Keep native numerical/image libraries from spawning large thread pools in
+    # the child process. One analysis already runs at a time on Render.
+    for env_name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        proc_env.setdefault(env_name, "1")
+    proc_env.setdefault("MALLOC_ARENA_MAX", "2")
+    proc_env.setdefault("PYTHONUNBUFFERED", "1")
     last_error = "Unknown pipeline failure"
     tried: list[str] = []
     manual_stop = False
@@ -9278,6 +9559,18 @@ def run_job_batch(job_id: str) -> None:
                     job_id=job_id,
                     error=str(cleanup_exc),
                 )
+        try:
+            # Full analysis keeps its final script/cover, but extracted frames,
+            # raw model responses and failed downloads must not accumulate.
+            with resource_cleanup_lock:
+                cleanup_finished_heavy_artifacts(aggressive=False)
+        except Exception as cleanup_exc:
+            log_runtime_warning(
+                "post_analysis_cleanup_failed",
+                "Could not clean temporary files after analysis; the janitor will retry.",
+                job_id=job_id,
+                error=str(cleanup_exc),
+            )
 
 
 def create_job(
@@ -9293,6 +9586,7 @@ def create_job(
     location_tag: str = "",
     manual_tags: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    ensure_capacity_for_new_job()
     normalized_mode = str(mode or "").strip().lower()
     job_mode = "understanding" if normalized_mode == "understanding" else ("batch" if len(video_urls) > 1 else "single")
     analysis_prompt = sanitize_analysis_prompt(user_prompt)
@@ -9392,7 +9686,11 @@ def create_job(
     }
     with job_lock:
         jobs[job_id] = job
-        save_jobs()
+        try:
+            save_jobs()
+        except Exception:
+            jobs.pop(job_id, None)
+            raise
     enqueue_job(job_id)
     return public_job_view(job)
 
@@ -17741,8 +18039,18 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"} and KWAI_FAVICON.exists():
             self.send_file(KWAI_FAVICON)
             return
-        if parsed.path == "/healthz":
-            self.send_json({"ok": True, "time": now_iso(), "skill_root": str(SKILL_ROOT)})
+        if parsed.path in {"/healthz", "/api/runtime/health"}:
+            resources = runtime_resource_snapshot()
+            self.send_json({
+                "ok": resources["disk_free_mb"] >= MIN_FREE_DISK_MB,
+                "time": now_iso(),
+                "skill_root": str(SKILL_ROOT),
+                "resources": resources,
+                "limits": {
+                    "minimum_free_disk_mb": MIN_FREE_DISK_MB,
+                    "aggressive_cleanup_below_mb": AGGRESSIVE_FREE_DISK_MB,
+                },
+            })
             return
         if parsed.path == "/api/library":
             self.send_json({"entries": load_library_entries()})
@@ -17945,8 +18253,18 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path in {"/favicon.svg", "/favicon.ico", "/brand/kwai-favicon.svg"} and KWAI_FAVICON.exists():
             self.head_file(KWAI_FAVICON)
             return
-        if parsed.path == "/healthz":
-            payload = json.dumps({"ok": True, "time": now_iso(), "skill_root": str(SKILL_ROOT)}, ensure_ascii=False).encode("utf-8")
+        if parsed.path in {"/healthz", "/api/runtime/health"}:
+            resources = runtime_resource_snapshot()
+            payload = json.dumps({
+                "ok": resources["disk_free_mb"] >= MIN_FREE_DISK_MB,
+                "time": now_iso(),
+                "skill_root": str(SKILL_ROOT),
+                "resources": resources,
+                "limits": {
+                    "minimum_free_disk_mb": MIN_FREE_DISK_MB,
+                    "aggressive_cleanup_below_mb": AGGRESSIVE_FREE_DISK_MB,
+                },
+            }, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
@@ -18640,6 +18958,7 @@ def main() -> int:
     start_filter_workers()
     start_translation_workers()
     start_watchdog()
+    start_resource_janitor()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AppHandler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT), "skill_root": str(SKILL_ROOT)}, ensure_ascii=False))
     try:
