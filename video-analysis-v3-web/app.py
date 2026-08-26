@@ -6036,7 +6036,14 @@ def save_creator_admin_scripts_cache(payload: dict[str, Any]) -> None:
         return
     cached = dict(payload)
     cached["cached_at"] = now_iso()
-    write_json_atomic(CREATOR_ADMIN_SCRIPTS_CACHE_FILE, cached)
+    try:
+        write_json_atomic(CREATOR_ADMIN_SCRIPTS_CACHE_FILE, cached)
+    except Exception as exc:
+        log_runtime_warning(
+            "creator_admin_scripts_cache_write_failed",
+            "Creator script data is still usable, but its local cache could not be updated.",
+            error=str(exc),
+        )
 
 
 def load_creator_admin_cache(path: Path) -> dict[str, Any] | None:
@@ -6047,7 +6054,17 @@ def load_creator_admin_cache(path: Path) -> dict[str, Any] | None:
 def save_creator_admin_cache(path: Path, payload: dict[str, Any]) -> None:
     cached = dict(payload)
     cached["cached_at"] = now_iso()
-    write_json_atomic(path, cached)
+    try:
+        write_json_atomic(path, cached)
+    except Exception as exc:
+        # Remote Creator data is authoritative. A full or read-only local disk
+        # must not turn a successful upstream response into a dashboard 502.
+        log_runtime_warning(
+            "creator_admin_cache_write_failed",
+            "Creator data is still usable, but its local cache could not be updated.",
+            path=str(path),
+            error=str(exc),
+        )
 
 
 def creator_admin_cached_payload(path: Path, message: str) -> tuple[int, dict[str, Any]] | None:
