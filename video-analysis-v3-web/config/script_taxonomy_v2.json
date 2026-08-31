@@ -1,0 +1,74 @@
+{
+  "version": "2.0.0",
+  "dimensions": {
+    "relationship": {
+      "zh": "人物关系",
+      "pt": "Relação entre personagens",
+      "multiple": true,
+      "options": [
+        {"id": "couple", "zh": "情侣", "pt": "Casal", "aliases": ["夫妻", "恋人", "男女朋友", "marido", "esposa", "casal", "namorado", "namorada"]},
+        {"id": "neighbors_friends", "zh": "邻里&朋友", "pt": "Vizinhos e amigos", "aliases": ["邻里", "邻居", "朋友", "同事", "闺蜜", "兄弟", "vizinho", "vizinha", "amigo", "amiga", "colega"]},
+        {"id": "family", "zh": "家庭", "pt": "Família", "aliases": ["家人", "父母", "爸爸", "妈妈", "儿子", "女儿", "孩子", "亲戚", "família", "familia", "pai", "mãe", "mae", "filho", "filha", "criança", "crianca"]},
+        {"id": "boss_employee", "zh": "老板&员工", "pt": "Chefe e funcionário", "aliases": ["老板", "员工", "上司", "下属", "雇主", "chefe", "patrão", "patrao", "funcionário", "funcionario", "empregado"]},
+        {"id": "strangers", "zh": "陌生人", "pt": "Desconhecidos", "aliases": ["陌生人", "路人", "顾客", "客户", "desconhecido", "desconhecida", "pedestre", "cliente"]}
+      ]
+    },
+    "format": {
+      "zh": "形式",
+      "pt": "Formato",
+      "multiple": true,
+      "options": [
+        {"id": "story_acting", "zh": "剧情演绎", "pt": "Encenação", "aliases": ["剧情", "演绎", "短剧", "表演", "encenação", "encenacao", "sketch", "história", "historia"]},
+        {"id": "multi_role", "zh": "一人分饰多角", "pt": "Uma pessoa em vários papéis", "aliases": ["一人分饰多角", "一人多角", "换装扮演", "多个角色", "vários papéis", "varios papeis", "múltiplos personagens", "multiplos personagens"]},
+        {"id": "reaction", "zh": "reaction", "pt": "Reaction", "aliases": ["reaction", "反应视频", "看视频反应", "reação", "reacao", "reagindo"]},
+        {"id": "infinite_loop", "zh": "无限循环", "pt": "Loop infinito", "aliases": ["无限循环", "循环剧情", "首尾循环", "loop infinito", "ciclo infinito", "repete sem parar"]},
+        {"id": "street_interview", "zh": "街头采访", "pt": "Entrevista de rua", "aliases": ["街头采访", "随机采访", "路人采访", "entrevista de rua", "entrevista na rua"]}
+      ]
+    },
+    "location": {
+      "zh": "地点",
+      "pt": "Local",
+      "multiple": true,
+      "options": [
+        {"id": "home", "zh": "家里", "pt": "Em casa", "aliases": ["家里", "家中", "卧室", "客厅", "厨房", "浴室", "房间", "casa", "quarto", "sala", "cozinha", "banheiro", "apartamento"]},
+        {"id": "country_yard", "zh": "乡村院子", "pt": "Quintal rural", "aliases": ["乡村院子", "农村", "院子", "农田", "乡下", "quintal", "roça", "roca", "fazenda", "sítio", "sitio", "rural"]},
+        {"id": "city_street", "zh": "城市街道", "pt": "Rua da cidade", "aliases": ["城市街道", "街头", "马路", "人行道", "城市", "rua", "calçada", "calcada", "avenida", "cidade"]},
+        {"id": "bar", "zh": "酒馆", "pt": "Bar / boteco", "aliases": ["酒馆", "酒吧", "吧台", "bar", "boteco", "pub"]},
+        {"id": "construction_site", "zh": "工地", "pt": "Obra / construção", "aliases": ["工地", "施工", "建筑", "装修", "水泥", "砖", "obra", "construção", "construcao", "pedreiro", "cimento", "tijolo"]},
+        {"id": "store", "zh": "商店", "pt": "Loja", "aliases": ["商店", "超市", "便利店", "药店", "货架", "收银台", "loja", "mercado", "supermercado", "mercearia", "farmácia", "farmacia"]}
+      ]
+    },
+    "content": {
+      "zh": "内容",
+      "pt": "Conteúdo",
+      "multiple": true,
+      "options": [
+        {"id": "argument", "zh": "吵架", "pt": "Briga", "aliases": ["吵架", "争吵", "冲突", "争执", "briga", "discussão", "discussao", "conflito"]},
+        {"id": "prank", "zh": "整蛊", "pt": "Pegadinha", "aliases": ["整蛊", "恶作剧", "假装", "戏弄", "pegadinha", "trollagem", "finge"]},
+        {"id": "game_challenge", "zh": "游戏挑战", "pt": "Jogo e desafio", "aliases": ["游戏挑战", "游戏", "挑战", "比赛", "desafio", "jogo", "competição", "competicao"]},
+        {"id": "adult_humor", "zh": "黄段子", "pt": "Humor adulto", "aliases": ["黄段子", "暧昧笑话", "性暗示", "成人笑话", "humor adulto", "duplo sentido", "piada picante"]},
+        {"id": "debt_default", "zh": "催债&老赖", "pt": "Cobrança e calote", "aliases": ["催债", "老赖", "欠钱", "赖账", "讨债", "cobrança", "cobranca", "calote", "dívida", "divida"]},
+        {"id": "street_scam", "zh": "江湖骗术", "pt": "Golpe de rua", "aliases": ["江湖骗术", "骗局", "诈骗", "骗钱", "圈套", "golpe", "fraude", "trapaça", "trapaca"]},
+        {"id": "provoking_trouble", "zh": "寻衅滋事", "pt": "Provocação e desordem", "aliases": ["寻衅滋事", "挑衅", "找茬", "闹事", "provocação", "provocacao", "arrumar confusão", "arrumar confusao"]},
+        {"id": "absurd_performance", "zh": "无厘头行为艺术", "pt": "Performance absurda", "aliases": ["无厘头行为艺术", "无厘头", "荒诞行为", "奇怪行为", "performance absurda", "comportamento absurdo", "sem sentido"]}
+      ]
+    },
+    "duration": {
+      "zh": "时间",
+      "pt": "Duração",
+      "multiple": false,
+      "options": [
+        {"id": "dur_1_20", "zh": "20s以下", "pt": "Até 20 s", "min_exclusive": 0, "max_inclusive": 20},
+        {"id": "dur_20_60", "zh": "20s-1min", "pt": "20 s-1 min", "min_exclusive": 20, "max_inclusive": 60},
+        {"id": "dur_60_120", "zh": "1-2min", "pt": "1-2 min", "min_exclusive": 60, "max_inclusive": 120},
+        {"id": "dur_120_plus", "zh": "2min以上", "pt": "Mais de 2 min", "min_exclusive": 120}
+      ]
+    }
+  },
+  "legacy_content_type_map": {
+    "夫妻整蛊/冲突": {"relationship": ["couple"], "format": ["story_acting"], "content": ["prank", "argument"]},
+    "夫妻暧昧": {"relationship": ["couple"], "format": ["story_acting"], "content": ["adult_humor"]},
+    "家庭整蛊": {"relationship": ["family"], "format": ["story_acting"], "content": ["prank"]},
+    "朋友整蛊": {"relationship": ["neighbors_friends"], "format": ["story_acting"], "content": ["prank"]}
+  }
+}

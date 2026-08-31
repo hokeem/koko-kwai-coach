@@ -1589,10 +1589,8 @@ def load_library_entries() -> list[dict[str, Any]]:
             entry["storyboard_cover_url"] = storyboard_url
         if not entry.get("duration_bucket"):
             entry.update(creator_duration_fields(str(entry.get("entry_id") or "")))
-        if str(entry.get("location_tag") or "").strip() not in LOCATION_TAGS:
-            entry.update(infer_location_tag_fields(entry))
-        elif not entry.get("location_tag_pt"):
-            entry["location_tag_pt"] = LOCATION_TAG_PT.get(str(entry.get("location_tag") or "").strip(), "")
+        entry.update(infer_location_tag_fields(entry))
+        ensure_script_taxonomy_fields(entry)
         share_url = creator_script_share_url(entry.get("entry_id"))
         if share_url:
             entry["creator_share_url"] = share_url
@@ -2114,21 +2112,175 @@ def parse_duration_seconds(duration_text: object) -> float:
     return hours * 3600 + minutes * 60 + seconds
 
 
+SCRIPT_TAXONOMY_PATH = BASE / "config" / "script_taxonomy_v2.json"
+
+
+def load_script_taxonomy() -> dict[str, Any]:
+    try:
+        payload = json.loads(SCRIPT_TAXONOMY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Unable to load script taxonomy: {exc}") from exc
+    if not isinstance(payload.get("dimensions"), dict):
+        raise RuntimeError("Script taxonomy is missing dimensions.")
+    return payload
+
+
+SCRIPT_TAXONOMY = load_script_taxonomy()
+SCRIPT_TAXONOMY_VERSION = str(SCRIPT_TAXONOMY.get("version") or "2.0.0")
+SCRIPT_TAG_DIMENSIONS = ("relationship", "format", "location", "content")
+
+
+def taxonomy_options(dimension: str) -> list[dict[str, Any]]:
+    raw = ((SCRIPT_TAXONOMY.get("dimensions") or {}).get(dimension) or {}).get("options") or []
+    return [item for item in raw if isinstance(item, dict) and str(item.get("id") or "").strip()]
+
+
+def taxonomy_option_map(dimension: str) -> dict[str, dict[str, Any]]:
+    return {str(item["id"]): item for item in taxonomy_options(dimension)}
+
+
+def normalize_taxonomy_tag_ids(dimension: str, values: Any) -> list[str]:
+    allowed = taxonomy_option_map(dimension)
+    if isinstance(values, str):
+        raw_values = re.split(r"[、,，/|]", values)
+    elif isinstance(values, list):
+        raw_values = values
+    else:
+        raw_values = []
+    normalized: list[str] = []
+    for raw in raw_values:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value in allowed:
+            tag_id = value
+        else:
+            tag_id = next(
+                (
+                    option_id
+                    for option_id, option in allowed.items()
+                    if value in {str(option.get("zh") or ""), str(option.get("pt") or "")}
+                    or value.lower() in {str(alias or "").lower() for alias in option.get("aliases") or []}
+                ),
+                "",
+            )
+        if tag_id and tag_id not in normalized:
+            normalized.append(tag_id)
+    return normalized
+
+
+def taxonomy_tag_labels(dimension: str, tag_ids: Any, locale: str = "zh") -> list[str]:
+    options = taxonomy_option_map(dimension)
+    key = "pt" if locale == "pt" else "zh"
+    return [str(options[tag_id].get(key) or tag_id) for tag_id in normalize_taxonomy_tag_ids(dimension, tag_ids)]
+
+
+def parse_taxonomy_tags_payload(payload: Any) -> tuple[dict[str, list[str]], list[str]]:
+    source = payload if isinstance(payload, dict) else {}
+    parsed: dict[str, list[str]] = {}
+    errors: list[str] = []
+    for dimension in SCRIPT_TAG_DIMENSIONS:
+        raw = source.get(dimension, source.get(f"{dimension}_tags"))
+        if raw is None or raw == "":
+            parsed[dimension] = []
+            continue
+        values = raw if isinstance(raw, list) else [raw]
+        normalized = normalize_taxonomy_tag_ids(dimension, values)
+        invalid = [
+            str(value or "").strip()
+            for value in values
+            if str(value or "").strip()
+            and not normalize_taxonomy_tag_ids(dimension, [value])
+        ]
+        if invalid:
+            errors.append(f"{dimension}: {', '.join(invalid)}")
+        parsed[dimension] = normalized
+    return parsed, errors
+
+
+def taxonomy_keyword_matches(dimension: str, text: str) -> list[str]:
+    lowered = str(text or "").lower()
+    matches: list[str] = []
+    for option in taxonomy_options(dimension):
+        signals = [option.get("zh"), option.get("pt"), *(option.get("aliases") or [])]
+        matched = False
+        for signal in signals:
+            term = str(signal or "").strip().lower()
+            if not term:
+                continue
+            if re.search(r"[\u4e00-\u9fff]", term):
+                matched = term in lowered
+            else:
+                matched = bool(re.search(rf"(?<![\wÀ-ÿ]){re.escape(term)}(?![\wÀ-ÿ])", lowered, flags=re.I))
+            if matched:
+                break
+        if matched:
+            matches.append(str(option["id"]))
+    return matches
+
+
+def ensure_script_taxonomy_fields(
+    entry: dict[str, Any],
+    script_json: dict[str, Any] | None = None,
+    *,
+    source: str = "compatibility",
+) -> dict[str, Any]:
+    manual_source = str(entry.get("taxonomy_source") or "").strip().lower() == "manual"
+    text = " ".join(
+        [
+            str(entry.get("title") or ""),
+            str(entry.get("whole_video_summary") or ""),
+            str(entry.get("summary") or ""),
+            str(entry.get("content_type_reasoning") or ""),
+            flatten_script_text(script_json or {}),
+        ]
+    )
+    legacy = (SCRIPT_TAXONOMY.get("legacy_content_type_map") or {}).get(str(entry.get("content_type") or ""), {})
+    legacy_locations = {
+        "室内房间": ["home"],
+        "房屋内外结合": ["home"],
+        "乡村院子": ["country_yard"],
+        "工地": ["construction_site"],
+        "酒馆": ["bar"],
+        "超市": ["store"],
+        "药店": ["store"],
+        "家里": ["home"],
+        "城市街道": ["city_street"],
+        "商店": ["store"],
+    }
+    for dimension in SCRIPT_TAG_DIMENSIONS:
+        field = f"{dimension}_tags"
+        current = normalize_taxonomy_tag_ids(dimension, entry.get(field))
+        if not current:
+            current = normalize_taxonomy_tag_ids(dimension, legacy.get(dimension) or [])
+        if dimension == "location" and not current:
+            current = normalize_taxonomy_tag_ids(dimension, legacy_locations.get(str(entry.get("location_tag") or ""), []))
+        inferred = [] if manual_source else taxonomy_keyword_matches(dimension, text)
+        for tag_id in inferred:
+            if tag_id not in current:
+                current.append(tag_id)
+        if dimension == "format" and not manual_source and not current and (script_json or entry.get("content_type")):
+            current = ["story_acting"]
+        entry[field] = current
+        entry[f"{dimension}_tag_labels_zh"] = taxonomy_tag_labels(dimension, current, "zh")
+        entry[f"{dimension}_tag_labels_pt"] = taxonomy_tag_labels(dimension, current, "pt")
+    duration_bucket = str(entry.get("duration_bucket") or "").strip()
+    if duration_bucket not in taxonomy_option_map("duration"):
+        duration_bucket = creator_duration_bucket(float(entry.get("duration_seconds") or 0))
+    entry["duration_bucket"] = duration_bucket
+    entry["taxonomy_version"] = SCRIPT_TAXONOMY_VERSION
+    entry["taxonomy_source"] = str(entry.get("taxonomy_source") or source)
+    return entry
+
+
 CREATOR_DURATION_LABELS = {
-    "dur_1_20": {"pt": "1-20 s", "zh": "1-20 秒"},
-    "dur_20_60": {"pt": "20 s-1 min", "zh": "20 秒-1 分钟"},
-    "dur_60_120": {"pt": "1-2 min", "zh": "1-2 分钟"},
-    "dur_120_plus": {"pt": "Mais de 2 min", "zh": "2 分钟以上"},
+    str(item["id"]): {"pt": str(item.get("pt") or ""), "zh": str(item.get("zh") or "")}
+    for item in taxonomy_options("duration")
 }
 
 LOCATION_TAG_OPTIONS = [
-    {"zh": "室内房间", "pt": "Cômodo interno"},
-    {"zh": "乡村院子", "pt": "Quintal / rural"},
-    {"zh": "工地", "pt": "Obra / construção"},
-    {"zh": "酒馆", "pt": "Bar / boteco"},
-    {"zh": "超市", "pt": "Supermercado"},
-    {"zh": "药店", "pt": "Farmácia"},
-    {"zh": "房屋内外结合", "pt": "Casa: interno + externo"},
+    {"zh": str(item.get("zh") or ""), "pt": str(item.get("pt") or ""), "id": str(item.get("id") or "")}
+    for item in taxonomy_options("location")
 ]
 LOCATION_TAG_PT = {item["zh"]: item["pt"] for item in LOCATION_TAG_OPTIONS}
 LOCATION_TAGS = {item["zh"] for item in LOCATION_TAG_OPTIONS}
@@ -2173,15 +2325,23 @@ def library_script_json(entry_id: object) -> dict[str, Any]:
     )
 
 
-def infer_location_tag_fields(entry: dict[str, Any], script_json: dict[str, Any] | None = None) -> dict[str, str]:
-    current = str(entry.get("location_tag") or "").strip()
-    if current in LOCATION_TAGS:
+def infer_location_tag_fields(entry: dict[str, Any], script_json: dict[str, Any] | None = None) -> dict[str, Any]:
+    option_map = taxonomy_option_map("location")
+    current_ids = normalize_taxonomy_tag_ids("location", entry.get("location_tags"))
+    current_label = str(entry.get("location_tag") or "").strip()
+    if not current_ids and current_label:
+        current_ids = normalize_taxonomy_tag_ids("location", [current_label])
+    if current_ids:
+        primary = current_ids[0]
         return {
-            "location_tag": current,
-            "location_tag_pt": str(entry.get("location_tag_pt") or LOCATION_TAG_PT.get(current) or ""),
+            "location_tag": str(option_map[primary].get("zh") or ""),
+            "location_tag_pt": str(option_map[primary].get("pt") or ""),
+            "location_tags": current_ids,
+            "location_tag_labels_zh": taxonomy_tag_labels("location", current_ids, "zh"),
+            "location_tag_labels_pt": taxonomy_tag_labels("location", current_ids, "pt"),
             "location_tag_confidence": str(entry.get("location_tag_confidence") or "manual"),
             "location_tag_source": str(entry.get("location_tag_source") or "existing"),
-            "location_tag_reasoning": str(entry.get("location_tag_reasoning") or "Existing location tag."),
+            "location_tag_reasoning": str(entry.get("location_tag_reasoning") or "Existing location tags."),
         }
     text = " ".join(
         [
@@ -2192,38 +2352,31 @@ def infer_location_tag_fields(entry: dict[str, Any], script_json: dict[str, Any]
             flatten_script_text(script_json or {}),
         ]
     ).lower()
-    terms = {
-        "室内房间": ["quarto", "sala", "cozinha", "banheiro", "cama", "sofá", "sofa", "mesa", "tapete", "lavanderia", "casa", "apartamento", "hospital", "consultório", "consultorio", "室内", "房间", "卧室", "客厅", "厨房", "浴室", "卫生间", "床", "沙发", "洗衣房", "医院", "诊所"],
-        "乡村院子": ["quintal", "roça", "roca", "rural", "fazenda", "sítio", "sitio", "terreiro", "milho", "plantação", "plantacao", "horta", "campo", "curral", "galinha", "院子", "乡村", "农村", "农田", "玉米地", "田地", "菜地", "后院", "农家"],
-        "工地": ["obra", "construção", "construcao", "pedreiro", "cimento", "tijolo", "andaime", "reforma", "capacete", "martelo", "工地", "施工", "建筑", "装修", "水泥", "砖", "脚手架", "安全帽"],
-        "酒馆": ["bar", "boteco", "pub", "balcão do bar", "balcao do bar", "mesa de bar", "bebida no bar", "cerveja no bar", "酒馆", "酒吧", "吧台", "啤酒馆"],
-        "超市": ["supermercado", "mercado", "mercearia", "caixa do mercado", "carrinho de compras", "prateleira", "corredor do mercado", "compras no mercado", "超市", "便利店", "商店", "货架", "收银台", "购物车"],
-        "药店": ["farmácia", "farmacia", "balcão da farmácia", "balcao da farmacia", "atendente da farmácia", "atendente da farmacia", "药店", "药房"],
-    }
-    scores = {label: location_score(text, values) for label, values in terms.items()}
-    indoor = scores.get("室内房间", 0)
-    outdoor = (
-        scores.get("乡村院子", 0)
-        + location_score(text, ["rua", "portão", "portao", "porta de casa", "fora de casa", "sai de casa", "calçada", "calcada", "estrada", "门口", "大门", "户外", "屋外", "出门", "街道"])
-    )
-    if indoor >= 2 and outdoor >= 2:
-        tag = "房屋内外结合"
-        confidence = "high" if indoor + outdoor >= 5 else "medium"
-        reason = f"室内信号 {indoor} 个，室外/门口信号 {outdoor} 个。"
+    scores: dict[str, int] = {}
+    for option_id, option in option_map.items():
+        terms = [option.get("zh"), option.get("pt"), *(option.get("aliases") or [])]
+        scores[option_id] = location_score(text, [str(term) for term in terms if str(term or "").strip()])
+    matched = [option_id for option_id, score in scores.items() if score > 0]
+    priority = ["store", "construction_site", "bar", "country_yard", "city_street", "home"]
+    matched.sort(key=lambda option_id: (-scores.get(option_id, 0), priority.index(option_id)))
+    if not matched:
+        matched = ["home"]
+        confidence = "low"
+        reason = "未识别到明确地点词，按常见家中短剧兜底。"
     else:
-        priority = ["药店", "工地", "酒馆", "超市", "乡村院子", "室内房间"]
-        tag = max(priority, key=lambda label: (scores.get(label, 0), -priority.index(label)))
-        best = scores.get(tag, 0)
-        if best <= 0:
-            tag = "室内房间"
-            confidence = "low"
-            reason = "未识别到明确地点词，按常见室内短剧兜底。"
-        else:
-            confidence = "high" if best >= 3 else "medium" if best >= 2 else "low"
-            reason = f"命中 {tag} 地点词 {best} 个。"
+        best = scores.get(matched[0], 0)
+        confidence = "high" if best >= 3 else "medium" if best >= 2 else "low"
+        reason = "；".join(
+            f"命中 {option_map[option_id].get('zh')} 地点词 {scores.get(option_id, 0)} 个"
+            for option_id in matched
+        ) + "。"
+    primary = matched[0]
     return {
-        "location_tag": tag,
-        "location_tag_pt": LOCATION_TAG_PT.get(tag, ""),
+        "location_tag": str(option_map[primary].get("zh") or ""),
+        "location_tag_pt": str(option_map[primary].get("pt") or ""),
+        "location_tags": matched,
+        "location_tag_labels_zh": taxonomy_tag_labels("location", matched, "zh"),
+        "location_tag_labels_pt": taxonomy_tag_labels("location", matched, "pt"),
         "location_tag_confidence": confidence,
         "location_tag_source": "summary+storyboard",
         "location_tag_reasoning": reason,
@@ -3516,6 +3669,32 @@ CONTENT_TYPE_CLASSIFY_PROMPT = f"""你是一个短视频脚本分类器。
 }}
 """
 
+SCRIPT_TAXONOMY_CLASSIFY_PROMPT = """你是 Koko 短视频脚本的多维标签分类器。
+
+请只根据输入中的标题、完整内容概述、分镜表、人物和场景信息进行分类，不要改写脚本。
+输出必须使用下面给出的稳定标签 ID，禁止创造新标签。
+
+分类规则：
+1. relationship_tags、format_tags、location_tags、content_tags 都允许多选，但只能选择有明确证据的标签。
+2. `multi_role` 可以与 `story_acting` 同时出现；一个人分饰多角通常也属于剧情演绎。
+3. `infinite_loop` 是表现形式，不是内容类型。
+4. `boss_employee` 只表示人物关系，绝对不能因为老板和员工关系自动推断地点是 `construction_site`。
+5. 地点 `home` 专指家里；酒馆、工地、商店、城市街道和乡村院子必须单独标注。
+6. `adult_humor` 对外葡语名称是 Humor adulto。
+7. 不要判断时长，时长由系统根据分镜时间码自动计算。
+8. 证据不足时允许某个维度返回空数组，不要用默认标签凑数。
+
+输出严格 JSON：
+{
+  "relationship_tags": ["标签 ID"],
+  "format_tags": ["标签 ID"],
+  "location_tags": ["标签 ID"],
+  "content_tags": ["标签 ID"],
+  "confidence": "high/medium/low",
+  "reasoning": "一句话说明主要标签依据"
+}
+"""
+
 
 def detect_content_type(script: dict[str, Any], bundle: dict[str, Any] | None = None) -> str:
     return detect_content_type_decision(script, bundle).get("content_type") or DEFAULT_CONTENT_TYPE
@@ -3574,6 +3753,97 @@ def classify_content_type_with_llm(
         "confidence": confidence,
         "source": "auto",
     }
+
+
+def classify_script_taxonomy_with_llm(
+    script: dict[str, Any],
+    bundle: dict[str, Any] | None,
+    key: str,
+    models: list[str],
+) -> dict[str, Any] | None:
+    if not key or run_text_json_prompt_with_fallback is None:
+        return None
+    payload = {
+        "title": script.get("title") or "",
+        "whole_video_summary": script.get("whole_video_summary") or "",
+        "summary": script.get("summary") or "",
+        "key_points": script.get("key_points") or script.get("points") or [],
+        "script_rows": (script.get("rows") or script.get("script_table") or [])[:20]
+        if isinstance(script.get("rows") or script.get("script_table") or [], list)
+        else [],
+        "routing": (bundle or {}).get("routing") or script.get("type_router") or {},
+        "allowed_tags": {
+            dimension: [
+                {"id": item.get("id"), "zh": item.get("zh"), "pt": item.get("pt")}
+                for item in taxonomy_options(dimension)
+            ]
+            for dimension in SCRIPT_TAG_DIMENSIONS
+        },
+    }
+    try:
+        result, _, _ = run_text_json_prompt_with_fallback(
+            payload,
+            key,
+            models,
+            SCRIPT_TAXONOMY_CLASSIFY_PROMPT,
+            "script taxonomy classification",
+        )
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+    normalized = {
+        f"{dimension}_tags": normalize_taxonomy_tag_ids(dimension, result.get(f"{dimension}_tags"))
+        for dimension in SCRIPT_TAG_DIMENSIONS
+    }
+    confidence = str(result.get("confidence") or "low").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "low"
+    normalized.update(
+        {
+            "taxonomy_version": SCRIPT_TAXONOMY_VERSION,
+            "taxonomy_source": "llm",
+            "taxonomy_confidence": confidence,
+            "taxonomy_reasoning": str(result.get("reasoning") or "").strip(),
+        }
+    )
+    return normalized
+
+
+def apply_script_taxonomy_classification(
+    entry: dict[str, Any],
+    script: dict[str, Any],
+    bundle: dict[str, Any] | None = None,
+    *,
+    use_llm: bool = True,
+) -> dict[str, Any]:
+    ensure_script_taxonomy_fields(entry, script, source="keyword_fallback")
+    manual_dimensions = {
+        dimension
+        for dimension in SCRIPT_TAG_DIMENSIONS
+        if normalize_taxonomy_tag_ids(dimension, entry.get(f"{dimension}_tags"))
+        and str(entry.get("taxonomy_source") or "").strip().lower() == "manual"
+    }
+    classified = (
+        classify_script_taxonomy_with_llm(script, bundle, GOOGLE_API_KEY, unique_models(*MODEL_CANDIDATES))
+        if use_llm
+        else None
+    )
+    if classified:
+        for dimension in SCRIPT_TAG_DIMENSIONS:
+            field = f"{dimension}_tags"
+            llm_tags = classified.get(field) or []
+            if llm_tags and dimension not in manual_dimensions:
+                entry[field] = llm_tags
+            entry[f"{dimension}_tag_labels_zh"] = taxonomy_tag_labels(dimension, entry.get(field), "zh")
+            entry[f"{dimension}_tag_labels_pt"] = taxonomy_tag_labels(dimension, entry.get(field), "pt")
+        if not manual_dimensions:
+            entry.update({key: value for key, value in classified.items() if not key.endswith("_tags")})
+        else:
+            entry["taxonomy_version"] = SCRIPT_TAXONOMY_VERSION
+            entry["taxonomy_source"] = "manual"
+            entry["taxonomy_confidence"] = "manual"
+    return entry
 
 
 def keyword_fallback_content_type(script: dict[str, Any], bundle: dict[str, Any] | None = None) -> str:
@@ -4338,7 +4608,17 @@ def save_creator_direct_import(payload: dict[str, Any]) -> dict[str, Any]:
         "source": "creator_direct_import",
         "published": bool(entry.get("published", True)),
     }
+    for dimension in SCRIPT_TAG_DIMENSIONS:
+        imported_entry[f"{dimension}_tags"] = normalize_taxonomy_tag_ids(
+            dimension,
+            entry.get(f"{dimension}_tags"),
+        )
+    imported_entry["taxonomy_version"] = str(entry.get("taxonomy_version") or SCRIPT_TAXONOMY_VERSION)
+    imported_entry["taxonomy_source"] = str(entry.get("taxonomy_source") or "auto")
+    imported_entry["taxonomy_confidence"] = str(entry.get("taxonomy_confidence") or "")
+    imported_entry["taxonomy_reasoning"] = str(entry.get("taxonomy_reasoning") or "")
     imported_entry.update(infer_location_tag_fields(imported_entry, script_json))
+    apply_script_taxonomy_classification(imported_entry, script_json, use_llm=True)
     append_creator_online_entry(imported_entry)
     return {"ok": True, "entry": imported_entry, "share_url": f"/script/{entry_id}"}
 
@@ -4405,6 +4685,7 @@ def imported_creator_entry(
         "saved_at": now_iso(),
     }
     entry.update(infer_location_tag_fields(entry, script_json))
+    apply_script_taxonomy_classification(entry, script_json, use_llm=True)
     return entry
 
 
@@ -4778,6 +5059,52 @@ def update_library_entry_content_type(entry_id: str, content_type: str) -> dict[
                 item["content_type_confidence"] = "manual"
                 item["updated_at"] = now_iso()
                 job["updated_at"] = now_iso()
+        save_jobs()
+    return updated_entry
+
+
+def update_library_entry_taxonomy(entry_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    taxonomy_tags, errors = parse_taxonomy_tags_payload(payload)
+    if errors:
+        raise RuntimeError("Unsupported taxonomy tags: " + "; ".join(errors))
+    raw_duration = str(payload.get("duration_bucket") or "").strip()
+    if raw_duration and raw_duration not in taxonomy_option_map("duration"):
+        raise RuntimeError("Unsupported duration bucket.")
+    updated_entry: dict[str, Any] | None = None
+    with job_lock:
+        entries = load_library_entries()
+        for entry in entries:
+            if entry.get("entry_id") != entry_id:
+                continue
+            for dimension in SCRIPT_TAG_DIMENSIONS:
+                entry[f"{dimension}_tags"] = taxonomy_tags[dimension]
+                entry[f"{dimension}_tag_labels_zh"] = taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "zh")
+                entry[f"{dimension}_tag_labels_pt"] = taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "pt")
+            if raw_duration:
+                entry["duration_bucket"] = raw_duration
+            entry["taxonomy_version"] = SCRIPT_TAXONOMY_VERSION
+            entry["taxonomy_source"] = "manual"
+            entry["taxonomy_confidence"] = "manual"
+            entry["taxonomy_updated_at"] = now_iso()
+            updated_entry = dict(entry)
+            break
+        if updated_entry is None:
+            return None
+        save_library_entries(entries)
+        for job in jobs.values():
+            candidates = [job, *(job.get("items") or [])]
+            for candidate in candidates:
+                if candidate.get("id") != entry_id:
+                    continue
+                for dimension in SCRIPT_TAG_DIMENSIONS:
+                    candidate[f"{dimension}_tags"] = taxonomy_tags[dimension]
+                if raw_duration:
+                    candidate["duration_bucket"] = raw_duration
+                candidate["taxonomy_version"] = SCRIPT_TAXONOMY_VERSION
+                candidate["taxonomy_source"] = "manual"
+                candidate["taxonomy_confidence"] = "manual"
+                candidate["taxonomy_updated_at"] = now_iso()
+                candidate["updated_at"] = now_iso()
         save_jobs()
     return updated_entry
 
@@ -6321,6 +6648,24 @@ def save_creator_admin_scripts_cache(payload: dict[str, Any]) -> None:
         )
 
 
+def normalize_creator_admin_scripts_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Expose taxonomy v2 fields while the remote Creator service is rolling out."""
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return payload
+    normalized_entries: list[dict[str, Any]] = []
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = dict(raw_entry)
+        ensure_script_taxonomy_fields(entry, source="compatibility")
+        normalized_entries.append(entry)
+    normalized = dict(payload)
+    normalized["entries"] = normalized_entries
+    normalized["taxonomy_version"] = SCRIPT_TAXONOMY_VERSION
+    return normalized
+
+
 def load_creator_admin_cache(path: Path) -> dict[str, Any] | None:
     data = read_json_file(path, default={})
     return data if isinstance(data, dict) and data else None
@@ -6978,6 +7323,10 @@ def agent_item_view(item: dict[str, Any], *, include_script: bool = True) -> dic
         "library_date": public.get("library_date") or "",
         "reference_video_enabled": public.get("reference_video_enabled") is not False,
         "manual_tags": item.get("manual_tags") if isinstance(item.get("manual_tags"), dict) else {},
+        "taxonomy": {
+            dimension: normalize_taxonomy_tag_ids(dimension, item.get(f"{dimension}_tags"))
+            for dimension in SCRIPT_TAG_DIMENSIONS
+        },
     }
     if status != "completed":
         return result
@@ -8475,8 +8824,19 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
         "storyboard_preview_url": item.get("storyboard_preview_url") or existing.get("storyboard_preview_url") or "",
         "storyboard_cover_url": item.get("storyboard_cover_url") or existing.get("storyboard_cover_url") or "",
         "storyboard_updated_at": item.get("storyboard_updated_at") or existing.get("storyboard_updated_at") or "",
+        "taxonomy_version": item.get("taxonomy_version") or existing.get("taxonomy_version") or SCRIPT_TAXONOMY_VERSION,
+        "taxonomy_source": item.get("taxonomy_source") or existing.get("taxonomy_source") or "auto",
+        "taxonomy_confidence": item.get("taxonomy_confidence") or existing.get("taxonomy_confidence") or "",
+        **{
+            f"{dimension}_tags": normalize_taxonomy_tag_ids(
+                dimension,
+                item.get(f"{dimension}_tags") or existing.get(f"{dimension}_tags"),
+            )
+            for dimension in SCRIPT_TAG_DIMENSIONS
+        },
     }
     entry.update(infer_location_tag_fields(entry, script))
+    apply_script_taxonomy_classification(entry, script, bundle, use_llm=use_llm)
     return entry
 
 
@@ -9585,6 +9945,7 @@ def create_job(
     content_type: str = "",
     location_tag: str = "",
     manual_tags: dict[str, Any] | None = None,
+    taxonomy_tags: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     ensure_capacity_for_new_job()
     normalized_mode = str(mode or "").strip().lower()
@@ -9595,6 +9956,10 @@ def create_job(
     if selected_location_tag not in LOCATION_TAGS:
         selected_location_tag = ""
     selected_manual_tags = dict(manual_tags) if isinstance(manual_tags, dict) else {}
+    selected_taxonomy_tags = {
+        dimension: normalize_taxonomy_tag_ids(dimension, (taxonomy_tags or {}).get(dimension))
+        for dimension in SCRIPT_TAG_DIMENSIONS
+    }
     if selected_content_type:
         selected_manual_tags["content_type"] = selected_content_type
     if selected_location_tag:
@@ -9636,6 +10001,10 @@ def create_job(
                 "location_tag": selected_location_tag,
                 "location_tag_pt": LOCATION_TAG_PT.get(selected_location_tag, ""),
                 "manual_tags": selected_manual_tags,
+                "taxonomy_version": SCRIPT_TAXONOMY_VERSION,
+                "taxonomy_source": "manual" if any(selected_taxonomy_tags.values()) else "auto",
+                "taxonomy_confidence": "manual" if any(selected_taxonomy_tags.values()) else "",
+                **{f"{dimension}_tags": selected_taxonomy_tags[dimension] for dimension in SCRIPT_TAG_DIMENSIONS},
                 "title": "",
                 "understanding_summary": "",
                 "review_status": "",
@@ -9658,6 +10027,7 @@ def create_job(
         "source": str(source or "web").strip() or "web",
         "agent_request_id": str(agent_request_id or "").strip()[:160],
         "manual_tags": selected_manual_tags,
+        "taxonomy_tags": selected_taxonomy_tags,
         "status": "queued",
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -16445,6 +16815,19 @@ def creator_admin_html(initial_tab: str = "scripts", *, library_mode: bool = Fal
         initial_tab = "scripts"
     initial_tab_json = json.dumps(initial_tab, ensure_ascii=False)
     library_mode_json = "true" if library_mode else "false"
+    script_taxonomy_json = json.dumps(
+        {
+            "version": SCRIPT_TAXONOMY_VERSION,
+            "dimensions": {
+                dimension: [
+                    {"id": item.get("id"), "zh": item.get("zh"), "pt": item.get("pt")}
+                    for item in taxonomy_options(dimension)
+                ]
+                for dimension in (*SCRIPT_TAG_DIMENSIONS, "duration")
+            },
+        },
+        ensure_ascii=False,
+    )
     template = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Koko Creator 运营后台</title>__FAVICON_LINKS__<style>
 @import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');
 *{{box-sizing:border-box;font-family:'Readex Pro',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}body{{margin:0;min-height:100vh;background:radial-gradient(circle at 8% 8%,rgba(255,130,0,.34),transparent 30%),linear-gradient(180deg,#ffbf75 0%,#fff4e8 42%,#fff 100%);color:#1f1f1f;overflow-x:hidden}}button,input,textarea,select{{font:inherit;min-width:0}}.shell{{width:min(1240px,100%);margin:0 auto;padding:24px;overflow:hidden}}.panel{{min-width:0;overflow:hidden;border:1px solid rgba(255,255,255,.78);border-radius:34px;background:rgba(255,255,255,.62);box-shadow:0 28px 80px rgba(249,115,0,.16);backdrop-filter:blur(22px);padding:24px}}.top{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}}.kicker{{display:inline-flex;border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.72);color:#ff8200;font-size:12px;font-weight:800}}h1{{margin:14px 0 8px;font-size:clamp(34px,6vw,64px);line-height:.95;letter-spacing:-.05em;color:#ff8200}}.copy{{margin:0;color:#99520f;line-height:1.6;font-weight:650}}.nav,.ops-tabs{{display:flex;gap:10px;flex-wrap:wrap}}.ops-tabs{{margin:22px 0 6px}}a.btn,button,.ops-tabs a{{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(255,130,0,.24);border-radius:999px;min-height:42px;padding:0 15px;background:rgba(255,255,255,.76);color:#ff8200;font-weight:850;text-decoration:none;cursor:pointer}}button.primary,.ops-tabs a.active{{border-color:#ff8200;background:#ff8200;color:#fff}}button.danger{{color:#c9481e}}button:disabled{{opacity:.52;cursor:not-allowed}}.toolbar{{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:8px;margin:14px 0 10px;align-items:center}}.toolbar input{{min-height:40px;padding:9px 12px;border-radius:14px}}.toolbar button{{min-height:40px;padding:0 14px}}.quick-filters{{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 14px}}.quick-filter-chip{{border:1px solid rgba(255,130,0,.20);border-radius:999px;padding:8px 14px;background:rgba(255,255,255,.78);color:#99520f;font-size:13px;font-weight:850;cursor:pointer;transition:all .18s ease}}.quick-filter-chip.active{{border-color:#ff8200;background:#ff8200;color:#fff}}.quick-filter-chip small{{font-size:11px;font-weight:800;opacity:.8}}.creator-form{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(205px,100%),1fr));gap:8px;margin:14px 0;padding:10px;border:1px solid rgba(255,130,0,.16);border-radius:18px;background:rgba(255,255,255,.55);overflow:hidden;align-items:start}}.creator-form>*{{min-width:0}}input,textarea,select{{width:100%;border:1px solid rgba(255,130,0,.22);border-radius:14px;background:rgba(255,255,255,.84);padding:9px 12px;outline:none;color:#1f1f1f;min-height:40px}}textarea{{min-height:68px;resize:vertical}}.creator-form button{{min-height:40px;padding:0 18px;align-self:center;justify-self:start;min-width:168px}}.creator-form button.primary{{box-shadow:0 10px 22px rgba(255,130,0,.18)}}.status{{min-height:22px;color:#99520f;font-size:13px;font-weight:800}}.grid{{display:grid;gap:12px;margin-top:12px}}.card{{display:grid;grid-template-columns:34px 92px minmax(0,1fr) auto;gap:12px;align-items:center;border:1px solid rgba(255,130,0,.16);border-radius:22px;background:rgba(255,255,255,.74);padding:12px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.card img{{width:92px;aspect-ratio:9/16;border-radius:14px;object-fit:cover;background:#2a1d16}}.card h3{{margin:0 0 7px;font-size:18px;line-height:1.28;color:#1f1f1f}}.card p{{margin:0;color:#6f737a;font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}.meta{{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}}.pill{{border:1px solid rgba(255,130,0,.24);border-radius:999px;padding:5px 9px;color:#ff8200;background:#fff7f0;font-size:12px;font-weight:800}}.pill.off{{color:#777;background:#f3f3f3;border-color:#ddd}}.actions{{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}}.creator-card{{min-width:0;overflow:hidden;border:1px solid rgba(255,130,0,.18);border-radius:26px;background:rgba(255,255,255,.78);padding:16px;box-shadow:0 14px 34px rgba(249,115,0,.10)}}.creator-head{{display:grid;grid-template-columns:72px minmax(0,1fr) auto;gap:14px;align-items:center}}.avatar{{width:72px;height:72px;border-radius:50%;object-fit:cover;background:linear-gradient(135deg,#ffbd64,#ff6500)}}.creator-name{{margin:0;font-size:22px;color:#1f1f1f}}.script-mini{{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:10px;align-items:center;margin-top:10px;padding:9px;border-radius:16px;background:#fff7f0;border:1px solid rgba(255,130,0,.14)}}.script-mini img{{width:52px;height:66px;border-radius:10px;object-fit:cover;background:#2a1d16}}.script-mini b{{display:block;font-size:13px;line-height:1.3}}.script-mini span,.small{{color:#6f737a;font-size:12px;line-height:1.35;overflow-wrap:anywhere}}.submission-summary{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start;margin:16px 0;padding:16px;border-radius:24px;background:rgba(255,255,255,.80);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.submission-summary h2{{margin:0 0 6px;font-size:24px;color:#1f1f1f}}.submission-count{{min-width:84px;border-radius:20px;background:#ff8200;color:white;text-align:center;padding:12px;font-weight:950}}.submission-count b{{display:block;font-size:28px;line-height:1}}.submission-groups{{display:grid;gap:10px;margin-top:12px}}.submission-group{{border:1px solid rgba(255,130,0,.16);border-radius:18px;background:#fffaf5;padding:12px}}.submission-group h3{{margin:0 0 8px;font-size:16px}}.submission-row{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;border-top:1px solid rgba(255,130,0,.12);padding-top:9px;margin-top:9px}}.submission-row a{{color:#ff8200;font-weight:850;word-break:break-all}}.import-panel{{min-width:0;overflow:hidden;display:grid;gap:12px;margin:16px 0;padding:16px;border-radius:24px;background:rgba(255,255,255,.78);border:1px solid rgba(255,130,0,.18);box-shadow:0 14px 34px rgba(249,115,0,.10)}}.import-form{{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) auto;gap:10px;align-items:center}}.progress{{height:10px;border-radius:999px;background:#ffe3d1;overflow:hidden}}.progress span{{display:block;height:100%;width:0;background:linear-gradient(90deg,#ff9b24,#ff5f00);transition:width .25s ease}}.import-result{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid rgba(255,130,0,.14);border-radius:18px;background:#fffaf5;padding:12px}}.import-result.failed{{border-color:#ffb0a0;background:#fff3f0}}.import-result b{{display:block;line-height:1.35}}.import-result code{{color:#99520f;font-size:12px;word-break:break-all}}details{{margin-top:8px}}summary{{cursor:pointer;color:#ff8200;font-weight:900}}.login{{min-height:100vh;display:grid;place-items:center;padding:20px}}.login form,.modal-card{{width:min(520px,100%);border:1px solid rgba(255,130,0,.20);border-radius:30px;background:rgba(255,255,255,.78);padding:24px;box-shadow:0 24px 60px rgba(249,115,0,.18);backdrop-filter:blur(20px)}}.login h1{{text-align:center;font-size:42px}}.modal{{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(47,27,9,.42);padding:14px;z-index:20}}.modal.open{{display:flex}}.modal-card{{max-height:92vh;overflow:auto;background:#fffaf5}}.modal-card h2{{margin:0 0 14px;color:#ff8200}}.fields{{display:grid;gap:10px}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.modal-actions{{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;flex-wrap:wrap}}.empty{{padding:24px;border:1px dashed rgba(255,130,0,.34);border-radius:18px;text-align:center;color:#99520f;background:rgba(255,255,255,.72)}}@media(max-width:820px){{.toolbar,.creator-form,.import-form{{grid-template-columns:1fr}}.card{{grid-template-columns:28px 76px minmax(0,1fr)}}.card img{{width:76px}}.actions{{grid-column:2/4;justify-content:flex-start}}.row,.creator-head,.submission-summary,.submission-row,.import-result,.script-mini{{grid-template-columns:1fr}}.creator-form button{{width:100%;justify-self:stretch}}}}
@@ -16457,8 +16840,13 @@ def creator_admin_html(initial_tab: str = "scripts", *, library_mode: bool = Fal
 
 .analytics-hour-detail{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:8px}}.analytics-detail-group{{display:grid;gap:8px;align-content:start;padding:10px;border:1px solid rgba(255,130,0,.12);border-radius:14px;background:#fffaf5}}.analytics-detail-group h4{{margin:0;font-size:13px;color:#99520f}}.analytics-person{{display:grid;gap:3px;padding:8px;border-radius:12px;background:#fff;border:1px solid rgba(31,41,55,.06)}}.analytics-person b{{color:#1f1f1f;font-size:13px}}.analytics-person small{{color:#6f737a;line-height:1.35;overflow-wrap:anywhere}}.analytics-hour-row details{{grid-column:1/-1;margin:0}}.analytics-hour-row summary{{font-size:13px}}@media(max-width:980px){{.analytics-hour-detail{{grid-template-columns:1fr 1fr}}}}@media(max-width:640px){{.analytics-hour-detail{{grid-template-columns:1fr}}}}
 
-</style></head><body><main id="app"></main><div class="modal" id="edit-modal"><form class="modal-card" id="edit-form"><h2>修改脚本标签</h2><p class="copy" style="margin-bottom:14px">这里只调整脚本分类标签；完整脚本内容请从列表里的“修改脚本”进入内容中台。</p><div class="fields"><select name="content_type"></select></div><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存标签</button></div></form></div><div class="modal" id="creator-modal"><form class="modal-card wide" id="creator-form"><h2>导入创作者</h2><p class="copy" style="margin-bottom:14px">粘贴 Kwai 作者主页，补充账号和标签后保存。资料抓取仍由后端处理。</p><div class="creator-modal-form"><input name="kwai_url" placeholder="Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><input name="display_name" placeholder="作者名称"><input name="kwai_id" placeholder="Kwai ID"><input name="phone" placeholder="手机号/登录电话"><input name="uid" placeholder="UID"><select name="poc"><option value="">POC 待分配</option><option>denghaoqing</option><option>zhaozhe</option></select><select name="category"></select><select class="multi-select" name="identity" multiple><option>夫妻</option><option>情侣</option><option>家庭</option><option>朋友</option></select><select class="multi-select" name="location" multiple><option>家里</option><option>乡村</option><option>城市</option></select><select name="cooperation_level"><option>待标注</option><option>高</option><option>中</option><option>低</option><option>待观察</option></select><textarea name="creator_description" placeholder="具体作者描述：可手动输入作者风格、限制、偏好等"></textarea></div><p id="creator-form-status" class="status" style="margin:12px 0 0"></p><div class="modal-actions"><button type="button" id="creator-cancel">取消</button><button class="primary" type="submit">保存创作者</button></div></form></div><div class="modal" id="creator-tags-modal"><form class="modal-card wide" id="creator-tags-form" data-creator-tags=""><h2>编辑创作者标签</h2><p class="copy" style="margin-bottom:14px">身份和地点支持多选。保存后，详情页点击“查看推荐脚本”会按新标签重新计算。</p><div class="creator-modal-form"><input type="hidden" name="kwai_url"><input type="hidden" name="display_name"><input type="hidden" name="kwai_id"><input type="hidden" name="phone"><input type="hidden" name="uid"><select name="poc"></select><select name="category"></select><select class="multi-select" name="identity" multiple></select><select class="multi-select" name="location" multiple></select><select name="cooperation_level"></select><textarea name="creator_description" placeholder="具体作者描述：可手动输入作者风格、限制、偏好等"></textarea></div><div class="modal-actions"><button type="button" id="creator-tags-cancel">取消</button><button class="primary" type="submit">保存标签</button></div></form></div><script>
-const libraryMode=__LIBRARY_MODE__;const labels=["夫妻整蛊/冲突","夫妻暧昧","家庭整蛊","朋友整蛊"];const durationOptions=[["dur_1_20","1-20 秒"],["dur_20_60","20 秒-1 分钟"],["dur_60_120","1-2 分钟"],["dur_120_plus","2 分钟以上"]];const locationOptions=["室内房间","乡村院子","工地","酒馆","超市","药店","房屋内外结合"];const creatorPocOptions=["denghaoqing","zhaozhe"];let entries=[];let creators=[];let creatorRows=[];let accounts=[];let submissions=[];let accessApplications=[];let submissionsTotal=0;let submissionsOffset=0;let submissionsLoading=false;let intakes=[];let analyticsData=null;let analyticsAutoLoaded=false;let analyticsInactiveLoaded=false;let analyticsLoading=false;let analyticsUserFilter="activated";let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptDuration="";let activeScriptLocation="";let activeScriptScope="portal_visible";let activeCreatorPoc="";let creatorViewMode=localStorage.getItem("kokoCreatorAdminView")||"card";let creatorCloudState={{creators:{{}}}};let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let scriptVisibleLimit=20;let scriptIndex={{}};let scriptIndexLoaded=false;const SUBMISSIONS_PAGE_SIZE=80;const SCRIPT_INITIAL_RENDER_LIMIT=20;const SCRIPT_RENDER_INCREMENT=50;const CREATOR_PAGE_SIZE=18;const creatorPathMatch=location.pathname.match(/^\\/koko_admin_2026-kwai\\/creators\\/([0-9a-f]{{32}})$/);let creatorPage=1;let selectedCreatorId=(creatorPathMatch&&creatorPathMatch[1])||new URLSearchParams(location.search).get("creator")||"";let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");const creatorModal=document.querySelector("#creator-modal");const creatorForm=document.querySelector("#creator-form");const creatorTagsModal=document.querySelector("#creator-tags-modal");const creatorTagsForm=document.querySelector("#creator-tags-form");
+.taxonomy-filters,.taxonomy-editor{{display:grid;gap:8px;margin:12px 0 16px}}.taxonomy-row{{display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px;align-items:start;padding:10px 0;border-bottom:1px solid rgba(255,130,0,.10)}}.taxonomy-row:last-child{{border-bottom:0}}.taxonomy-label{{display:inline-flex;align-items:center;justify-content:center;min-height:34px;border-radius:999px;background:#fff1e3;color:#ff6500;font-size:13px;font-weight:950}}.taxonomy-options{{display:flex;flex-wrap:wrap;gap:8px}}.taxonomy-chip{{min-height:34px;padding:6px 12px;border-radius:10px;font-size:13px;background:transparent;color:#6f737a;border:1px solid transparent}}.taxonomy-chip.active{{background:#ff8200;color:#fff;border-color:#ff8200}}.taxonomy-editor .taxonomy-chip{{border-color:rgba(255,130,0,.20);background:#fff}}.taxonomy-editor .taxonomy-chip.active{{background:#ff8200;color:#fff}}@media(max-width:640px){{.taxonomy-row{{grid-template-columns:1fr}}.taxonomy-label{{justify-self:start;padding:0 14px}}}
+</style></head><body><main id="app"></main>
+<div class="modal" id="edit-modal"><form class="modal-card wide" id="edit-form"><h2>修改脚本标签</h2><p class="copy" style="margin-bottom:14px">人物关系、形式、地点和内容均支持多选；时长根据视频长度归档，也可人工校正。</p><div id="script-taxonomy-editor" class="taxonomy-editor"></div><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存标签</button></div></form></div>
+<div class="modal" id="creator-modal"><form class="modal-card wide" id="creator-form"><h2>导入创作者</h2><p class="copy" style="margin-bottom:14px">粘贴 Kwai 作者主页，补充账号和标签后保存。资料抓取仍由后端处理。</p><div class="creator-modal-form"><input name="kwai_url" placeholder="Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><input name="display_name" placeholder="作者名称"><input name="kwai_id" placeholder="Kwai ID"><input name="phone" placeholder="手机号/登录电话"><input name="uid" placeholder="UID"><select name="poc"><option value="">POC 待分配</option><option>denghaoqing</option><option>zhaozhe</option></select><select name="category"></select><select class="multi-select" name="identity" multiple><option>夫妻</option><option>情侣</option><option>家庭</option><option>朋友</option></select><select class="multi-select" name="location" multiple><option>家里</option><option>乡村</option><option>城市</option></select><select name="cooperation_level"><option>待标注</option><option>高</option><option>中</option><option>低</option><option>待观察</option></select><textarea name="creator_description" placeholder="具体作者描述：可手动输入作者风格、限制、偏好等"></textarea></div><p id="creator-form-status" class="status" style="margin:12px 0 0"></p><div class="modal-actions"><button type="button" id="creator-cancel">取消</button><button class="primary" type="submit">保存创作者</button></div></form></div><div class="modal" id="creator-tags-modal"><form class="modal-card wide" id="creator-tags-form" data-creator-tags=""><h2>编辑创作者标签</h2><p class="copy" style="margin-bottom:14px">身份和地点支持多选。保存后，详情页点击“查看推荐脚本”会按新标签重新计算。</p><div class="creator-modal-form"><input type="hidden" name="kwai_url"><input type="hidden" name="display_name"><input type="hidden" name="kwai_id"><input type="hidden" name="phone"><input type="hidden" name="uid"><select name="poc"></select><select name="category"></select><select class="multi-select" name="identity" multiple></select><select class="multi-select" name="location" multiple></select><select name="cooperation_level"></select><textarea name="creator_description" placeholder="具体作者描述：可手动输入作者风格、限制、偏好等"></textarea></div><div class="modal-actions"><button type="button" id="creator-tags-cancel">取消</button><button class="primary" type="submit">保存标签</button></div></form></div><script>
+const libraryMode=__LIBRARY_MODE__;const labels=["夫妻整蛊/冲突","夫妻暧昧","家庭整蛊","朋友整蛊"];const scriptTaxonomy=__SCRIPT_TAXONOMY__;const taxonomyDimensionMeta={{relationship:"人物关系",format:"形式",location:"地点",content:"内容",duration:"时间"}};const durationOptions=(scriptTaxonomy.dimensions.duration||[]).map(x=>[x.id,x.zh]);const locationOptions=(scriptTaxonomy.dimensions.location||[]).map(x=>x.zh);const creatorPocOptions=["denghaoqing","zhaozhe"];
+let entries=[];let creators=[];let creatorRows=[];let accounts=[];let submissions=[];let accessApplications=[];let submissionsTotal=0;let submissionsOffset=0;let submissionsLoading=false;let intakes=[];let analyticsData=null;let analyticsAutoLoaded=false;let analyticsInactiveLoaded=false;let analyticsLoading=false;let analyticsUserFilter="activated";let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptDuration="";let activeScriptLocation="";let activeScriptScope="portal_visible";let activeCreatorPoc="";let creatorViewMode=localStorage.getItem("kokoCreatorAdminView")||"card";let creatorCloudState={{creators:{{}}}};let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let scriptVisibleLimit=20;let scriptIndex={{}};let scriptIndexLoaded=false;const SUBMISSIONS_PAGE_SIZE=80;const SCRIPT_INITIAL_RENDER_LIMIT=20;const SCRIPT_RENDER_INCREMENT=50;const CREATOR_PAGE_SIZE=18;const creatorPathMatch=location.pathname.match(/^\\/koko_admin_2026-kwai\\/creators\\/([0-9a-f]{{32}})$/);let creatorPage=1;let selectedCreatorId=(creatorPathMatch&&creatorPathMatch[1])||new URLSearchParams(location.search).get("creator")||"";let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");const creatorModal=document.querySelector("#creator-modal");const creatorForm=document.querySelector("#creator-form");const creatorTagsModal=document.querySelector("#creator-tags-modal");const creatorTagsForm=document.querySelector("#creator-tags-form");
+const activeScriptTaxonomy={{relationship:new Set(),format:new Set(),location:new Set(),content:new Set(),duration:new Set()}};
 let analyticsSummaryData=null;let analyticsSummaryLoading=false;
 function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}}[c]))}}
 function noCacheUrl(url){{const methodUrl=String(url||"");if(!methodUrl.startsWith("/"))return methodUrl;const sep=methodUrl.includes("?")?"&":"?";return `${{methodUrl}}${{sep}}_=${{Date.now()}}`}}
@@ -16471,9 +16859,15 @@ function adminCopy(){{return libraryMode?"这里是 Koko 内容中台的统一�
 function adminNav(){{return libraryMode?`<a class="btn" href="/studio">返回内容中台</a><a class="btn" href="/koko_admin_2026-kwai/imports">导入脚本</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a>`:`<a class="btn" href="/studio">返回内容中台</a><a class="btn" href="/library">脚本管理</a><a class="btn" href="__CREATOR_BASE__/creator-portal" target="_blank" rel="noopener">打开 Creator 前台</a>`}}
 function adminTabs(){{return libraryMode?`<div class="ops-tabs"><a class="active" href="/library">脚本管理</a></div>`:`<div class="ops-tabs"><a class="${{activeTab==="creators"?"active":""}}" href="/koko_admin_2026-kwai/creators">创作者管理</a><a class="${{activeTab==="analytics"?"active":""}}" href="/koko_admin_2026-kwai/analytics">数据看板</a><a class="${{activeTab==="submissions"?"active":""}}" href="/koko_admin_2026-kwai/submissions">回传数据</a><a class="${{activeTab==="intakes"?"active":""}}" href="/koko_admin_2026-kwai/intakes">作者信息收集</a></div>`}}
 function adminView(){{app.innerHTML=`<section class="shell"><div class="panel"><div class="top"><div><span class="kicker">${{adminKicker()}}</span><h1>${{adminTitle()}}</h1><p class="copy">${{adminCopy()}}</p></div><div class="nav">${{libraryMode?"":'<span id="creator-realtime-status" class="realtime-status">实时同步开启</span>'}}${{adminNav()}}</div></div>${{adminTabs()}}<div id="tab-body"></div></div></section>`;renderActiveTab()}}
-function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="imports"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">导入标准脚本 Excel</h2><p class="copy">上传包含 Vídeo original / Conteúdo principal / Pontos principais / Partes que podem ser adaptadas / Tempo / Imagem / Ações / Diálogos 的 .xlsx。系统会自动拆分多条脚本，生成葡语脚本页，调用 Gemini 慢慢生成 3x3 分镜图，并同步到 Creator 前台。分类选择如果保留在“待分类”，后台会自动用大模型判断脚本类型；如果你手动选择了具体类型，则优先按手动类型导入。</p></div><form class="import-form" id="import-form"><input id="import-file" type="file" accept=".xlsx"><select id="import-content-type">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">上传并导入</button></form><p id="status" class="status"></p><div id="import-job"></div></section>`;document.querySelector("#import-form").addEventListener("submit",submitImport);renderImportJob();return}}if(activeTab==="analytics"){{body.innerHTML=`<section class="import-panel"><div class="creator-toolbar"><div><h2 style="margin:0 0 8px;color:#ff8200">kokocomedy 数据看板</h2><p class="copy">按手机号账号聚合注册激活、打开次数、停留时长、功能点击和脚本回传。</p></div><div class="creator-toolbar-right"><button class="primary" id="refresh-analytics" type="button">刷新有行为用户</button><button id="logout" type="button">退出</button></div></div><p id="status" class="status"></p><div id="analytics-board"></div></section>`;document.querySelector("#refresh-analytics").addEventListener("click",()=>loadAnalytics(false));document.querySelector("#logout").addEventListener("click",logout);renderAnalytics();return}}if(activeTab==="creators"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">创作者管理</h2></div><div class="creator-searchbar"><select id="creator-search-scope"><option value="all">所有结果</option><option value="kwai">Kwai ID</option><option value="name">用户名</option><option value="phone">手机号</option><option value="uid">UID</option></select><input id="creator-search" placeholder="输入作者名称、ID、手机号或 UID"><button class="primary" id="creator-search-button" type="button">Search</button></div><div id="creator-poc-filters" class="quick-filters"></div><div class="creator-toolbar"><div class="creator-toolbar-left"><span id="creator-results-meta" class="creator-results-meta"></span><div class="creator-view-toggle" aria-label="切换创作者展示方式"><button type="button" data-creator-view="card">卡片</button><button type="button" data-creator-view="list">横向</button></div></div><div class="creator-toolbar-right"><button class="primary" id="open-creator-modal" type="button">导入创作者</button><button id="refresh-creators" type="button">刷新</button><button id="logout" type="button">退出</button></div></div><p id="status" class="status"></p><div id="creator-list"></div></section>`;document.querySelector("#creator-search").addEventListener("input",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#creator-search-scope").addEventListener("change",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#creator-search-button").addEventListener("click",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#open-creator-modal").addEventListener("click",openCreatorModal);document.querySelector("#refresh-creators").addEventListener("click",loadCreators);document.querySelector("#logout").addEventListener("click",logout);renderCreatorPocFilters();renderCreators();return}}if(activeTab==="accounts"){{body.innerHTML=`<form class="creator-form" id="account-form"><input name="account" placeholder="输入手机号、数字或字母账号，例如 88998411165 / creator01"><input name="display_name" placeholder="显示名称（可选）"><button class="primary" type="submit">创建账号</button></form><div class="toolbar"><input id="account-search" placeholder="搜索账号、显示名、回传链接"><button id="refresh-accounts" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="account-list" class="grid"></div>`;document.querySelector("#account-form").addEventListener("submit",createAccount);document.querySelector("#account-search").addEventListener("input",renderAccounts);document.querySelector("#refresh-accounts").addEventListener("click",loadAccounts);document.querySelector("#logout").addEventListener("click",logout);renderAccounts();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",()=>loadSubmissions(false));document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、时间、地点、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div><div id="script-scope-filters" class="quick-filters"></div><div id="script-type-filters" class="quick-filters"></div><div id="script-duration-filters" class="quick-filters"></div><div id="script-location-filters" class="quick-filters"></div><p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",()=>{{scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderList()}});document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderScriptScopeFilters();renderScriptTypeFilters();renderScriptDurationFilters();renderScriptLocationFilters();renderList()}}
+function renderActiveTab(){{const body=document.querySelector("#tab-body");if(!body)return;if(activeTab==="imports"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">导入标准脚本 Excel</h2><p class="copy">上传包含 Vídeo original / Conteúdo principal / Pontos principais / Partes que podem ser adaptadas / Tempo / Imagem / Ações / Diálogos 的 .xlsx。系统会自动拆分多条脚本，生成葡语脚本页，调用 Gemini 慢慢生成 3x3 分镜图，并同步到 Creator 前台。分类选择如果保留在“待分类”，后台会自动用大模型判断脚本类型；如果你手动选择了具体类型，则优先按手动类型导入。</p></div><form class="import-form" id="import-form"><input id="import-file" type="file" accept=".xlsx"><select id="import-content-type">${{labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("")}}</select><button class="primary" type="submit">上传并导入</button></form><p id="status" class="status"></p><div id="import-job"></div></section>`;document.querySelector("#import-form").addEventListener("submit",submitImport);renderImportJob();return}}if(activeTab==="analytics"){{body.innerHTML=`<section class="import-panel"><div class="creator-toolbar"><div><h2 style="margin:0 0 8px;color:#ff8200">kokocomedy 数据看板</h2><p class="copy">按手机号账号聚合注册激活、打开次数、停留时长、功能点击和脚本回传。</p></div><div class="creator-toolbar-right"><button class="primary" id="refresh-analytics" type="button">刷新有行为用户</button><button id="logout" type="button">退出</button></div></div><p id="status" class="status"></p><div id="analytics-board"></div></section>`;document.querySelector("#refresh-analytics").addEventListener("click",()=>loadAnalytics(false));document.querySelector("#logout").addEventListener("click",logout);renderAnalytics();return}}if(activeTab==="creators"){{body.innerHTML=`<section class="import-panel"><div><h2 style="margin:0 0 8px;color:#ff8200">创作者管理</h2></div><div class="creator-searchbar"><select id="creator-search-scope"><option value="all">所有结果</option><option value="kwai">Kwai ID</option><option value="name">用户名</option><option value="phone">手机号</option><option value="uid">UID</option></select><input id="creator-search" placeholder="输入作者名称、ID、手机号或 UID"><button class="primary" id="creator-search-button" type="button">Search</button></div><div id="creator-poc-filters" class="quick-filters"></div><div class="creator-toolbar"><div class="creator-toolbar-left"><span id="creator-results-meta" class="creator-results-meta"></span><div class="creator-view-toggle" aria-label="切换创作者展示方式"><button type="button" data-creator-view="card">卡片</button><button type="button" data-creator-view="list">横向</button></div></div><div class="creator-toolbar-right"><button class="primary" id="open-creator-modal" type="button">导入创作者</button><button id="refresh-creators" type="button">刷新</button><button id="logout" type="button">退出</button></div></div><p id="status" class="status"></p><div id="creator-list"></div></section>`;document.querySelector("#creator-search").addEventListener("input",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#creator-search-scope").addEventListener("change",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#creator-search-button").addEventListener("click",()=>{{creatorPage=1;selectedCreatorId="";renderCreators()}});document.querySelector("#open-creator-modal").addEventListener("click",openCreatorModal);document.querySelector("#refresh-creators").addEventListener("click",loadCreators);document.querySelector("#logout").addEventListener("click",logout);renderCreatorPocFilters();renderCreators();return}}if(activeTab==="accounts"){{body.innerHTML=`<form class="creator-form" id="account-form"><input name="account" placeholder="输入手机号、数字或字母账号，例如 88998411165 / creator01"><input name="display_name" placeholder="显示名称（可选）"><button class="primary" type="submit">创建账号</button></form><div class="toolbar"><input id="account-search" placeholder="搜索账号、显示名、回传链接"><button id="refresh-accounts" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="account-list" class="grid"></div>`;document.querySelector("#account-form").addEventListener("submit",createAccount);document.querySelector("#account-search").addEventListener("input",renderAccounts);document.querySelector("#refresh-accounts").addEventListener("click",loadAccounts);document.querySelector("#logout").addEventListener("click",logout);renderAccounts();return}}if(activeTab==="submissions"){{body.innerHTML=`<div class="toolbar"><input id="submission-search" placeholder="搜索脚本标题、创作者、回传链接"><button id="refresh-submissions" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="submission-stats"></div>`;document.querySelector("#submission-search").addEventListener("input",renderSubmissionStats);document.querySelector("#refresh-submissions").addEventListener("click",()=>loadSubmissions(false));document.querySelector("#logout").addEventListener("click",logout);renderSubmissionStats();return}}if(activeTab==="intakes"){{body.innerHTML=`<div class="toolbar"><input id="intake-search" placeholder="搜索 Kwai 名称、答案、联系方式"><button id="refresh-intakes" type="button">刷新</button><button id="logout" type="button">退出</button></div><p id="status" class="status"></p><div id="intake-list" class="grid"></div>`;document.querySelector("#intake-search").addEventListener("input",renderIntakes);document.querySelector("#refresh-intakes").addEventListener("click",loadIntakes);document.querySelector("#logout").addEventListener("click",logout);renderIntakes();return}}body.innerHTML=`<div class="toolbar"><input id="search" placeholder="搜索标题、摘要、分类、时间、地点、视频链接"><button id="delete-selected" class="danger" type="button">批量删除</button><button id="refresh" type="button">刷新</button><button id="logout" type="button">退出</button></div>
+<div id="script-scope-filters" class="quick-filters"></div><div id="script-taxonomy-filters" class="taxonomy-filters"></div>
+<p id="status" class="status"></p><div id="list" class="grid"></div>`;document.querySelector("#search").addEventListener("input",()=>{{scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderList()}});document.querySelector("#refresh").addEventListener("click",loadEntries);document.querySelector("#delete-selected").addEventListener("click",bulkDelete);document.querySelector("#logout").addEventListener("click",logout);renderScriptScopeFilters();renderScriptTaxonomyFilters();renderList()}}
 function scriptScopeOptions(){{return [{{key:"portal_visible",label:"前台展示中"}},{{key:"hidden",label:"已下架"}},{{key:"incomplete",label:"信息不完整"}},{{key:"all",label:"全部"}}]}}
 function renderScriptScopeFilters(){{const box=document.querySelector("#script-scope-filters");if(!box)return;box.innerHTML=scriptScopeOptions().map(option=>`<button class="quick-filter-chip ${{activeScriptScope===option.key?"active":""}}" type="button" data-scope-filter="${{option.key}}"><span>${{option.label}}</span> <small>${{Number(scriptScopeCounts?.[option.key]||0)}}</small></button>`).join("")}}
+function entryTaxonomyIds(entry,dimension){{if(dimension==="duration")return entry.duration_bucket?[String(entry.duration_bucket)]:[];const raw=entry?.[`${{dimension}}_tags`];return Array.isArray(raw)?raw.map(String):[]}}
+function taxonomyCount(dimension,id){{return entries.reduce((count,entry)=>count+(entryTaxonomyIds(entry,dimension).includes(id)?1:0),0)}}
+function taxonomyFilterMatches(entry){{return Object.entries(activeScriptTaxonomy).every(([dimension,selected])=>!selected.size||entryTaxonomyIds(entry,dimension).some(id=>selected.has(id)))}}
+function renderScriptTaxonomyFilters(){{const box=document.querySelector("#script-taxonomy-filters");if(!box)return;box.innerHTML=Object.entries(taxonomyDimensionMeta).map(([dimension,label])=>{{const selected=activeScriptTaxonomy[dimension];const options=scriptTaxonomy.dimensions[dimension]||[];return `<div class="taxonomy-row"><span class="taxonomy-label">${{label}}</span><div class="taxonomy-options"><button class="taxonomy-chip ${{!selected.size?"active":""}}" type="button" data-taxonomy-filter="${{dimension}}" data-taxonomy-id="">全部</button>${{options.map(option=>`<button class="taxonomy-chip ${{selected.has(option.id)?"active":""}}" type="button" data-taxonomy-filter="${{dimension}}" data-taxonomy-id="${{esc(option.id)}}">${{esc(option.zh)}} <small>${{taxonomyCount(dimension,option.id)}}</small></button>`).join("")}}</div></div>`}}).join("")}}
 function scriptTypeCounts(){{const counts=new Map();for(const entry of entries){{const key=String(entry.content_type||"待分类").trim()||"待分类";counts.set(key,(counts.get(key)||0)+1)}}return counts}}
 function scriptTypeOptions(){{const counts=scriptTypeCounts();const ordered=[];for(const label of labels){{if(counts.has(label))ordered.push([label,counts.get(label)])}}for(const [label,count] of [...counts.entries()].sort((a,b)=>String(a[0]).localeCompare(String(b[0]),"zh-CN"))){{if(!labels.includes(label))ordered.push([label,count])}}return ordered}}
 function renderScriptTypeFilters(){{const box=document.querySelector("#script-type-filters");if(!box)return;const options=scriptTypeOptions();box.innerHTML=[`<button class="quick-filter-chip ${{!activeScriptType?"active":""}}" type="button" data-type-filter=""><span>全部</span> <small>${{entries.length}}</small></button>`,...options.map(([label,count])=>`<button class="quick-filter-chip ${{activeScriptType===label?"active":""}}" type="button" data-type-filter="${{esc(label)}}"><span>${{esc(label)}}</span> <small>${{count}}</small></button>`)].join("")}}
@@ -16483,9 +16877,11 @@ function scriptLocationCounts(){{const counts=new Map();for(const entry of entri
 function renderScriptLocationFilters(){{const box=document.querySelector("#script-location-filters");if(!box)return;const counts=scriptLocationCounts();box.innerHTML=[`<button class="quick-filter-chip ${{!activeScriptLocation?"active":""}}" type="button" data-location-filter=""><span>全部地点</span> <small>${{entries.length}}</small></button>`,...locationOptions.map(label=>`<button class="quick-filter-chip ${{activeScriptLocation===label?"active":""}}" type="button" data-location-filter="${{esc(label)}}"><span>${{esc(label)}}</span> <small>${{Number(counts.get(label)||0)}}</small></button>`)].join("")}}
 function locationTag(e){{return String(e.location_tag||e.location_tag_pt||"").trim()}}
 function scriptPublicationTime(e){{const raw=String(e.publish_datetime||e.library_date||e.created_at||e.saved_at||"").trim().replaceAll("/","-");const value=Date.parse(raw);return Number.isFinite(value)?value:0}}
-function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();return entries.filter(e=>{{const matchesType=!activeScriptType||String(e.content_type||"待分类").trim()===activeScriptType;if(!matchesType)return false;const matchesDuration=!activeScriptDuration||String(e.duration_bucket||"").trim()===activeScriptDuration;if(!matchesDuration)return false;const matchesLocation=!activeScriptLocation||locationTag(e)===activeScriptLocation;if(!matchesLocation)return false;if(!q)return true;return [e.title,e.summary,e.content_type,e.duration_bucket,e.duration_label_pt,e.duration_label_zh,e.location_tag,e.location_tag_pt,e.video_url,e.publish_datetime,e.library_date,e.created_at].join(" ").toLowerCase().includes(q)}}).sort((a,b)=>scriptPublicationTime(b)-scriptPublicationTime(a)||String(b.entry_id||"").localeCompare(String(a.entry_id||"")))}}
+function filteredEntries(){{const q=String(document.querySelector("#search")?.value||"").trim().toLowerCase();return entries.filter(e=>{{if(!taxonomyFilterMatches(e))return false;if(!q)return true;const taxonomyText=Object.keys(taxonomyDimensionMeta).flatMap(dimension=>{{const map=new Map((scriptTaxonomy.dimensions[dimension]||[]).map(option=>[option.id,`${{option.zh}} ${{option.pt}}`]));return entryTaxonomyIds(e,dimension).map(id=>map.get(id)||id)}});return [e.title,e.summary,e.content_type,e.duration_bucket,e.duration_label_pt,e.duration_label_zh,e.location_tag,e.location_tag_pt,e.video_url,e.publish_datetime,e.library_date,e.created_at,...taxonomyText].join(" ").toLowerCase().includes(q)}}).sort((a,b)=>scriptPublicationTime(b)-scriptPublicationTime(a)||String(b.entry_id||"").localeCompare(String(a.entry_id||"")))}}
 function durationTag(e){{const map={{dur_1_20:"1-20 s",dur_20_60:"20 s-1 min",dur_60_120:"1-2 min",dur_120_plus:"Mais de 2 min"}};return e.duration_label_pt||map[e.duration_bucket]||""}}
-function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}const visibleRows=rows.slice(0,Math.max(SCRIPT_INITIAL_RENDER_LIMIT,scriptVisibleLimit));const remaining=Math.max(0,rows.length-visibleRows.length);const cards=visibleRows.map(e=>{{const share=scriptShareUrl(e.entry_id);const duration=durationTag(e);const location=locationTag(e);const publicationDate=String(e.library_date||e.publish_datetime||e.created_at||"").slice(0,10);return `<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta"><span class="pill">${{esc(e.content_type||"待分类")}}</span>${{duration?`<span class="pill">${{esc(duration)}}</span>`:""}}${{location?`<span class="pill">${{esc(location)}}</span>`:""}}${{publicationDate?`<span class="pill">发布日期 ${{esc(publicationDate)}}</span>`:""}}<span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span></div><div class="share-line"><b>kokocomedy 外链</b><a href="${{esc(share)}}" target="_blank" rel="noopener">${{esc(share)}}</a></div></div><div class="actions"><a class="btn" href="${{esc(share)}}" target="_blank" rel="noopener">打开外链</a><button type="button" data-copy="${{esc(share)}}">复制外链</button><button class="primary" type="button" data-script-edit="${{esc(e.entry_id)}}">修改脚本</button><button type="button" data-edit="${{esc(e.entry_id)}}">修改标签</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`}}).join("");const more=remaining?`<div class="empty"><b>已显示 ${{visibleRows.length}} / ${{rows.length}} 条</b><br><br><button class="primary" type="button" data-load-more-scripts>继续展开 50 条</button></div>`:`<div class="empty">已显示全部 ${{rows.length}} 条脚本。</div>`;list.innerHTML=cards+more;const s=document.querySelector("#status");if(s){{const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const filters=[activeScriptType&&`类型：${{activeScriptType}}`,activeScriptDuration&&`时间：${{durationOptions.find(x=>x[0]===activeScriptDuration)?.[1]||activeScriptDuration}}`,activeScriptLocation&&`地点：${{activeScriptLocation}}`].filter(Boolean).join(" · ");s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} 条，当前显示 ${{visibleRows.length}} / ${{rows.length}} 条${{filters?` · ${{filters}}`:""}}`}}}}
+function entryTaxonomyPills(entry){{const labels=[];for(const dimension of Object.keys(taxonomyDimensionMeta)){{const map=new Map((scriptTaxonomy.dimensions[dimension]||[]).map(option=>[option.id,option.zh]));for(const id of entryTaxonomyIds(entry,dimension)){{const label=map.get(id);if(label&&!labels.includes(label))labels.push(label)}}}}return labels.map(label=>`<span class="pill">${{esc(label)}}</span>`).join("")}}
+function selectedTaxonomyFilterText(){{const parts=[];for(const [dimension,label] of Object.entries(taxonomyDimensionMeta)){{const map=new Map((scriptTaxonomy.dimensions[dimension]||[]).map(option=>[option.id,option.zh]));const values=[...activeScriptTaxonomy[dimension]].map(id=>map.get(id)||id);if(values.length)parts.push(`${{label}}：${{values.join("、")}}`)}}return parts.join(" · ")}}
+function renderList(){{const list=document.querySelector("#list");if(!list)return;const rows=filteredEntries();if(!rows.length){{list.innerHTML=`<div class="empty">没有匹配脚本</div>`;return}}const visibleRows=rows.slice(0,Math.max(SCRIPT_INITIAL_RENDER_LIMIT,scriptVisibleLimit));const remaining=Math.max(0,rows.length-visibleRows.length);const cards=visibleRows.map(e=>{{const share=scriptShareUrl(e.entry_id);const publicationDate=String(e.library_date||e.publish_datetime||e.created_at||"").slice(0,10);const taxonomyPills=entryTaxonomyPills(e)||`<span class="pill">${{esc(e.content_type||"待分类")}}</span>`;return `<article class="card"><input type="checkbox" data-pick="${{esc(e.entry_id)}}"><img src="${{esc(e.cover_url||e.thumbnail_url)}}" loading="lazy" alt=""><div><h3>${{esc(e.title||"Untitled")}}</h3><p>${{esc(e.summary||"")}}</p><div class="meta">${{taxonomyPills}}${{publicationDate?`<span class="pill">发布日期 ${{esc(publicationDate)}}</span>`:""}}<span class="pill ${{e.published?"":"off"}}">${{e.published?"Creator 已上架":"Creator 已下架"}}</span></div><div class="share-line"><b>kokocomedy 外链</b><a href="${{esc(share)}}" target="_blank" rel="noopener">${{esc(share)}}</a></div></div><div class="actions"><a class="btn" href="${{esc(share)}}" target="_blank" rel="noopener">打开外链</a><button type="button" data-copy="${{esc(share)}}">复制外链</button><button class="primary" type="button" data-script-edit="${{esc(e.entry_id)}}">修改脚本</button><button type="button" data-edit="${{esc(e.entry_id)}}">修改标签</button><button type="button" data-toggle="${{esc(e.entry_id)}}">${{e.published?"下架":"上架"}}</button></div></article>`}}).join("");const more=remaining?`<div class="empty"><b>已显示 ${{visibleRows.length}} / ${{rows.length}} 条</b><br><br><button class="primary" type="button" data-load-more-scripts>继续展开 50 条</button></div>`:`<div class="empty">已显示全部 ${{rows.length}} 条脚本。</div>`;list.innerHTML=cards+more;const s=document.querySelector("#status");if(s){{const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const filters=selectedTaxonomyFilterText();s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} 条，当前显示 ${{visibleRows.length}} / ${{rows.length}} 条${{filters?` · ${{filters}}`:""}}`}}}}
 async function loadEntries(){{try{{document.querySelector("#status")&&(document.querySelector("#status").textContent="加载中...");const params=new URLSearchParams({{limit:"10000",scope:activeScriptScope}});const d=await api(`/api/creator-admin/scripts?${{params.toString()}}`);entries=d.entries||[];scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;scriptScopeCounts=d.scope_counts||{{portal_visible:0,hidden:0,incomplete:0,all:entries.length}};activeScriptScope=d.scope||activeScriptScope;if(activeScriptType&&!entries.some(e=>String(e.content_type||"待分类").trim()===activeScriptType))activeScriptType="";if(activeScriptDuration&&!entries.some(e=>String(e.duration_bucket||"").trim()===activeScriptDuration))activeScriptDuration="";if(activeScriptLocation&&!entries.some(e=>locationTag(e)===activeScriptLocation))activeScriptLocation="";adminView();const scopeLabel=(scriptScopeOptions().find(x=>x.key===activeScriptScope)||{{label:"脚本"}}).label;const total=Number(scriptScopeCounts[activeScriptScope]||entries.length);const s=document.querySelector("#status");if(s)s.textContent=`${{scopeLabel}}：已加载 ${{entries.length}} / ${{total}} 条，默认显示前 ${{Math.min(SCRIPT_INITIAL_RENDER_LIMIT,entries.length)}} 条`}}catch(e){{loginView(e.message)}}}}
 async function ensureScriptIndex(){{if(scriptIndexLoaded)return scriptIndex;const d=await api("/api/creator-admin/scripts?limit=10000&scope=all");const rows=d.entries||[];scriptIndex=Object.fromEntries(rows.map(x=>[String(x.entry_id||""),x]).filter(x=>x[0]));scriptIndexLoaded=true;return scriptIndex}}
 async function loadCreatorCloudState(){{const d=await api("/api/creator-admin/state");creatorCloudState=d.state&&d.state.creators?d.state:{{creators:{{}}}}}}
@@ -16732,8 +17128,9 @@ function persistCreatorFeedDom(id){{const list=document.getElementById(`creator-
 async function deleteCreatorFeed(id,key){{const deleted=[...deletedFeedKeys(id),key];const feeds=creatorFeeds(id).filter(feed=>feedKey(feed)!==key);setCreatorState(id,{{deleted_feed_keys:deleted,feeds}});await saveCreatorCloudState(id,{{deleted_feed_keys:deleted,feeds}});hydrateCreatorFeeds(id);const status=document.querySelector("#status");if(status)status.textContent="已从服务端删除这条投喂/回传记录。"}}
 async function createCreator(e){{e.preventDefault();const submit=e.target.querySelector('button[type="submit"]');const modalStatus=document.querySelector("#creator-form-status");const pageStatus=document.querySelector("#status");const setMessage=(msg,isError=false)=>{{if(modalStatus){{modalStatus.textContent=msg;modalStatus.style.color=isError?"#c9481e":"#99520f"}}if(pageStatus)pageStatus.textContent=msg}};const fd=new FormData(e.target);const payload={{kwai_url:String(fd.get("kwai_url")||"").trim(),display_name:String(fd.get("display_name")||"").trim(),kwai_id:String(fd.get("kwai_id")||"").trim(),phone:String(fd.get("phone")||"").trim(),uid:String(fd.get("uid")||"").trim(),poc:fd.get("poc"),categories:fd.get("category")?[fd.get("category")]:[],creator_type:{{identity:selectedValues(e.target,"identity"),location:selectedValues(e.target,"location")}},identity:selectedValues(e.target,"identity"),location:selectedValues(e.target,"location"),cooperation_level:fd.get("cooperation_level"),creator_description:String(fd.get("creator_description")||"").trim()}};if(!payload.kwai_url){{setMessage("请先填写 Kwai 作者主页链接。",true);return}}try{{if(submit){{submit.disabled=true;submit.textContent="保存中..."}}setMessage("正在保存创作者并绑定账号...");const result=await api("/api/creator-admin/creators",{{method:"POST",body:JSON.stringify(payload)}});const saved=result.creator||{{}};e.target.reset();creatorModal.classList.remove("open");selectedCreatorId="";await loadCreators({{silent:true}});const savedId=String(saved.profile_id||"");const savedKwai=String(saved.kwai_id||payload.kwai_id||"").toLowerCase();const savedPhone=String(saved.phone||payload.phone||"").toLowerCase();const found=creatorRows.some(c=>String(c.profile_id||"")===savedId||(savedKwai&&String(c.kwai_id||"").toLowerCase()===savedKwai)||(savedPhone&&String(c.phone||"").toLowerCase()===savedPhone));setMessage(found?`创作者已导入：${{saved.name||payload.display_name||payload.kwai_id||payload.kwai_url}}`:`创作者已保存，但列表刷新较慢，请点“刷新”确认：${{saved.name||payload.display_name||payload.kwai_url}}`,!found);renderCreatorPocFilters();renderCreators()}}catch(err){{setMessage(err.message||String(err),true)}}finally{{if(submit){{submit.disabled=false;submit.textContent="保存创作者"}}}}}}
 async function createAccount(e){{e.preventDefault();const fd=new FormData(e.target);const status=document.querySelector("#status");status.textContent="正在创建账号...";try{{await api("/api/creator-admin/accounts",{{method:"POST",body:JSON.stringify({{account:fd.get("account"),display_name:fd.get("display_name")}})}});e.target.reset();await loadAccounts()}}catch(err){{status.textContent=err.message}}}}
-function openEdit(id){{editing=entries.find(e=>e.entry_id===id);if(!editing)return;form.content_type.innerHTML=labels.map(x=>`<option value="${{esc(x)}}">${{esc(x)}}</option>`).join("");form.content_type.value=editing.content_type||"待分类";modal.classList.add("open")}}
-async function saveEdit(ev){{ev.preventDefault();if(!editing)return;const payload={{content_type:new FormData(form).get("content_type")||"待分类"}};await api(`/api/creator-admin/scripts/${{editing.entry_id}}`,{{method:"POST",body:JSON.stringify(payload)}});modal.classList.remove("open");await loadEntries()}}
+function renderTaxonomyEditor(){{const box=document.querySelector("#script-taxonomy-editor");if(!box||!editing)return;box.innerHTML=Object.entries(taxonomyDimensionMeta).map(([dimension,label])=>{{const selected=new Set(entryTaxonomyIds(editing,dimension));const options=scriptTaxonomy.dimensions[dimension]||[];return `<div class="taxonomy-row"><span class="taxonomy-label">${{label}}</span><div class="taxonomy-options">${{options.map(option=>`<button class="taxonomy-chip ${{selected.has(option.id)?"active":""}}" type="button" data-taxonomy-edit="${{dimension}}" data-taxonomy-id="${{esc(option.id)}}">${{esc(option.zh)}}<small>${{esc(option.pt)}}</small></button>`).join("")}}</div></div>`}}).join("")}}
+function openEdit(id){{editing=entries.find(e=>e.entry_id===id);if(!editing)return;renderTaxonomyEditor();modal.classList.add("open")}}
+async function saveEdit(ev){{ev.preventDefault();if(!editing)return;const payload={{taxonomy_version:scriptTaxonomy.version,taxonomy_source:"manual"}};for(const dimension of Object.keys(taxonomyDimensionMeta)){{const selected=[...form.querySelectorAll(`[data-taxonomy-edit="${{dimension}}"].active`)].map(button=>button.dataset.taxonomyId);if(dimension==="duration")payload.duration_bucket=selected[0]||"";else payload[`${{dimension}}_tags`]=selected}}const result=await api(`/api/library/${{editing.entry_id}}/taxonomy`,{{method:"POST",body:JSON.stringify(payload)}});const index=entries.findIndex(entry=>entry.entry_id===editing.entry_id);if(index>=0)entries[index]=result.entry||{{...entries[index],...payload}};modal.classList.remove("open");renderScriptTaxonomyFilters();renderList()}}
 async function togglePublish(id){{const e=entries.find(x=>x.entry_id===id);if(!e)return;await api(`/api/creator-admin/scripts/${{id}}`,{{method:"POST",body:JSON.stringify({{published:!e.published}})}});await loadEntries()}}
 async function bulkDelete(){{const ids=[...document.querySelectorAll("[data-pick]:checked")].map(x=>x.dataset.pick);if(!ids.length)return alert("请先选择脚本");if(!confirm(`确定从 Creator 运营后台删除 ${{ids.length}} 条脚本吗？`))return;await api("/api/creator-admin/bulk-delete",{{method:"POST",body:JSON.stringify({{entry_ids:ids}})}});await loadEntries()}}
 async function syncNow(){{const s=document.querySelector("#status");s.textContent="同步中...";const d=await api("/api/creator-admin/sync",{{method:"POST",body:"{}"}});await loadCurrentTab();alert(`Creator 已同步：${{d.entries_count||"-"}} 条脚本`)}}
@@ -16744,6 +17141,7 @@ document.addEventListener("dragleave",e=>{{const zone=e.target.closest("[data-re
 document.addEventListener("drop",e=>{{const zone=e.target.closest("[data-recommend-selected]");if(!zone)return;e.preventDefault();zone.classList.remove("is-over");const entryId=e.dataTransfer?.getData("text/plain")||"";const board=zone.closest("[data-creator-recommend-board]");const source=board?.querySelector(`[data-recommend-source] [data-entry-id="${{CSS.escape(entryId)}}"]`);if(source)addRecommendCardToSelected(source)}})
 document.addEventListener("click",async e=>{{const add=e.target.closest("[data-add-recommend-script]");if(add){{e.preventDefault();addRecommendCardToSelected(add.closest("[data-recommend-card]"));return}}const remove=e.target.closest("[data-remove-recommend-script]");if(remove){{e.preventDefault();const zone=remove.closest("[data-recommend-selected]");remove.closest("[data-recommend-card]")?.remove();if(zone&&!zone.querySelector("[data-recommend-card]"))zone.innerHTML=recommendSelectedEmpty();return}}const confirmFeeds=e.target.closest("[data-confirm-recommend-feeds]");if(confirmFeeds){{e.preventDefault();await confirmCreatorRecommendFeeds(confirmFeeds.dataset.confirmRecommendFeeds);return}}}})
 document.addEventListener("toggle",e=>{{const detail=e.target;if(!(detail instanceof HTMLDetailsElement)||!detail.dataset.creatorDetailKey)return;const key=detail.dataset.creatorDetailKey;if(detail.open)creatorOpenDetailKeys.add(key);else creatorOpenDetailKeys.delete(key);localStorage.setItem("kokoCreatorOpenDetails",JSON.stringify([...creatorOpenDetailKeys].slice(-240)))}},true);
+document.addEventListener("click",e=>{{const filter=e.target.closest("[data-taxonomy-filter]");if(filter){{e.preventDefault();const dimension=filter.dataset.taxonomyFilter;const id=filter.dataset.taxonomyId||"";const selected=activeScriptTaxonomy[dimension];if(!selected)return;if(!id)selected.clear();else if(selected.has(id))selected.delete(id);else selected.add(id);scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptTaxonomyFilters();renderList();return}}const editor=e.target.closest("[data-taxonomy-edit]");if(editor){{e.preventDefault();const dimension=editor.dataset.taxonomyEdit;if(dimension==="duration")form.querySelectorAll('[data-taxonomy-edit="duration"]').forEach(button=>button.classList.remove("active"));editor.classList.toggle("active");return}}}});
 document.addEventListener("submit",async e=>{{const creatorTags=e.target.closest("[data-creator-tags]");if(creatorTags){{e.preventDefault();await saveCreatorTags(creatorTags);return}}if(e.target.id==="login-form"){{e.preventDefault();try{{await api("/koko_admin_2026-kwai/login",{{method:"POST",body:JSON.stringify({{password:new FormData(e.target).get("password")}})}});await loadCurrentTab()}}catch(err){{loginView(err.message)}}}}}});
 document.addEventListener("click",async e=>{{const tab=e.target.closest("[data-tab-main]");if(tab){{activeTab=tab.dataset.tabMain;if(activeTab==="creators"){{await loadCreators()}}else if(activeTab==="analytics"){{adminView();if(!analyticsAutoLoaded)setTimeout(()=>loadAnalytics(false),80)}}else if(activeTab==="accounts"){{await loadAccounts()}}else if(activeTab==="submissions"){{await loadSubmissions()}}else if(activeTab==="intakes"){{await loadIntakes()}}else adminView();return}}const exportDetails=e.target.closest("[data-export-creator-details]");if(exportDetails){{e.preventDefault();e.stopPropagation();downloadCreatorDetailCsv();return}}const tile=e.target.closest("[data-open-creator]");if(tile){{selectCreator(tile.dataset.openCreator);return}}const backCreators=e.target.closest("[data-back-creators]");if(backCreators){{backToCreatorList();return}}const pageBtn=e.target.closest("[data-creator-page]");if(pageBtn){{creatorPage+=pageBtn.dataset.creatorPage==="next"?1:-1;renderCreators();return}}const viewBtn=e.target.closest("[data-creator-view]");if(viewBtn){{creatorViewMode=viewBtn.dataset.creatorView||"card";localStorage.setItem("kokoCreatorAdminView",creatorViewMode);renderCreators();return}}const pocFilter=e.target.closest("[data-poc-filter]");if(pocFilter){{activeCreatorPoc=pocFilter.dataset.pocFilter||"";creatorPage=1;selectedCreatorId="";renderCreatorPocFilters();renderCreators();return}}const editCreator=e.target.closest("[data-edit-creator-tags]");if(editCreator){{openCreatorTags(editCreator.dataset.editCreatorTags);return}}const loadCreator=e.target.closest("[data-load-creator-scripts]");if(loadCreator){{await loadCreatorScripts(loadCreator.dataset.loadCreatorScripts);return}}const loadMoreCreator=e.target.closest("[data-load-more-creator-scripts]");if(loadMoreCreator){{await loadCreatorScripts(loadMoreCreator.dataset.loadMoreCreatorScripts,true);return}}const saveMetrics=e.target.closest("[data-save-creator-metrics]");if(saveMetrics){{await saveCreatorMetrics(saveMetrics.dataset.saveCreatorMetrics);return}}const saveFeeds=e.target.closest("[data-save-creator-feeds]");if(saveFeeds){{await saveCreatorFeeds(saveFeeds.dataset.saveCreatorFeeds);return}}const refreshFeedStats=e.target.closest("[data-refresh-feed-stats]");if(refreshFeedStats){{const id=refreshFeedStats.dataset.refreshFeedStats;const feeds=persistCreatorFeedDom(id);await saveCreatorCloudState(id,{{feeds}});await hydrateCreatorFeeds(id,false);renderCreators();const status=document.querySelector("#status");if(status)status.textContent="统计已保存到服务端并刷新，作者卡片数据已同步。";return}}const deleteFeed=e.target.closest("[data-delete-feed]");if(deleteFeed){{if(confirm("确定删除这条投喂/回传记录吗？"))await deleteCreatorFeed(deleteFeed.dataset.deleteFeedCreator,deleteFeed.dataset.deleteFeed);return}}const moreSubmissions=e.target.closest("[data-load-more-submissions]");if(moreSubmissions){{await loadSubmissions(true);return}}const moreScripts=e.target.closest("[data-load-more-scripts]");if(moreScripts){{scriptVisibleLimit+=SCRIPT_RENDER_INCREMENT;renderList();return}}const scopeFilter=e.target.closest("[data-scope-filter]");if(scopeFilter){{activeScriptScope=scopeFilter.dataset.scopeFilter||"portal_visible";activeScriptType="";activeScriptDuration="";activeScriptLocation="";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;await loadEntries();return}}const typeFilter=e.target.closest("[data-type-filter]");if(typeFilter){{activeScriptType=typeFilter.dataset.typeFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptTypeFilters();renderList();return}}const durationFilter=e.target.closest("[data-duration-filter]");if(durationFilter){{activeScriptDuration=durationFilter.dataset.durationFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptDurationFilters();renderList();return}}const locationFilter=e.target.closest("[data-location-filter]");if(locationFilter){{activeScriptLocation=locationFilter.dataset.locationFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptLocationFilters();renderList();return}}const copy=e.target.closest("[data-copy]");if(copy){{await navigator.clipboard?.writeText(copy.dataset.copy).catch(()=>null);copy.textContent="已复制";return}}const scriptEdit=e.target.closest("[data-script-edit]");if(scriptEdit){{location.assign(`/studio?library_entry=${{encodeURIComponent(scriptEdit.dataset.scriptEdit)}}#split-panel`);return}}const delCreator=e.target.closest("[data-delete-creator]");if(delCreator){{if(confirm("确定删除这个创作者吗？")){{await api(`/api/creator-admin/creators/${{delCreator.dataset.deleteCreator}}`,{{method:"DELETE"}});selectedCreatorId="";await loadCreators()}}return}}const refresh=e.target.closest("[data-refresh-creator]");if(refresh){{const c=creators.find(x=>x.profile_id===refresh.dataset.refreshCreator);if(c){{await api(`/api/creator-admin/creators/${{c.profile_id}}`,{{method:"POST",body:JSON.stringify({{kwai_url:c.kwai_url,categories:c.categories||[],poc:creatorPocValue(c)}})}});await loadCreators()}}return}}const edit=e.target.closest("[data-edit]");if(edit)openEdit(edit.dataset.edit);const toggle=e.target.closest("[data-toggle]");if(toggle)togglePublish(toggle.dataset.toggle)}});document.addEventListener("change",async e=>{{const status=e.target.closest("[data-feed-status]");const date=e.target.closest("[data-feed-date]");const ret=e.target.closest("[data-feed-return-url]");const retTime=e.target.closest("[data-feed-return-time]");if(status||date||ret||retTime){{const target=status||date||ret||retTime;const id=selectedCreatorId;const entry=target.dataset.feedStatus||target.dataset.feedDate||target.dataset.feedReturnUrl||target.dataset.feedReturnTime;if(id&&entry)await updateCreatorFeed(id,entry,status?{{status:target.value}}:date?{{date:target.value,feed_time:target.value}}:ret?{{return_url:target.value}}:{{return_time:target.value}})}}});window.addEventListener("popstate",()=>{{const match=location.pathname.match(/^\\/koko_admin_2026-kwai\\/creators\\/([0-9a-f]{{32}})$/);selectedCreatorId=(match&&match[1])||"";renderCreators()}});document.querySelector("#edit-cancel").addEventListener("click",()=>modal.classList.remove("open"));document.querySelector("#creator-cancel").addEventListener("click",()=>creatorModal.classList.remove("open"));document.querySelector("#creator-tags-cancel").addEventListener("click",()=>creatorTagsModal.classList.remove("open"));form.addEventListener("submit",saveEdit);creatorForm.addEventListener("submit",createCreator);window.addEventListener("focus",refreshCreatorAdminSilently);document.addEventListener("visibilitychange",()=>{if(!document.hidden)refreshCreatorAdminSilently()});startCreatorRealtime();loadCurrentTab();
 </script></body></html>"""
@@ -16753,6 +17151,7 @@ document.addEventListener("click",async e=>{{const tab=e.target.closest("[data-t
         .replace("__CREATOR_BASE__", CREATOR_CENTER_BASE_URL)
         .replace("__INITIAL_TAB__", initial_tab_json)
         .replace("__LIBRARY_MODE__", library_mode_json)
+        .replace("__SCRIPT_TAXONOMY__", script_taxonomy_json)
         .replace("__FAVICON_LINKS__", FAVICON_LINKS)
     )
     if library_mode:
@@ -17801,6 +18200,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 "modes": ["full", "understanding"],
                 "content_types": LIBRARY_FILTER_LABELS,
                 "location_tags": sorted(LOCATION_TAGS),
+                "script_taxonomy": {
+                    "version": SCRIPT_TAXONOMY_VERSION,
+                    "dimensions": {
+                        dimension: [
+                            {"id": item.get("id"), "zh": item.get("zh"), "pt": item.get("pt")}
+                            for item in taxonomy_options(dimension)
+                        ]
+                        for dimension in (*SCRIPT_TAG_DIMENSIONS, "duration")
+                    },
+                    "selection": "Multiple values are allowed within each dimension; duration is derived from video length.",
+                },
                 "max_urls_per_job": KOKO_AGENT_API_MAX_URLS,
                 "max_pending_items": KOKO_AGENT_API_MAX_PENDING_ITEMS,
                 "analysis_concurrency": MAX_CONCURRENT_ANALYSES,
@@ -17865,11 +18275,12 @@ class AppHandler(BaseHTTPRequestHandler):
             search = urllib.parse.urlencode({"limit": limit, "scope": scope})
             status, payload = creator_admin_remote_json(f"/api/admin/scripts?{search}")
             if status == 200 and isinstance(payload.get("entries"), list):
+                payload = normalize_creator_admin_scripts_payload(payload)
                 save_creator_admin_scripts_cache(payload)
             elif status >= 500:
                 cached = load_creator_admin_scripts_cache()
                 if cached:
-                    payload = dict(cached)
+                    payload = normalize_creator_admin_scripts_payload(dict(cached))
                     payload["from_cache"] = True
                     payload["remote_error"] = payload.get("remote_error") or "Creator remote list is temporarily unavailable."
                     status = 200
@@ -18339,6 +18750,30 @@ class AppHandler(BaseHTTPRequestHandler):
                     "allowed_location_tags": sorted(LOCATION_TAGS),
                 }, status=400)
                 return
+            taxonomy_payload = payload.get("taxonomy") if isinstance(payload.get("taxonomy"), dict) else {}
+            taxonomy_payload = {
+                **taxonomy_payload,
+                **{
+                    dimension: payload.get(f"{dimension}_tags")
+                    for dimension in SCRIPT_TAG_DIMENSIONS
+                    if payload.get(f"{dimension}_tags") is not None
+                },
+            }
+            taxonomy_tags, taxonomy_errors = parse_taxonomy_tags_payload(taxonomy_payload)
+            if taxonomy_errors:
+                self.send_json({
+                    "ok": False,
+                    "error": "Unsupported taxonomy tag values.",
+                    "invalid_tags": taxonomy_errors,
+                    "allowed_taxonomy": {
+                        dimension: [
+                            {"id": item.get("id"), "zh": item.get("zh"), "pt": item.get("pt")}
+                            for item in taxonomy_options(dimension)
+                        ]
+                        for dimension in SCRIPT_TAG_DIMENSIONS
+                    },
+                }, status=400)
+                return
             raw_tags = payload.get("tags")
             if isinstance(raw_tags, dict):
                 manual_tags = json.loads(json.dumps(raw_tags, ensure_ascii=False))
@@ -18398,6 +18833,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     content_type=content_type,
                     location_tag=location_tag,
                     manual_tags=manual_tags,
+                    taxonomy_tags=taxonomy_tags,
                 )
                 job_id = str(created.get("id") or "")
                 with job_lock:
@@ -18823,6 +19259,23 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             try:
                 updated = update_library_entry_content_type(entry_id, str(payload.get("content_type") or "").strip())
+            except Exception as exc:
+                self.send_json({"error": friendly_error(str(exc))}, status=400)
+                return
+            if not updated:
+                self.send_json({"error": "Library entry not found."}, status=404)
+                return
+            self.send_json({"ok": True, "entry": updated})
+            return
+        library_taxonomy_match = re.fullmatch(r"/api/library/([0-9a-f]{32})/taxonomy", parsed.path)
+        if library_taxonomy_match:
+            entry_id = library_taxonomy_match.group(1)
+            try:
+                payload = self.read_json()
+                updated = update_library_entry_taxonomy(entry_id, payload)
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
             except Exception as exc:
                 self.send_json({"error": friendly_error(str(exc))}, status=400)
                 return
