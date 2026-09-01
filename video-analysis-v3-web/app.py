@@ -19035,6 +19035,28 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(result)
             return
+        if parsed.path == "/api/content-radar/inspect":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+                raw_urls = payload.get("post_urls") or []
+                if not isinstance(raw_urls, list):
+                    raise ValueError("post_urls 必须是数组")
+                result = content_radar.inspect_tiktok_posts([str(value or "") for value in raw_urls])
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except Exception as exc:
+                log_runtime_warning("content_radar_inspect_failed", "Content Radar post inspection failed.", error=str(exc))
+                self.send_json({"error": friendly_error(str(exc))}, status=502)
+                return
+            self.send_json(result)
+            return
         if parsed.path == "/api/agent/v1/video-analysis":
             if not self.require_agent_api():
                 return

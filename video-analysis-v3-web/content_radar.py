@@ -365,6 +365,61 @@ class ContentRadar:
         )
         return {"ok": True, "queries": cleaned, "posts": ranked, "raw_count": len(raw_items)}
 
+    def inspect_tiktok_posts(self, post_urls: list[str]) -> dict[str, Any]:
+        """Fetch low-resolution review copies for a few explicit public posts."""
+        urls = [str(value or "").strip() for value in post_urls if str(value or "").strip()][:5]
+        if not urls or any(not re.fullmatch(r"https://www\.tiktok\.com/@[^/]+/video/\d+", value) for value in urls):
+            raise ValueError("请提供 1–5 个标准 TikTok 视频链接")
+        token = os.environ.get("APIFY_TOKEN", "").strip()
+        if not token:
+            raise RuntimeError("服务尚未配置 APIFY_TOKEN")
+        actor = urllib.parse.quote("coregent~tiktok-video-scraper", safe="~")
+        url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items?{urllib.parse.urlencode({'token': token})}"
+        payload = {
+            "videos": urls,
+            "maxVideos": len(urls),
+            "shouldDownloadVideos": True,
+            "videoDownloadQuality": "low",
+            "downloadSubtitlesOptions": "transcript",
+        }
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                raw_items = json.load(response)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            raise RuntimeError(f"Apify HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"无法连接 Apify：{exc.reason}") from exc
+        if not isinstance(raw_items, list):
+            raise RuntimeError("Apify 返回格式异常")
+        items = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            raw_media = item.get("mediaUrls") or []
+            if isinstance(raw_media, str):
+                raw_media = [raw_media]
+            media_urls = [str(value) for value in raw_media if str(value or "").startswith("http")]
+            download_addr = str(item.get("downloadAddr") or nested_value(item, "videoMeta.downloadAddr") or "")
+            if download_addr.startswith("http") and download_addr not in media_urls:
+                media_urls.insert(0, download_addr)
+            items.append({
+                "post_url": str(item.get("webVideoUrl") or item.get("url") or ""),
+                "post_id": str(item.get("id") or ""),
+                "creator_username": str(nested_value(item, "authorMeta.name", "author.uniqueId") or ""),
+                "caption": str(item.get("text") or item.get("description") or ""),
+                "duration_seconds": number(nested_value(item, "videoMeta.duration", "video.duration", "duration")),
+                "media_urls": media_urls,
+                "transcript": str(item.get("transcript") or "")[:12000],
+            })
+        return {"ok": True, "items": items, "raw_count": len(raw_items)}
+
     def refresh(self, *, reason: str = "manual") -> dict[str, Any]:
         if not self.refresh_lock.acquire(blocking=False):
             return {"ok": True, "started": False, "message": "采集正在进行中"}
