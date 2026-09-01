@@ -116,6 +116,11 @@ class ScriptTaxonomyTests(unittest.TestCase):
         self.assertIn("保存成功，新标签已同步到脚本库", markup)
         self.assertIn('key:"telekwai",label:"Telekwai"', markup)
         self.assertIn("data-telekwai-edit", markup)
+        self.assertIn("withActionFeedback", markup)
+        self.assertIn("action-toast", markup)
+        self.assertIn("脚本已成功${action}", markup)
+        self.assertIn("复制成功，内容已写入剪贴板", markup)
+        self.assertIn("已选择 ${count} 条脚本", markup)
 
     def test_telekwai_is_exclusive_and_unpublished(self) -> None:
         entry = {
