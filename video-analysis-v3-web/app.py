@@ -3818,12 +3818,11 @@ def apply_script_taxonomy_classification(
     use_llm: bool = True,
 ) -> dict[str, Any]:
     ensure_script_taxonomy_fields(entry, script, source="keyword_fallback")
-    manual_dimensions = {
-        dimension
-        for dimension in SCRIPT_TAG_DIMENSIONS
-        if normalize_taxonomy_tag_ids(dimension, entry.get(f"{dimension}_tags"))
-        and str(entry.get("taxonomy_source") or "").strip().lower() == "manual"
-    }
+    manual_dimensions = (
+        set(SCRIPT_TAG_DIMENSIONS)
+        if str(entry.get("taxonomy_source") or "").strip().lower() == "manual"
+        else set()
+    )
     classified = (
         classify_script_taxonomy_with_llm(script, bundle, GOOGLE_API_KEY, unique_models(*MODEL_CANDIDATES))
         if use_llm
@@ -5133,6 +5132,43 @@ def apply_manual_item_content_type(parent_job_id: str, item_index: int, content_
             job["content_type_source"] = "manual"
             job["content_type_reasoning"] = "Manual selection before library save"
             job["content_type_confidence"] = "manual"
+            job["updated_at"] = now_iso()
+        save_jobs()
+
+
+def apply_manual_item_taxonomy(parent_job_id: str, item_index: int, payload: dict[str, Any]) -> None:
+    if not isinstance(payload, dict):
+        return
+    taxonomy_fields = {f"{dimension}_tags" for dimension in SCRIPT_TAG_DIMENSIONS}
+    if not taxonomy_fields.intersection(payload) and "duration_bucket" not in payload:
+        return
+    taxonomy_tags, errors = parse_taxonomy_tags_payload(payload)
+    if errors:
+        raise RuntimeError("Unsupported taxonomy tags: " + "; ".join(errors))
+    duration_bucket = str(payload.get("duration_bucket") or "").strip()
+    if duration_bucket and duration_bucket not in taxonomy_option_map("duration"):
+        raise RuntimeError("Unsupported duration bucket.")
+    changes: dict[str, Any] = {
+        "taxonomy_version": SCRIPT_TAXONOMY_VERSION,
+        "taxonomy_source": "manual",
+        "taxonomy_confidence": "manual",
+        "taxonomy_updated_at": now_iso(),
+    }
+    for dimension in SCRIPT_TAG_DIMENSIONS:
+        changes[f"{dimension}_tags"] = taxonomy_tags[dimension]
+    if duration_bucket:
+        changes["duration_bucket"] = duration_bucket
+    with job_lock:
+        if parent_job_id not in jobs:
+            return
+        job = jobs[parent_job_id]
+        items = job.get("items") or []
+        item = items[item_index] if 0 <= item_index < len(items) else None
+        if item is not None:
+            item.update(changes)
+            item["updated_at"] = now_iso()
+        if item is None or job.get("id") == item.get("id") or len(items) == 1:
+            job.update(changes)
             job["updated_at"] = now_iso()
         save_jobs()
 
@@ -7171,6 +7207,14 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "content_type_source": item.get("content_type_source") or "auto",
         "content_type_reasoning": item.get("content_type_reasoning") or "",
         "content_type_confidence": item.get("content_type_confidence") or "",
+        "taxonomy_version": item.get("taxonomy_version") or SCRIPT_TAXONOMY_VERSION,
+        "taxonomy_source": item.get("taxonomy_source") or "auto",
+        "taxonomy_confidence": item.get("taxonomy_confidence") or "",
+        **{
+            f"{dimension}_tags": normalize_taxonomy_tag_ids(dimension, item.get(f"{dimension}_tags"))
+            for dimension in SCRIPT_TAG_DIMENSIONS
+        },
+        "duration_bucket": str(item.get("duration_bucket") or ""),
         "title": item.get("title") or "",
         "understanding_summary": item.get("understanding_summary")
         or build_understanding_summary(item.get("result_json") or item.get("zh_result_json"), item.get("video_url") or ""),
@@ -8827,6 +8871,7 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
         "taxonomy_version": item.get("taxonomy_version") or existing.get("taxonomy_version") or SCRIPT_TAXONOMY_VERSION,
         "taxonomy_source": item.get("taxonomy_source") or existing.get("taxonomy_source") or "auto",
         "taxonomy_confidence": item.get("taxonomy_confidence") or existing.get("taxonomy_confidence") or "",
+        "duration_bucket": item.get("duration_bucket") or existing.get("duration_bucket") or duration_fields.get("duration_bucket") or "",
         **{
             f"{dimension}_tags": normalize_taxonomy_tag_ids(
                 dimension,
@@ -11689,25 +11734,35 @@ def studio_html() -> str:
     }}
     .manual-tag-picker {{
       display: grid;
-      gap: 6px;
-      min-width: min(260px, 100%);
-    }}
-    .manual-tag-picker label {{
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 800;
-    }}
-    .manual-tag-picker select {{
-      width: 100%;
-      min-height: 40px;
-      border: 1px solid rgba(255,130,0,.20);
+      gap: 10px;
+      width: min(760px, 100%);
+      padding: 12px;
+      border: 1px solid rgba(255,130,0,.18);
       border-radius: 14px;
-      background: rgba(255,255,255,.94);
-      color: var(--ink);
-      padding: 0 12px;
-      font-size: 13px;
-      font-weight: 800;
-      outline: none;
+      background: rgba(255,255,255,.82);
+    }}
+    .manual-tag-heading {{ color: var(--ink); font-size: 13px; font-weight: 900; }}
+    .manual-taxonomy-row {{ display: grid; grid-template-columns: 76px minmax(0,1fr); gap: 10px; align-items: start; }}
+    .manual-taxonomy-label {{ color: var(--muted); font-size: 12px; font-weight: 850; padding-top: 8px; }}
+    .manual-taxonomy-options {{ display: flex; flex-wrap: wrap; gap: 7px; }}
+    .manual-taxonomy-chip {{
+      min-height: 34px;
+      border: 1px solid rgba(255,130,0,.22);
+      border-radius: 10px;
+      background: #fff;
+      color: #805329;
+      padding: 6px 11px;
+      font-size: 12px;
+      font-weight: 850;
+      cursor: pointer;
+    }}
+    .manual-taxonomy-chip.active {{ border-color: var(--brand); background: var(--brand); color: #fff; }}
+    .manual-taxonomy-feedback {{ min-height: 18px; color: #8a5b2f; font-size: 12px; font-weight: 750; }}
+    .manual-taxonomy-feedback.success {{ color: var(--ok); }}
+    .manual-taxonomy-feedback.error {{ color: var(--err); }}
+    @media (max-width: 620px) {{
+      .manual-taxonomy-row {{ grid-template-columns: 1fr; gap: 5px; }}
+      .manual-taxonomy-label {{ padding-top: 0; }}
     }}
     .library-options {{
       display: grid;
@@ -14240,26 +14295,60 @@ def studio_html() -> str:
       }});
     }}
 
-    const CONTENT_TYPE_OPTIONS = {json.dumps(LIBRARY_FILTER_LABELS, ensure_ascii=False)};
+    const SCRIPT_TAXONOMY = {json.dumps({
+        "version": SCRIPT_TAXONOMY_VERSION,
+        "dimensions": {
+            dimension: [
+                {"id": item.get("id"), "zh": item.get("zh"), "pt": item.get("pt")}
+                for item in taxonomy_options(dimension)
+            ]
+            for dimension in (*SCRIPT_TAG_DIMENSIONS, "duration")
+        },
+    }, ensure_ascii=False)};
+    const TAXONOMY_DIMENSION_META = {{ relationship: "人物关系", format: "形式", location: "地点", content: "内容", duration: "时间" }};
+
+    function itemTaxonomyIds(item, dimension) {{
+      if (dimension === "duration") return item.duration_bucket ? [String(item.duration_bucket)] : [];
+      const values = item[`${{dimension}}_tags`];
+      return Array.isArray(values) ? values.map(String) : [];
+    }}
 
     function manualTagPickerMarkup(item, compact = false) {{
-      const manualValue = item.content_type_source === "manual" ? (item.content_type || "") : "";
-      const options = [`<option value="">自动判断分类</option>`, ...CONTENT_TYPE_OPTIONS.map((label) => {{
-        return `<option value="${{escapeHtml(label)}}" ${{label === manualValue ? "selected" : ""}}>${{escapeHtml(label)}}</option>`;
-      }})].join("");
+      const rows = Object.entries(TAXONOMY_DIMENSION_META).map(([dimension, label]) => {{
+        const selected = new Set(itemTaxonomyIds(item, dimension));
+        const options = (SCRIPT_TAXONOMY.dimensions[dimension] || []).map((option) => `
+          <button class="manual-taxonomy-chip ${{selected.has(String(option.id)) ? "active" : ""}}" type="button"
+            data-manual-taxonomy="${{dimension}}" data-taxonomy-id="${{escapeHtml(option.id)}}">
+            ${{escapeHtml(option.zh)}}
+          </button>
+        `).join("");
+        return `<div class="manual-taxonomy-row"><span class="manual-taxonomy-label">${{label}}</span><div class="manual-taxonomy-options">${{options}}</div></div>`;
+      }}).join("");
       return `
-        <div class="manual-tag-picker">
-          <label>${{compact ? "入库分类 tag" : "分类 tag（不选则 AI 自动判断）"}}</label>
-          <select data-manual-content-type="${{item.id}}">
-            ${{options}}
-          </select>
+        <div class="manual-tag-picker" data-manual-taxonomy-picker="${{item.id}}">
+          <div class="manual-tag-heading">${{compact ? "人工修改入库标签" : "确认或修改脚本标签"}}</div>
+          ${{rows}}
+          <div class="manual-taxonomy-feedback" data-taxonomy-feedback role="status">人物关系、形式、地点和内容可多选；时间只能选一项。</div>
         </div>
       `;
     }}
 
-    function selectedManualContentType(itemId, root = document) {{
-      const value = root.querySelector(`[data-manual-content-type="${{itemId}}"]`)?.value || "";
-      return CONTENT_TYPE_OPTIONS.includes(value) ? value : "";
+    function selectedManualTaxonomy(itemId, root = document) {{
+      const picker = root.querySelector(`[data-manual-taxonomy-picker="${{itemId}}"]`) || document.querySelector(`[data-manual-taxonomy-picker="${{itemId}}"]`);
+      const payload = {{ taxonomy_version: SCRIPT_TAXONOMY.version, taxonomy_source: "manual" }};
+      Object.keys(TAXONOMY_DIMENSION_META).forEach((dimension) => {{
+        const selected = picker ? Array.from(picker.querySelectorAll(`[data-manual-taxonomy="${{dimension}}"].active`)).map((button) => button.dataset.taxonomyId) : [];
+        if (dimension === "duration") payload.duration_bucket = selected[0] || "";
+        else payload[`${{dimension}}_tags`] = selected;
+      }});
+      return payload;
+    }}
+
+    function setTaxonomyFeedback(scope, message, kind = "") {{
+      const feedback = scope?.querySelector?.("[data-taxonomy-feedback]");
+      if (!feedback) return;
+      feedback.textContent = message;
+      feedback.className = `manual-taxonomy-feedback ${{kind}}`.trim();
     }}
 
     function localDateValue(date = new Date()) {{
@@ -14560,7 +14649,7 @@ def studio_html() -> str:
           replaceable_parts: replaceableParts,
           rows,
           target_language: root.getAttribute("data-editor-lang") || "zh",
-          content_type: selectedManualContentType(itemId, root),
+          ...selectedManualTaxonomy(itemId, root),
           ...selectedLibraryOptions(itemId),
         }};
         return payload;
@@ -14582,7 +14671,7 @@ def studio_html() -> str:
           replaceable_parts: parseInsightDraft(textOf("替换方案") || textOf("可替换部分")),
           rows: parseScriptRowsDraft(textOf("脚本表"), originalRows),
           target_language: root.getAttribute("data-editor-lang") || "zh",
-          content_type: selectedManualContentType(itemId, root),
+          ...selectedManualTaxonomy(itemId, root),
           ...selectedLibraryOptions(itemId),
       }};
     }}
@@ -14633,9 +14722,11 @@ def studio_html() -> str:
     async function persistItemEdits(itemId, mode, button) {{
       const payload = collectItemEdits(itemId);
       if (!payload) return;
+      const scope = button.closest("[data-editor-item]") || button.closest("[data-library-confirm-card]") || document;
       const original = button.textContent;
       button.disabled = true;
       button.textContent = mode === "library" ? "保存中..." : "更新中...";
+      setTaxonomyFeedback(scope, "正在保存脚本和新标签...");
       try {{
         const endpoint = mode === "library" ? `/api/items/${{itemId}}/save-to-library` : `/api/items/${{itemId}}/save`;
         const response = await fetch(endpoint, {{
@@ -14645,13 +14736,14 @@ def studio_html() -> str:
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Save failed");
+        setTaxonomyFeedback(scope, "标签已保存并同步到脚本库。", "success");
         if (activeJobId) {{
           pollJob(activeJobId);
         }} else {{
           window.location.reload();
         }}
       }} catch (error) {{
-        alert(String(error.message || error));
+        setTaxonomyFeedback(scope, `保存失败：${{String(error.message || error)}}`, "error");
         button.disabled = false;
         button.textContent = original;
       }}
@@ -14663,17 +14755,19 @@ def studio_html() -> str:
       button.disabled = true;
       button.textContent = "入库中...";
       const scope = button.closest("[data-library-confirm-card]") || document;
+      setTaxonomyFeedback(scope, "正在生成葡语版本并保存新标签...");
       try {{
         const response = await fetch(`/api/items/${{itemId}}/confirm-library`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
           body: JSON.stringify({{
-            content_type: selectedManualContentType(itemId, scope),
+            ...selectedManualTaxonomy(itemId, scope),
             ...selectedLibraryOptions(itemId, scope),
           }}),
         }});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Confirm library failed");
+        setTaxonomyFeedback(scope, "入库成功，新标签已生效。", "success");
         showToast("已入库", "这条脚本已进入脚本管理。");
         if (activeJobId) {{
           pollJob(activeJobId);
@@ -14681,7 +14775,7 @@ def studio_html() -> str:
           window.location.reload();
         }}
       }} catch (error) {{
-        alert(String(error.message || error));
+        setTaxonomyFeedback(scope, `入库失败：${{String(error.message || error)}}`, "error");
         button.disabled = false;
         button.textContent = original;
       }}
@@ -15906,6 +16000,20 @@ def studio_html() -> str:
     }}, true);
 
     document.addEventListener("click", (event) => {{
+      const taxonomyChip = event.target.closest("[data-manual-taxonomy]");
+      if (taxonomyChip) {{
+        event.preventDefault();
+        const picker = taxonomyChip.closest("[data-manual-taxonomy-picker]");
+        const dimension = taxonomyChip.dataset.manualTaxonomy || "";
+        if (dimension === "duration") {{
+          picker?.querySelectorAll('[data-manual-taxonomy="duration"]').forEach((button) => button.classList.remove("active"));
+          taxonomyChip.classList.add("active");
+        }} else {{
+          taxonomyChip.classList.toggle("active");
+        }}
+        setTaxonomyFeedback(picker, "标签已修改，保存或入库后生效。");
+        return;
+      }}
       const copyBtn = event.target.closest("[data-copy-text]");
       if (copyBtn) {{
         copyText(copyBtn.getAttribute("data-copy-text") || "", "任务 ID 已复制");
@@ -16840,9 +16948,9 @@ def creator_admin_html(initial_tab: str = "scripts", *, library_mode: bool = Fal
 
 .analytics-hour-detail{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:8px}}.analytics-detail-group{{display:grid;gap:8px;align-content:start;padding:10px;border:1px solid rgba(255,130,0,.12);border-radius:14px;background:#fffaf5}}.analytics-detail-group h4{{margin:0;font-size:13px;color:#99520f}}.analytics-person{{display:grid;gap:3px;padding:8px;border-radius:12px;background:#fff;border:1px solid rgba(31,41,55,.06)}}.analytics-person b{{color:#1f1f1f;font-size:13px}}.analytics-person small{{color:#6f737a;line-height:1.35;overflow-wrap:anywhere}}.analytics-hour-row details{{grid-column:1/-1;margin:0}}.analytics-hour-row summary{{font-size:13px}}@media(max-width:980px){{.analytics-hour-detail{{grid-template-columns:1fr 1fr}}}}@media(max-width:640px){{.analytics-hour-detail{{grid-template-columns:1fr}}}}
 
-.taxonomy-filters,.taxonomy-editor{{display:grid;gap:8px;margin:12px 0 16px}}.taxonomy-row{{display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px;align-items:start;padding:10px 0;border-bottom:1px solid rgba(255,130,0,.10)}}.taxonomy-row:last-child{{border-bottom:0}}.taxonomy-label{{display:inline-flex;align-items:center;justify-content:center;min-height:34px;border-radius:999px;background:#fff1e3;color:#ff6500;font-size:13px;font-weight:950}}.taxonomy-options{{display:flex;flex-wrap:wrap;gap:8px}}.taxonomy-chip{{min-height:34px;padding:6px 12px;border-radius:10px;font-size:13px;background:transparent;color:#6f737a;border:1px solid transparent}}.taxonomy-chip.active{{background:#ff8200;color:#fff;border-color:#ff8200}}.taxonomy-editor .taxonomy-chip{{border-color:rgba(255,130,0,.20);background:#fff}}.taxonomy-editor .taxonomy-chip.active{{background:#ff8200;color:#fff}}@media(max-width:640px){{.taxonomy-row{{grid-template-columns:1fr}}.taxonomy-label{{justify-self:start;padding:0 14px}}}
+.taxonomy-filters,.taxonomy-editor{{display:grid;gap:8px;margin:12px 0 16px}}.taxonomy-row{{display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px;align-items:start;padding:10px 0;border-bottom:1px solid rgba(255,130,0,.10)}}.taxonomy-row:last-child{{border-bottom:0}}.taxonomy-label{{display:inline-flex;align-items:center;justify-content:center;min-height:34px;border-radius:999px;background:#fff1e3;color:#ff6500;font-size:13px;font-weight:950}}.taxonomy-options{{display:flex;flex-wrap:wrap;gap:8px}}.taxonomy-chip{{min-height:34px;padding:6px 12px;border-radius:10px;font-size:13px;background:transparent;color:#6f737a;border:1px solid transparent}}.taxonomy-chip small{{margin-left:5px;opacity:.72}}.taxonomy-chip.active{{background:#ff8200;color:#fff;border-color:#ff8200}}.taxonomy-editor .taxonomy-chip{{border-color:rgba(255,130,0,.20);background:#fff}}.taxonomy-editor .taxonomy-chip.active{{background:#ff8200;color:#fff}}@media(max-width:640px){{.taxonomy-row{{grid-template-columns:1fr}}.taxonomy-label{{justify-self:start;padding:0 14px}}}
 </style></head><body><main id="app"></main>
-<div class="modal" id="edit-modal"><form class="modal-card wide" id="edit-form"><h2>修改脚本标签</h2><p class="copy" style="margin-bottom:14px">人物关系、形式、地点和内容均支持多选；时长根据视频长度归档，也可人工校正。</p><div id="script-taxonomy-editor" class="taxonomy-editor"></div><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存标签</button></div></form></div>
+<div class="modal" id="edit-modal"><form class="modal-card wide" id="edit-form"><h2>修改脚本标签</h2><p class="copy" style="margin-bottom:14px">人物关系、形式、地点和内容均支持多选；时长根据视频长度归档，也可人工校正。</p><div id="script-taxonomy-editor" class="taxonomy-editor"></div><p id="script-taxonomy-feedback" class="status" role="status"></p><div class="modal-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" id="script-taxonomy-save" type="submit">保存标签</button></div></form></div>
 <div class="modal" id="creator-modal"><form class="modal-card wide" id="creator-form"><h2>导入创作者</h2><p class="copy" style="margin-bottom:14px">粘贴 Kwai 作者主页，补充账号和标签后保存。资料抓取仍由后端处理。</p><div class="creator-modal-form"><input name="kwai_url" placeholder="Kwai 作者主页，例如 kwai.com/@CarlosDeiOficial"><input name="display_name" placeholder="作者名称"><input name="kwai_id" placeholder="Kwai ID"><input name="phone" placeholder="手机号/登录电话"><input name="uid" placeholder="UID"><select name="poc"><option value="">POC 待分配</option><option>denghaoqing</option><option>zhaozhe</option></select><select name="category"></select><select class="multi-select" name="identity" multiple><option>夫妻</option><option>情侣</option><option>家庭</option><option>朋友</option></select><select class="multi-select" name="location" multiple><option>家里</option><option>乡村</option><option>城市</option></select><select name="cooperation_level"><option>待标注</option><option>高</option><option>中</option><option>低</option><option>待观察</option></select><textarea name="creator_description" placeholder="具体作者描述：可手动输入作者风格、限制、偏好等"></textarea></div><p id="creator-form-status" class="status" style="margin:12px 0 0"></p><div class="modal-actions"><button type="button" id="creator-cancel">取消</button><button class="primary" type="submit">保存创作者</button></div></form></div><div class="modal" id="creator-tags-modal"><form class="modal-card wide" id="creator-tags-form" data-creator-tags=""><h2>编辑创作者标签</h2><p class="copy" style="margin-bottom:14px">身份和地点支持多选。保存后，详情页点击“查看推荐脚本”会按新标签重新计算。</p><div class="creator-modal-form"><input type="hidden" name="kwai_url"><input type="hidden" name="display_name"><input type="hidden" name="kwai_id"><input type="hidden" name="phone"><input type="hidden" name="uid"><select name="poc"></select><select name="category"></select><select class="multi-select" name="identity" multiple></select><select class="multi-select" name="location" multiple></select><select name="cooperation_level"></select><textarea name="creator_description" placeholder="具体作者描述：可手动输入作者风格、限制、偏好等"></textarea></div><div class="modal-actions"><button type="button" id="creator-tags-cancel">取消</button><button class="primary" type="submit">保存标签</button></div></form></div><script>
 const libraryMode=__LIBRARY_MODE__;const labels=["夫妻整蛊/冲突","夫妻暧昧","家庭整蛊","朋友整蛊"];const scriptTaxonomy=__SCRIPT_TAXONOMY__;const taxonomyDimensionMeta={{relationship:"人物关系",format:"形式",location:"地点",content:"内容",duration:"时间"}};const durationOptions=(scriptTaxonomy.dimensions.duration||[]).map(x=>[x.id,x.zh]);const locationOptions=(scriptTaxonomy.dimensions.location||[]).map(x=>x.zh);const creatorPocOptions=["denghaoqing","zhaozhe"];
 let entries=[];let creators=[];let creatorRows=[];let accounts=[];let submissions=[];let accessApplications=[];let submissionsTotal=0;let submissionsOffset=0;let submissionsLoading=false;let intakes=[];let analyticsData=null;let analyticsAutoLoaded=false;let analyticsInactiveLoaded=false;let analyticsLoading=false;let analyticsUserFilter="activated";let importJob=null;let importPollTimer=null;let activeTab=__INITIAL_TAB__;let activeScriptType="";let activeScriptDuration="";let activeScriptLocation="";let activeScriptScope="portal_visible";let activeCreatorPoc="";let creatorViewMode=localStorage.getItem("kokoCreatorAdminView")||"card";let creatorCloudState={{creators:{{}}}};let scriptScopeCounts={{portal_visible:0,hidden:0,incomplete:0,all:0}};let scriptVisibleLimit=20;let scriptIndex={{}};let scriptIndexLoaded=false;const SUBMISSIONS_PAGE_SIZE=80;const SCRIPT_INITIAL_RENDER_LIMIT=20;const SCRIPT_RENDER_INCREMENT=50;const CREATOR_PAGE_SIZE=18;const creatorPathMatch=location.pathname.match(/^\\/koko_admin_2026-kwai\\/creators\\/([0-9a-f]{{32}})$/);let creatorPage=1;let selectedCreatorId=(creatorPathMatch&&creatorPathMatch[1])||new URLSearchParams(location.search).get("creator")||"";let editing=null;const app=document.querySelector("#app");const modal=document.querySelector("#edit-modal");const form=document.querySelector("#edit-form");const creatorModal=document.querySelector("#creator-modal");const creatorForm=document.querySelector("#creator-form");const creatorTagsModal=document.querySelector("#creator-tags-modal");const creatorTagsForm=document.querySelector("#creator-tags-form");
@@ -17129,8 +17237,8 @@ async function deleteCreatorFeed(id,key){{const deleted=[...deletedFeedKeys(id),
 async function createCreator(e){{e.preventDefault();const submit=e.target.querySelector('button[type="submit"]');const modalStatus=document.querySelector("#creator-form-status");const pageStatus=document.querySelector("#status");const setMessage=(msg,isError=false)=>{{if(modalStatus){{modalStatus.textContent=msg;modalStatus.style.color=isError?"#c9481e":"#99520f"}}if(pageStatus)pageStatus.textContent=msg}};const fd=new FormData(e.target);const payload={{kwai_url:String(fd.get("kwai_url")||"").trim(),display_name:String(fd.get("display_name")||"").trim(),kwai_id:String(fd.get("kwai_id")||"").trim(),phone:String(fd.get("phone")||"").trim(),uid:String(fd.get("uid")||"").trim(),poc:fd.get("poc"),categories:fd.get("category")?[fd.get("category")]:[],creator_type:{{identity:selectedValues(e.target,"identity"),location:selectedValues(e.target,"location")}},identity:selectedValues(e.target,"identity"),location:selectedValues(e.target,"location"),cooperation_level:fd.get("cooperation_level"),creator_description:String(fd.get("creator_description")||"").trim()}};if(!payload.kwai_url){{setMessage("请先填写 Kwai 作者主页链接。",true);return}}try{{if(submit){{submit.disabled=true;submit.textContent="保存中..."}}setMessage("正在保存创作者并绑定账号...");const result=await api("/api/creator-admin/creators",{{method:"POST",body:JSON.stringify(payload)}});const saved=result.creator||{{}};e.target.reset();creatorModal.classList.remove("open");selectedCreatorId="";await loadCreators({{silent:true}});const savedId=String(saved.profile_id||"");const savedKwai=String(saved.kwai_id||payload.kwai_id||"").toLowerCase();const savedPhone=String(saved.phone||payload.phone||"").toLowerCase();const found=creatorRows.some(c=>String(c.profile_id||"")===savedId||(savedKwai&&String(c.kwai_id||"").toLowerCase()===savedKwai)||(savedPhone&&String(c.phone||"").toLowerCase()===savedPhone));setMessage(found?`创作者已导入：${{saved.name||payload.display_name||payload.kwai_id||payload.kwai_url}}`:`创作者已保存，但列表刷新较慢，请点“刷新”确认：${{saved.name||payload.display_name||payload.kwai_url}}`,!found);renderCreatorPocFilters();renderCreators()}}catch(err){{setMessage(err.message||String(err),true)}}finally{{if(submit){{submit.disabled=false;submit.textContent="保存创作者"}}}}}}
 async function createAccount(e){{e.preventDefault();const fd=new FormData(e.target);const status=document.querySelector("#status");status.textContent="正在创建账号...";try{{await api("/api/creator-admin/accounts",{{method:"POST",body:JSON.stringify({{account:fd.get("account"),display_name:fd.get("display_name")}})}});e.target.reset();await loadAccounts()}}catch(err){{status.textContent=err.message}}}}
 function renderTaxonomyEditor(){{const box=document.querySelector("#script-taxonomy-editor");if(!box||!editing)return;box.innerHTML=Object.entries(taxonomyDimensionMeta).map(([dimension,label])=>{{const selected=new Set(entryTaxonomyIds(editing,dimension));const options=scriptTaxonomy.dimensions[dimension]||[];return `<div class="taxonomy-row"><span class="taxonomy-label">${{label}}</span><div class="taxonomy-options">${{options.map(option=>`<button class="taxonomy-chip ${{selected.has(option.id)?"active":""}}" type="button" data-taxonomy-edit="${{dimension}}" data-taxonomy-id="${{esc(option.id)}}">${{esc(option.zh)}}<small>${{esc(option.pt)}}</small></button>`).join("")}}</div></div>`}}).join("")}}
-function openEdit(id){{editing=entries.find(e=>e.entry_id===id);if(!editing)return;renderTaxonomyEditor();modal.classList.add("open")}}
-async function saveEdit(ev){{ev.preventDefault();if(!editing)return;const payload={{taxonomy_version:scriptTaxonomy.version,taxonomy_source:"manual"}};for(const dimension of Object.keys(taxonomyDimensionMeta)){{const selected=[...form.querySelectorAll(`[data-taxonomy-edit="${{dimension}}"].active`)].map(button=>button.dataset.taxonomyId);if(dimension==="duration")payload.duration_bucket=selected[0]||"";else payload[`${{dimension}}_tags`]=selected}}const result=await api(`/api/library/${{editing.entry_id}}/taxonomy`,{{method:"POST",body:JSON.stringify(payload)}});const index=entries.findIndex(entry=>entry.entry_id===editing.entry_id);if(index>=0)entries[index]=result.entry||{{...entries[index],...payload}};modal.classList.remove("open");renderScriptTaxonomyFilters();renderList()}}
+function openEdit(id){{editing=entries.find(e=>e.entry_id===id);if(!editing)return;const feedback=document.querySelector("#script-taxonomy-feedback");if(feedback){{feedback.textContent="";feedback.style.color=""}}renderTaxonomyEditor();modal.classList.add("open")}}
+async function saveEdit(ev){{ev.preventDefault();if(!editing)return;const feedback=document.querySelector("#script-taxonomy-feedback");const saveButton=document.querySelector("#script-taxonomy-save");const originalText=saveButton?.textContent||"保存标签";const payload={{taxonomy_version:scriptTaxonomy.version,taxonomy_source:"manual"}};for(const dimension of Object.keys(taxonomyDimensionMeta)){{const selected=[...form.querySelectorAll(`[data-taxonomy-edit="${{dimension}}"].active`)].map(button=>button.dataset.taxonomyId);if(dimension==="duration")payload.duration_bucket=selected[0]||"";else payload[`${{dimension}}_tags`]=selected}}try{{if(saveButton){{saveButton.disabled=true;saveButton.textContent="保存中..."}}if(feedback){{feedback.textContent="正在保存并同步标签...";feedback.style.color="#99520f"}}const result=await api(`/api/library/${{editing.entry_id}}/taxonomy`,{{method:"POST",body:JSON.stringify(payload)}});const index=entries.findIndex(entry=>entry.entry_id===editing.entry_id);if(index>=0)entries[index]=result.entry||{{...entries[index],...payload}};renderScriptTaxonomyFilters();renderList();if(feedback){{feedback.textContent="保存成功，新标签已同步到脚本库。";feedback.style.color="#15803d"}}setTimeout(()=>modal.classList.remove("open"),650)}}catch(err){{if(feedback){{feedback.textContent=`保存失败：${{err.message||String(err)}}`;feedback.style.color="#c9481e"}}}}finally{{if(saveButton){{saveButton.disabled=false;saveButton.textContent=originalText}}}}}}
 async function togglePublish(id){{const e=entries.find(x=>x.entry_id===id);if(!e)return;await api(`/api/creator-admin/scripts/${{id}}`,{{method:"POST",body:JSON.stringify({{published:!e.published}})}});await loadEntries()}}
 async function bulkDelete(){{const ids=[...document.querySelectorAll("[data-pick]:checked")].map(x=>x.dataset.pick);if(!ids.length)return alert("请先选择脚本");if(!confirm(`确定从 Creator 运营后台删除 ${{ids.length}} 条脚本吗？`))return;await api("/api/creator-admin/bulk-delete",{{method:"POST",body:JSON.stringify({{entry_ids:ids}})}});await loadEntries()}}
 async function syncNow(){{const s=document.querySelector("#status");s.textContent="同步中...";const d=await api("/api/creator-admin/sync",{{method:"POST",body:"{}"}});await loadCurrentTab();alert(`Creator 已同步：${{d.entries_count||"-"}} 条脚本`)}}
@@ -17141,7 +17249,7 @@ document.addEventListener("dragleave",e=>{{const zone=e.target.closest("[data-re
 document.addEventListener("drop",e=>{{const zone=e.target.closest("[data-recommend-selected]");if(!zone)return;e.preventDefault();zone.classList.remove("is-over");const entryId=e.dataTransfer?.getData("text/plain")||"";const board=zone.closest("[data-creator-recommend-board]");const source=board?.querySelector(`[data-recommend-source] [data-entry-id="${{CSS.escape(entryId)}}"]`);if(source)addRecommendCardToSelected(source)}})
 document.addEventListener("click",async e=>{{const add=e.target.closest("[data-add-recommend-script]");if(add){{e.preventDefault();addRecommendCardToSelected(add.closest("[data-recommend-card]"));return}}const remove=e.target.closest("[data-remove-recommend-script]");if(remove){{e.preventDefault();const zone=remove.closest("[data-recommend-selected]");remove.closest("[data-recommend-card]")?.remove();if(zone&&!zone.querySelector("[data-recommend-card]"))zone.innerHTML=recommendSelectedEmpty();return}}const confirmFeeds=e.target.closest("[data-confirm-recommend-feeds]");if(confirmFeeds){{e.preventDefault();await confirmCreatorRecommendFeeds(confirmFeeds.dataset.confirmRecommendFeeds);return}}}})
 document.addEventListener("toggle",e=>{{const detail=e.target;if(!(detail instanceof HTMLDetailsElement)||!detail.dataset.creatorDetailKey)return;const key=detail.dataset.creatorDetailKey;if(detail.open)creatorOpenDetailKeys.add(key);else creatorOpenDetailKeys.delete(key);localStorage.setItem("kokoCreatorOpenDetails",JSON.stringify([...creatorOpenDetailKeys].slice(-240)))}},true);
-document.addEventListener("click",e=>{{const filter=e.target.closest("[data-taxonomy-filter]");if(filter){{e.preventDefault();const dimension=filter.dataset.taxonomyFilter;const id=filter.dataset.taxonomyId||"";const selected=activeScriptTaxonomy[dimension];if(!selected)return;if(!id)selected.clear();else if(selected.has(id))selected.delete(id);else selected.add(id);scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptTaxonomyFilters();renderList();return}}const editor=e.target.closest("[data-taxonomy-edit]");if(editor){{e.preventDefault();const dimension=editor.dataset.taxonomyEdit;if(dimension==="duration")form.querySelectorAll('[data-taxonomy-edit="duration"]').forEach(button=>button.classList.remove("active"));editor.classList.toggle("active");return}}}});
+document.addEventListener("click",e=>{{const filter=e.target.closest("[data-taxonomy-filter]");if(filter){{e.preventDefault();const dimension=filter.dataset.taxonomyFilter;const id=filter.dataset.taxonomyId||"";const selected=activeScriptTaxonomy[dimension];if(!selected)return;if(!id)selected.clear();else if(selected.has(id))selected.delete(id);else selected.add(id);scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptTaxonomyFilters();renderList();return}}const editor=e.target.closest("[data-taxonomy-edit]");if(editor){{e.preventDefault();const dimension=editor.dataset.taxonomyEdit;if(dimension==="duration")form.querySelectorAll('[data-taxonomy-edit="duration"]').forEach(button=>button.classList.remove("active"));editor.classList.toggle("active");const feedback=document.querySelector("#script-taxonomy-feedback");if(feedback){{feedback.textContent="标签已修改，点击保存后生效。";feedback.style.color="#99520f"}}return}}}});
 document.addEventListener("submit",async e=>{{const creatorTags=e.target.closest("[data-creator-tags]");if(creatorTags){{e.preventDefault();await saveCreatorTags(creatorTags);return}}if(e.target.id==="login-form"){{e.preventDefault();try{{await api("/koko_admin_2026-kwai/login",{{method:"POST",body:JSON.stringify({{password:new FormData(e.target).get("password")}})}});await loadCurrentTab()}}catch(err){{loginView(err.message)}}}}}});
 document.addEventListener("click",async e=>{{const tab=e.target.closest("[data-tab-main]");if(tab){{activeTab=tab.dataset.tabMain;if(activeTab==="creators"){{await loadCreators()}}else if(activeTab==="analytics"){{adminView();if(!analyticsAutoLoaded)setTimeout(()=>loadAnalytics(false),80)}}else if(activeTab==="accounts"){{await loadAccounts()}}else if(activeTab==="submissions"){{await loadSubmissions()}}else if(activeTab==="intakes"){{await loadIntakes()}}else adminView();return}}const exportDetails=e.target.closest("[data-export-creator-details]");if(exportDetails){{e.preventDefault();e.stopPropagation();downloadCreatorDetailCsv();return}}const tile=e.target.closest("[data-open-creator]");if(tile){{selectCreator(tile.dataset.openCreator);return}}const backCreators=e.target.closest("[data-back-creators]");if(backCreators){{backToCreatorList();return}}const pageBtn=e.target.closest("[data-creator-page]");if(pageBtn){{creatorPage+=pageBtn.dataset.creatorPage==="next"?1:-1;renderCreators();return}}const viewBtn=e.target.closest("[data-creator-view]");if(viewBtn){{creatorViewMode=viewBtn.dataset.creatorView||"card";localStorage.setItem("kokoCreatorAdminView",creatorViewMode);renderCreators();return}}const pocFilter=e.target.closest("[data-poc-filter]");if(pocFilter){{activeCreatorPoc=pocFilter.dataset.pocFilter||"";creatorPage=1;selectedCreatorId="";renderCreatorPocFilters();renderCreators();return}}const editCreator=e.target.closest("[data-edit-creator-tags]");if(editCreator){{openCreatorTags(editCreator.dataset.editCreatorTags);return}}const loadCreator=e.target.closest("[data-load-creator-scripts]");if(loadCreator){{await loadCreatorScripts(loadCreator.dataset.loadCreatorScripts);return}}const loadMoreCreator=e.target.closest("[data-load-more-creator-scripts]");if(loadMoreCreator){{await loadCreatorScripts(loadMoreCreator.dataset.loadMoreCreatorScripts,true);return}}const saveMetrics=e.target.closest("[data-save-creator-metrics]");if(saveMetrics){{await saveCreatorMetrics(saveMetrics.dataset.saveCreatorMetrics);return}}const saveFeeds=e.target.closest("[data-save-creator-feeds]");if(saveFeeds){{await saveCreatorFeeds(saveFeeds.dataset.saveCreatorFeeds);return}}const refreshFeedStats=e.target.closest("[data-refresh-feed-stats]");if(refreshFeedStats){{const id=refreshFeedStats.dataset.refreshFeedStats;const feeds=persistCreatorFeedDom(id);await saveCreatorCloudState(id,{{feeds}});await hydrateCreatorFeeds(id,false);renderCreators();const status=document.querySelector("#status");if(status)status.textContent="统计已保存到服务端并刷新，作者卡片数据已同步。";return}}const deleteFeed=e.target.closest("[data-delete-feed]");if(deleteFeed){{if(confirm("确定删除这条投喂/回传记录吗？"))await deleteCreatorFeed(deleteFeed.dataset.deleteFeedCreator,deleteFeed.dataset.deleteFeed);return}}const moreSubmissions=e.target.closest("[data-load-more-submissions]");if(moreSubmissions){{await loadSubmissions(true);return}}const moreScripts=e.target.closest("[data-load-more-scripts]");if(moreScripts){{scriptVisibleLimit+=SCRIPT_RENDER_INCREMENT;renderList();return}}const scopeFilter=e.target.closest("[data-scope-filter]");if(scopeFilter){{activeScriptScope=scopeFilter.dataset.scopeFilter||"portal_visible";activeScriptType="";activeScriptDuration="";activeScriptLocation="";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;await loadEntries();return}}const typeFilter=e.target.closest("[data-type-filter]");if(typeFilter){{activeScriptType=typeFilter.dataset.typeFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptTypeFilters();renderList();return}}const durationFilter=e.target.closest("[data-duration-filter]");if(durationFilter){{activeScriptDuration=durationFilter.dataset.durationFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptDurationFilters();renderList();return}}const locationFilter=e.target.closest("[data-location-filter]");if(locationFilter){{activeScriptLocation=locationFilter.dataset.locationFilter||"";scriptVisibleLimit=SCRIPT_INITIAL_RENDER_LIMIT;renderScriptLocationFilters();renderList();return}}const copy=e.target.closest("[data-copy]");if(copy){{await navigator.clipboard?.writeText(copy.dataset.copy).catch(()=>null);copy.textContent="已复制";return}}const scriptEdit=e.target.closest("[data-script-edit]");if(scriptEdit){{location.assign(`/studio?library_entry=${{encodeURIComponent(scriptEdit.dataset.scriptEdit)}}#split-panel`);return}}const delCreator=e.target.closest("[data-delete-creator]");if(delCreator){{if(confirm("确定删除这个创作者吗？")){{await api(`/api/creator-admin/creators/${{delCreator.dataset.deleteCreator}}`,{{method:"DELETE"}});selectedCreatorId="";await loadCreators()}}return}}const refresh=e.target.closest("[data-refresh-creator]");if(refresh){{const c=creators.find(x=>x.profile_id===refresh.dataset.refreshCreator);if(c){{await api(`/api/creator-admin/creators/${{c.profile_id}}`,{{method:"POST",body:JSON.stringify({{kwai_url:c.kwai_url,categories:c.categories||[],poc:creatorPocValue(c)}})}});await loadCreators()}}return}}const edit=e.target.closest("[data-edit]");if(edit)openEdit(edit.dataset.edit);const toggle=e.target.closest("[data-toggle]");if(toggle)togglePublish(toggle.dataset.toggle)}});document.addEventListener("change",async e=>{{const status=e.target.closest("[data-feed-status]");const date=e.target.closest("[data-feed-date]");const ret=e.target.closest("[data-feed-return-url]");const retTime=e.target.closest("[data-feed-return-time]");if(status||date||ret||retTime){{const target=status||date||ret||retTime;const id=selectedCreatorId;const entry=target.dataset.feedStatus||target.dataset.feedDate||target.dataset.feedReturnUrl||target.dataset.feedReturnTime;if(id&&entry)await updateCreatorFeed(id,entry,status?{{status:target.value}}:date?{{date:target.value,feed_time:target.value}}:ret?{{return_url:target.value}}:{{return_time:target.value}})}}});window.addEventListener("popstate",()=>{{const match=location.pathname.match(/^\\/koko_admin_2026-kwai\\/creators\\/([0-9a-f]{{32}})$/);selectedCreatorId=(match&&match[1])||"";renderCreators()}});document.querySelector("#edit-cancel").addEventListener("click",()=>modal.classList.remove("open"));document.querySelector("#creator-cancel").addEventListener("click",()=>creatorModal.classList.remove("open"));document.querySelector("#creator-tags-cancel").addEventListener("click",()=>creatorTagsModal.classList.remove("open"));form.addEventListener("submit",saveEdit);creatorForm.addEventListener("submit",createCreator);window.addEventListener("focus",refreshCreatorAdminSilently);document.addEventListener("visibilitychange",()=>{if(!document.hidden)refreshCreatorAdminSilently()});startCreatorRealtime();loadCurrentTab();
 </script></body></html>"""
@@ -19101,6 +19209,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     apply_manual_item_content_type(parent_job_id, item_index, payload.get("content_type"))
+                    apply_manual_item_taxonomy(parent_job_id, item_index, payload)
                     apply_item_library_options(parent_job_id, item_index, payload)
                     refreshed_context = find_item_context(item_id)
                     if not refreshed_context:
@@ -19135,6 +19244,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 target_language = str(payload.get("target_language") or item.get("display_language") or "zh").strip().lower()
                 updated_script = apply_script_edits(item.get("result_json") or {}, payload)
                 apply_manual_item_content_type(parent_job_id, item_index, payload.get("content_type"))
+                apply_manual_item_taxonomy(parent_job_id, item_index, payload)
                 apply_item_library_options(parent_job_id, item_index, payload)
                 refreshed_context = find_item_context(item_id)
                 if not refreshed_context:

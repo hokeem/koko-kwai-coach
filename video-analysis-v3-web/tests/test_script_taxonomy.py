@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 WEB_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,74 @@ class ScriptTaxonomyTests(unittest.TestCase):
         self.assertEqual(entry["format_tags"], [])
         self.assertEqual(entry["location_tags"], [])
         self.assertEqual(entry["content_tags"], [])
+
+    def test_manual_empty_dimensions_are_not_repopulated_by_llm(self) -> None:
+        entry = {
+            "relationship_tags": ["couple"],
+            "format_tags": [],
+            "location_tags": [],
+            "content_tags": [],
+            "duration_bucket": "dur_20_60",
+            "taxonomy_source": "manual",
+        }
+        classified = {
+            "relationship_tags": ["family"],
+            "format_tags": ["story_acting"],
+            "location_tags": ["home"],
+            "content_tags": ["prank"],
+            "taxonomy_source": "llm",
+        }
+
+        with mock.patch.object(app, "classify_script_taxonomy_with_llm", return_value=classified):
+            app.apply_script_taxonomy_classification(entry, {}, {}, use_llm=True)
+
+        self.assertEqual(entry["relationship_tags"], ["couple"])
+        self.assertEqual(entry["format_tags"], [])
+        self.assertEqual(entry["location_tags"], [])
+        self.assertEqual(entry["content_tags"], [])
+        self.assertEqual(entry["taxonomy_source"], "manual")
+
+    def test_studio_uses_taxonomy_v2_manual_editor(self) -> None:
+        markup = app.studio_html()
+        self.assertIn('data-manual-taxonomy="${dimension}"', markup)
+        self.assertIn('relationship: "人物关系"', markup)
+        self.assertIn('duration: "时间"', markup)
+        self.assertIn("标签已修改，保存或入库后生效", markup)
+        self.assertNotIn("data-manual-content-type", markup)
+
+    def test_script_admin_has_save_feedback(self) -> None:
+        markup = app.creator_admin_html("scripts", library_mode=True)
+        self.assertIn('id="script-taxonomy-feedback"', markup)
+        self.assertIn("保存成功，新标签已同步到脚本库", markup)
+
+    def test_manual_item_taxonomy_updates_all_dimensions(self) -> None:
+        job_id = "test-job"
+        original_jobs = app.jobs
+        app.jobs = {
+            job_id: {
+                "id": job_id,
+                "items": [{"id": "item-1", "status": "completed"}],
+            }
+        }
+        try:
+            with mock.patch.object(app, "save_jobs"):
+                app.apply_manual_item_taxonomy(
+                    job_id,
+                    0,
+                    {
+                        "relationship_tags": ["couple"],
+                        "format_tags": ["story_acting", "multi_role"],
+                        "location_tags": ["home"],
+                        "content_tags": ["prank"],
+                        "duration_bucket": "dur_1_20",
+                    },
+                )
+            item = app.jobs[job_id]["items"][0]
+            self.assertEqual(item["format_tags"], ["story_acting", "multi_role"])
+            self.assertEqual(item["duration_bucket"], "dur_1_20")
+            self.assertEqual(item["taxonomy_source"], "manual")
+        finally:
+            app.jobs = original_jobs
 
 
 if __name__ == "__main__":
