@@ -24,7 +24,11 @@ DEFAULT_CREATORS = [
     "camargoevelin",
     "nossaloucuraaoficial",
     "guipolemicoo",
+    "edsontheodoro1",
 ]
+CREATOR_FORMAT_TAGS = {
+    "edsontheodoro1": ["一人分饰多角"],
+}
 DEFAULT_ACTOR_ID = "clockworks~tiktok-profile-scraper"
 VALID_DECISIONS = {"pending", "selected", "rejected"}
 
@@ -193,6 +197,7 @@ def normalize_apify_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "creator_username": username,
         "creator_name": str(nested_value(item, "authorMeta.nickName", "authorMeta.nickname", "author.nickname") or username),
         "creator_avatar_url": str(nested_value(item, "authorMeta.avatar", "author.avatarThumb", "author.avatar") or ""),
+        "creator_tags": list(CREATOR_FORMAT_TAGS.get(username, [])),
         "post_id": str(post_id),
         "caption": caption,
         "hashtags": hashtags,
@@ -261,6 +266,7 @@ class ContentRadar:
         return {
             "ok": True,
             "creators": self.creators,
+            "creator_tags": {username: list(CREATOR_FORMAT_TAGS.get(username, [])) for username in self.creators},
             "posts": posts,
             "last_run": state.get("last_run"),
             "runs": (state.get("runs") or [])[:10],

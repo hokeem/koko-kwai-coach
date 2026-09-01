@@ -51,6 +51,16 @@ class ContentRadarTests(unittest.TestCase):
         self.assertEqual(post["metrics"]["views"], 120_000)
         self.assertEqual(post["hashtags"], ["casal"])
 
+    def test_known_multi_role_creator_gets_format_tag(self):
+        post = normalize_apify_item({
+            "id": "7512345",
+            "text": "Tipos de pessoas em casa",
+            "authorMeta": {"name": "edsontheodoro1"},
+            "videoMeta": {"duration": 29},
+        })
+        self.assertIsNotNone(post)
+        self.assertEqual(post["creator_tags"], ["一人分饰多角"])
+
     def test_human_decision_persists_when_metadata_refreshes(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "state.json"
