@@ -19010,6 +19010,31 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "post": post})
             return
+        if parsed.path == "/api/content-radar/search":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+                raw_queries = payload.get("queries") or []
+                if not isinstance(raw_queries, list):
+                    raise ValueError("queries 必须是数组")
+                result = content_radar.search_tiktok(
+                    [str(value or "") for value in raw_queries],
+                    limit_per_query=int(payload.get("limit_per_query") or 15),
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except Exception as exc:
+                log_runtime_warning("content_radar_search_failed", "Content Radar keyword search failed.", error=str(exc))
+                self.send_json({"error": friendly_error(str(exc))}, status=502)
+                return
+            self.send_json(result)
+            return
         if parsed.path == "/api/agent/v1/video-analysis":
             if not self.require_agent_api():
                 return

@@ -313,6 +313,58 @@ class ContentRadar:
             raise RuntimeError("Apify 返回格式异常")
         return result
 
+    def search_tiktok(self, queries: list[str], *, limit_per_query: int = 15) -> dict[str, Any]:
+        """Run a bounded TikTok keyword search without changing the daily feed."""
+        cleaned = [str(query or "").strip()[:180] for query in queries if str(query or "").strip()][:6]
+        if not cleaned:
+            raise ValueError("至少需要一个搜索词")
+        limit_per_query = max(1, min(25, int(limit_per_query)))
+        token = os.environ.get("APIFY_TOKEN", "").strip()
+        if not token:
+            raise RuntimeError("服务尚未配置 APIFY_TOKEN")
+        actor = urllib.parse.quote("clockworks~tiktok-scraper", safe="~")
+        url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items?{urllib.parse.urlencode({'token': token})}"
+        payload = {
+            "searchQueries": cleaned,
+            "searchSection": "/video",
+            "videoSearchSorting": "MOST_RELEVANT",
+            "videoSearchDateFilter": "ALL_TIME",
+            "resultsPerPage": limit_per_query,
+            "shouldDownloadVideos": False,
+            "shouldDownloadCovers": False,
+            "shouldDownloadSubtitles": False,
+            "shouldDownloadSlideshowImages": False,
+        }
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                raw_items = json.load(response)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            raise RuntimeError(f"Apify HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"无法连接 Apify：{exc.reason}") from exc
+        if not isinstance(raw_items, list):
+            raise RuntimeError("Apify 返回格式异常")
+        posts = [post for item in raw_items if (post := normalize_apify_item(item)) is not None]
+        unique: dict[str, dict[str, Any]] = {}
+        for post in posts:
+            unique[post["id"]] = post
+        ranked = list(unique.values())
+        ranked.sort(
+            key=lambda post: (
+                number((post.get("analysis") or {}).get("score")),
+                number((post.get("metrics") or {}).get("views")),
+            ),
+            reverse=True,
+        )
+        return {"ok": True, "queries": cleaned, "posts": ranked, "raw_count": len(raw_items)}
+
     def refresh(self, *, reason: str = "manual") -> dict[str, Any]:
         if not self.refresh_lock.acquire(blocking=False):
             return {"ok": True, "started": False, "message": "采集正在进行中"}
