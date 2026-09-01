@@ -35,6 +35,8 @@ from typing import Any
 from uuid import uuid4
 from PIL import Image, ImageDraw
 
+from content_radar import ContentRadar
+
 
 PORT = int(os.environ.get("PORT", 8310))
 PIPELINE_TIMEOUT_SEC = int(os.environ.get("VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC", "720"))
@@ -160,6 +162,8 @@ KWAI_FAVICON = ASSETS_ROOT / "kwai-favicon.svg"
 STUDIO_HERO_VIDEO = ASSETS_ROOT / "studio-hero-video.png"
 STUDIO_TITLE_ART = ASSETS_ROOT / "studio-title-art.png"
 STUDIO_HERO_BANNER_SHALLOW = ASSETS_ROOT / "studio-hero-banner-shallow.png"
+CONTENT_RADAR_HTML = BASE / "content-radar.html"
+CONTENT_RADAR_STATE_FILE = DATA_ROOT / "content_radar_state.json"
 FAVICON_LINKS = """<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=kwai1">
   <link rel="shortcut icon" href="/favicon.ico?v=kwai1">"""
 
@@ -405,6 +409,9 @@ def log_runtime_info(event: str, message: str, **extra: Any) -> None:
         print(json.dumps(payload, ensure_ascii=False))
     except Exception:
         print(f"[info] {event}: {message}")
+
+
+content_radar = ContentRadar(CONTENT_RADAR_STATE_FILE, logger=log_runtime_warning)
 
 
 def best_timestamp_from_values(*values: object) -> datetime | None:
@@ -18427,6 +18434,18 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in {"/content-radar", "/content-radar/"}:
+            if not CONTENT_RADAR_HTML.exists():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_file(CONTENT_RADAR_HTML)
+            return
+        if parsed.path == "/api/content-radar":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            self.send_json(content_radar.snapshot())
+            return
         if parsed.path == "/api/agent/v1":
             if not self.require_agent_api():
                 return
@@ -18953,6 +18972,34 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/content-radar/refresh":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            self.send_json(content_radar.trigger_refresh(reason="manual"), status=202)
+            return
+        if parsed.path == "/api/content-radar/decision":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+                post = content_radar.set_decision(
+                    str(payload.get("post_id") or "").strip(),
+                    str(payload.get("decision") or "").strip(),
+                    str(payload.get("note") or ""),
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except KeyError:
+                self.send_json({"error": "视频记录不存在。"}, status=404)
+                return
+            self.send_json({"ok": True, "post": post})
+            return
         if parsed.path == "/api/agent/v1/video-analysis":
             if not self.require_agent_api():
                 return
@@ -19685,6 +19732,7 @@ def main() -> int:
     start_translation_workers()
     start_watchdog()
     start_resource_janitor()
+    content_radar.start_scheduler()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AppHandler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT), "skill_root": str(SKILL_ROOT)}, ensure_ascii=False))
     try:
