@@ -11734,35 +11734,49 @@ def studio_html() -> str:
     }}
     .manual-tag-picker {{
       display: grid;
-      gap: 10px;
-      width: min(760px, 100%);
-      padding: 12px;
+      gap: 4px;
+      width: 100%;
+      padding: 12px 14px;
       border: 1px solid rgba(255,130,0,.18);
       border-radius: 14px;
       background: rgba(255,255,255,.82);
     }}
-    .manual-tag-heading {{ color: var(--ink); font-size: 13px; font-weight: 900; }}
-    .manual-taxonomy-row {{ display: grid; grid-template-columns: 76px minmax(0,1fr); gap: 10px; align-items: start; }}
-    .manual-taxonomy-label {{ color: var(--muted); font-size: 12px; font-weight: 850; padding-top: 8px; }}
-    .manual-taxonomy-options {{ display: flex; flex-wrap: wrap; gap: 7px; }}
+    .manual-tag-heading {{ color: var(--ink); font-size: 13px; font-weight: 900; margin-bottom: 3px; }}
+    .manual-taxonomy-row {{
+      display: grid;
+      grid-template-columns: 72px minmax(0,1fr);
+      gap: 10px;
+      align-items: start;
+      padding: 5px 0;
+      border-top: 1px solid rgba(255,130,0,.08);
+    }}
+    .manual-taxonomy-label {{ color: var(--muted); font-size: 12px; font-weight: 850; line-height: 30px; }}
+    .manual-taxonomy-options {{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }}
     .manual-taxonomy-chip {{
-      min-height: 34px;
+      width: auto;
+      min-width: 0;
+      min-height: 30px;
+      flex: 0 0 auto;
       border: 1px solid rgba(255,130,0,.22);
-      border-radius: 10px;
+      border-radius: 8px;
       background: #fff;
       color: #805329;
-      padding: 6px 11px;
+      padding: 5px 10px;
       font-size: 12px;
       font-weight: 850;
       cursor: pointer;
+      box-shadow: none;
+      line-height: 1.25;
     }}
     .manual-taxonomy-chip.active {{ border-color: var(--brand); background: var(--brand); color: #fff; }}
-    .manual-taxonomy-feedback {{ min-height: 18px; color: #8a5b2f; font-size: 12px; font-weight: 750; }}
+    .manual-taxonomy-chip:hover {{ transform: none; box-shadow: none; filter: none; border-color: rgba(255,130,0,.55); }}
+    .manual-taxonomy-feedback {{ min-height: 18px; margin-top: 3px; color: #8a5b2f; font-size: 12px; font-weight: 750; }}
     .manual-taxonomy-feedback.success {{ color: var(--ok); }}
     .manual-taxonomy-feedback.error {{ color: var(--err); }}
     @media (max-width: 620px) {{
-      .manual-taxonomy-row {{ grid-template-columns: 1fr; gap: 5px; }}
-      .manual-taxonomy-label {{ padding-top: 0; }}
+      .manual-tag-picker {{ padding: 10px; }}
+      .manual-taxonomy-row {{ grid-template-columns: 1fr; gap: 3px; }}
+      .manual-taxonomy-label {{ line-height: 22px; }}
     }}
     .library-options {{
       display: grid;

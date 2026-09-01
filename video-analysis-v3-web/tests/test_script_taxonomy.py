@@ -105,6 +105,7 @@ class ScriptTaxonomyTests(unittest.TestCase):
         self.assertIn('relationship: "人物关系"', markup)
         self.assertIn('duration: "时间"', markup)
         self.assertIn("标签已修改，保存或入库后生效", markup)
+        self.assertIn(".manual-taxonomy-chip {\n      width: auto;", markup)
         self.assertNotIn("data-manual-content-type", markup)
 
     def test_script_admin_has_save_feedback(self) -> None:
