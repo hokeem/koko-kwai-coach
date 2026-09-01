@@ -107,11 +107,52 @@ class ScriptTaxonomyTests(unittest.TestCase):
         self.assertIn("标签已修改，保存或入库后生效", markup)
         self.assertIn(".manual-taxonomy-chip {\n      width: auto;", markup)
         self.assertNotIn("data-manual-content-type", markup)
+        self.assertIn("data-manual-telekwai", markup)
+        self.assertIn("Telekwai 脚本已隔离", markup)
 
     def test_script_admin_has_save_feedback(self) -> None:
         markup = app.creator_admin_html("scripts", library_mode=True)
         self.assertIn('id="script-taxonomy-feedback"', markup)
         self.assertIn("保存成功，新标签已同步到脚本库", markup)
+        self.assertIn('key:"telekwai",label:"Telekwai"', markup)
+        self.assertIn("data-telekwai-edit", markup)
+
+    def test_telekwai_is_exclusive_and_unpublished(self) -> None:
+        entry = {
+            "telekwai": True,
+            "published": True,
+            "relationship_tags": ["couple"],
+            "format_tags": ["story_acting"],
+            "location_tags": ["home"],
+            "content_tags": ["prank"],
+            "duration_bucket": "dur_20_60",
+        }
+
+        app.ensure_script_taxonomy_fields(entry, source="test")
+
+        self.assertTrue(entry["telekwai"])
+        self.assertEqual(entry["script_type"], "telekwai")
+        self.assertFalse(entry["published"])
+        self.assertEqual(entry["duration_bucket"], "")
+        for dimension in app.SCRIPT_TAG_DIMENSIONS:
+            self.assertEqual(entry[f"{dimension}_tags"], [])
+
+    def test_agent_job_can_create_telekwai_without_taxonomy(self) -> None:
+        with mock.patch.object(app, "ensure_capacity_for_new_job"), mock.patch.object(app, "save_jobs"), mock.patch.object(app, "enqueue_job"):
+            created = app.create_job(
+                ["https://example.com/video"],
+                source="agent_api",
+                telekwai=True,
+                taxonomy_tags={"relationship": ["couple"]},
+            )
+        try:
+            item = app.jobs[created["id"]]["items"][0]
+            self.assertTrue(item["telekwai"])
+            self.assertEqual(item["script_type"], "telekwai")
+            self.assertFalse(item["published"])
+            self.assertEqual(item["relationship_tags"], [])
+        finally:
+            app.jobs.pop(created["id"], None)
 
     def test_manual_item_taxonomy_updates_all_dimensions(self) -> None:
         job_id = "test-job"
@@ -139,6 +180,25 @@ class ScriptTaxonomyTests(unittest.TestCase):
             self.assertEqual(item["format_tags"], ["story_acting", "multi_role"])
             self.assertEqual(item["duration_bucket"], "dur_1_20")
             self.assertEqual(item["taxonomy_source"], "manual")
+        finally:
+            app.jobs = original_jobs
+
+    def test_manual_item_telekwai_clears_other_tags(self) -> None:
+        job_id = "test-telekwai-job"
+        original_jobs = app.jobs
+        app.jobs = {
+            job_id: {
+                "id": job_id,
+                "items": [{"id": "item-1", "status": "completed", "relationship_tags": ["couple"]}],
+            }
+        }
+        try:
+            with mock.patch.object(app, "save_jobs"):
+                app.apply_manual_item_taxonomy(job_id, 0, {"telekwai": True})
+            item = app.jobs[job_id]["items"][0]
+            self.assertTrue(item["telekwai"])
+            self.assertEqual(item["relationship_tags"], [])
+            self.assertFalse(item["published"])
         finally:
             app.jobs = original_jobs
 
