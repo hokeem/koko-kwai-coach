@@ -76,6 +76,12 @@ class ContentRadarTests(unittest.TestCase):
             self.assertEqual(saved["posts"]["tiktok:1"]["decision"], "selected")
             self.assertEqual(saved["posts"]["tiktok:1"]["operator_note"], "适合翻拍")
 
+    def test_daily_collection_is_paused_by_default(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            self.assertFalse(radar.daily_enabled)
+            self.assertFalse(radar.snapshot()["daily_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

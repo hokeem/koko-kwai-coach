@@ -230,6 +230,7 @@ class ContentRadar:
         self.actor_id = os.environ.get("APIFY_TIKTOK_ACTOR_ID", DEFAULT_ACTOR_ID).strip() or DEFAULT_ACTOR_ID
         self.timezone_name = os.environ.get("CONTENT_RADAR_TIMEZONE", "Asia/Shanghai")
         self.daily_hour = max(0, min(23, int(os.environ.get("CONTENT_RADAR_DAILY_HOUR", "8"))))
+        self.daily_enabled = str(os.environ.get("CONTENT_RADAR_DAILY_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
     def _default_state(self) -> dict[str, Any]:
         return {"version": 1, "posts": {}, "runs": [], "last_run": None}
@@ -274,6 +275,7 @@ class ContentRadar:
             "counts": counts,
             "timezone": self.timezone_name,
             "daily_hour": self.daily_hour,
+            "daily_enabled": self.daily_enabled,
             "ranking_note": "匹配分基于标题、标签、时长和互动量，仅用于运营初筛；最终判断需打开原视频确认。",
         }
 
@@ -519,4 +521,6 @@ class ContentRadar:
             time.sleep(600)
 
     def start_scheduler(self) -> None:
+        if not self.daily_enabled:
+            return
         threading.Thread(target=self.scheduler_loop, name="content-radar-scheduler", daemon=True).start()
