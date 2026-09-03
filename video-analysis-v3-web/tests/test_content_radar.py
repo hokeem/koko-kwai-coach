@@ -11,7 +11,7 @@ WEB_ROOT = Path(__file__).resolve().parents[1]
 if str(WEB_ROOT) not in sys.path:
     sys.path.insert(0, str(WEB_ROOT))
 
-from content_radar import ContentRadar, metadata_analysis, normalize_apify_item
+from content_radar import ContentRadar, metadata_analysis, normalize_apify_item, verify_refresh_password
 
 
 class ContentRadarTests(unittest.TestCase):
@@ -139,6 +139,15 @@ class ContentRadarTests(unittest.TestCase):
             selected = next(post for post in radar.snapshot()["posts"] if post["id"] == "tiktok:7675481187808300319")
             self.assertEqual(selected["decision"], "selected")
 
+    def test_refresh_password_is_checked_against_configured_hash(self):
+        import hashlib
+
+        test_hash = hashlib.sha256(b"test-secret").hexdigest()
+        with patch.dict(os.environ, {"CONTENT_RADAR_REFRESH_PASSWORD_SHA256": test_hash}):
+            self.assertTrue(verify_refresh_password("test-secret"))
+            self.assertFalse(verify_refresh_password(""))
+            self.assertFalse(verify_refresh_password("wrong"))
+
     def test_dashboard_defers_single_player_until_cover_click(self):
         html = (WEB_ROOT / "content-radar.html").read_text(encoding="utf-8")
         self.assertIn('class="cover-image"', html)
@@ -148,6 +157,15 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn("autoplay=1", html)
         self.assertNotIn("IntersectionObserver", html)
         self.assertNotIn('target="_blank"', html)
+
+    def test_dashboard_shows_fetch_date_and_protected_fetch_controls(self):
+        html = (WEB_ROOT / "content-radar.html").read_text(encoding="utf-8")
+        self.assertIn("post.fetched_at", html)
+        self.assertIn('id="refresh-auth-form"', html)
+        self.assertIn('id="refresh-password"', html)
+        self.assertIn("复制今年全部链接", html)
+        self.assertIn("已完成", html)
+        self.assertNotIn("kokokwai" + "@2026", html)
 
     def test_thumbnail_cache_saves_a_stable_local_cover(self):
         with tempfile.TemporaryDirectory() as folder:

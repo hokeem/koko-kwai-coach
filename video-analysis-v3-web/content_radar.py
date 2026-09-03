@@ -2,6 +2,8 @@
 """Manual TikTok keyword discovery and lightweight human review."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -36,6 +38,7 @@ DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
 VALID_DECISIONS = {"pending", "selected", "rejected"}
 CURATED_BATCH_ID = "2026-09-03-apify-tiktok-shortlist"
 CURATED_DATASET_ID = "v09ZyrDkrBEaovxOL"
+DEFAULT_REFRESH_PASSWORD_SHA256 = "65fea9f52c567036ccee405d09f214764054fe64c451b0b4d7f30afdd49a77e4"
 CURATED_TIKTOK_POSTS = [
     ("texasbaz", 36_800_000, "7675481187808300319"),
     ("chris978462", 14_800_000, "7676058284406754590"),
@@ -66,6 +69,12 @@ def utc_now() -> datetime:
 
 def iso_now() -> str:
     return utc_now().isoformat().replace("+00:00", "Z")
+
+
+def verify_refresh_password(value: str) -> bool:
+    expected = os.environ.get("CONTENT_RADAR_REFRESH_PASSWORD_SHA256", DEFAULT_REFRESH_PASSWORD_SHA256).strip().lower()
+    candidate = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+    return bool(value) and hmac.compare_digest(candidate, expected)
 
 
 def clean_username(value: str) -> str:
@@ -404,6 +413,7 @@ class ContentRadar:
                 fresh["operator_note"] = previous.get("operator_note", "")
                 fresh["decision_updated_at"] = previous.get("decision_updated_at", "")
                 fresh["first_seen_at"] = previous.get("first_seen_at") or "2026-09-03T00:00:00Z"
+                fresh["fetched_at"] = previous.get("fetched_at") or fresh.get("fetched_at") or "2026-09-03T00:00:00Z"
                 cached = self.cached_cover_url(fresh["post_id"])
                 if cached:
                     fresh["thumbnail_url"] = cached

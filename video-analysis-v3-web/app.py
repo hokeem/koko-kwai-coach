@@ -35,7 +35,7 @@ from typing import Any
 from uuid import uuid4
 from PIL import Image, ImageDraw
 
-from content_radar import ContentRadar
+from content_radar import ContentRadar, verify_refresh_password
 
 
 PORT = int(os.environ.get("PORT", 8310))
@@ -19031,6 +19031,14 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/content-radar/refresh":
             if not has_creator_admin_access(self):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            if not verify_refresh_password(str(payload.get("password") or "")):
+                self.send_json({"error": "抓取密码错误。"}, status=403)
                 return
             self.send_json(content_radar.trigger_refresh(reason="manual"), status=202)
             return
