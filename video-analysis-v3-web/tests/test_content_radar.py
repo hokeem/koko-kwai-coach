@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 WEB_ROOT = Path(__file__).resolve().parents[1]
@@ -51,15 +52,27 @@ class ContentRadarTests(unittest.TestCase):
         self.assertEqual(post["metrics"]["views"], 120_000)
         self.assertEqual(post["hashtags"], ["casal"])
 
-    def test_known_multi_role_creator_gets_format_tag(self):
+    def test_normalizes_coregent_keyword_result(self):
         post = normalize_apify_item({
-            "id": "7512345",
-            "text": "Tipos de pessoas em casa",
-            "authorMeta": {"name": "edsontheodoro1"},
-            "videoMeta": {"duration": 29},
+            "videoId": "7512345",
+            "caption": "Funny couple prank at home",
+            "authorUniqueId": "homecouple",
+            "authorNickname": "Home Couple",
+            "coverUrl": "https://example.com/cover.jpg",
+            "videoUrl": "https://www.tiktok.com/@homecouple/video/7512345",
+            "duration": 29,
+            "views": 1_500_000,
+            "likes": 120_000,
+            "comments": 1_200,
+            "shares": 4_500,
+            "keyword": "couple prank",
         })
         self.assertIsNotNone(post)
-        self.assertEqual(post["creator_tags"], ["一人分饰多角"])
+        self.assertEqual(post["id"], "tiktok:7512345")
+        self.assertEqual(post["creator_username"], "homecouple")
+        self.assertEqual(post["metrics"]["views"], 1_500_000)
+        self.assertEqual(post["matched_keyword"], "couple prank")
+        self.assertEqual(post["discovery_mode"], "keyword")
 
     def test_human_decision_persists_when_metadata_refreshes(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -78,9 +91,39 @@ class ContentRadarTests(unittest.TestCase):
 
     def test_daily_collection_is_paused_by_default(self):
         with tempfile.TemporaryDirectory() as folder:
-            radar = ContentRadar(Path(folder) / "state.json")
+            with patch.dict(os.environ, {"CONTENT_RADAR_DAILY_ENABLED": "1"}):
+                radar = ContentRadar(Path(folder) / "state.json")
             self.assertFalse(radar.daily_enabled)
             self.assertFalse(radar.snapshot()["daily_enabled"])
+            self.assertEqual(radar.snapshot()["collection_mode"], "manual")
+            self.assertEqual(radar.snapshot()["max_results"], 40)
+
+    def test_keyword_refresh_deduplicates_and_preserves_decision(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            radar = ContentRadar(path)
+            item = {
+                "videoId": "9001",
+                "caption": "Couple comedy",
+                "authorUniqueId": "couple",
+                "videoUrl": "https://www.tiktok.com/@couple/video/9001",
+                "views": 2_000_000,
+            }
+            with patch.dict(os.environ, {"APIFY_TOKEN": "test-token"}):
+                with patch.object(radar, "_call_apify", return_value=[item, dict(item)]):
+                    first = radar.refresh()
+            self.assertTrue(first["ok"])
+            self.assertEqual(first["run"]["new_posts"], 1)
+            self.assertEqual(len(radar.snapshot()["posts"]), 1)
+            radar.set_decision("tiktok:9001", "selected")
+            with patch.dict(os.environ, {"APIFY_TOKEN": "test-token"}):
+                with patch.object(radar, "_call_apify", return_value=[{**item, "views": 2_500_000}]):
+                    second = radar.refresh()
+            self.assertEqual(second["run"]["new_posts"], 0)
+            self.assertEqual(second["run"]["updated_posts"], 1)
+            saved = radar.snapshot()["posts"][0]
+            self.assertEqual(saved["decision"], "selected")
+            self.assertEqual(saved["metrics"]["views"], 2_500_000)
 
 
 if __name__ == "__main__":

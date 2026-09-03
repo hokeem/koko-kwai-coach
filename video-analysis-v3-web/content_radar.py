@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Daily TikTok creator monitoring and metadata-first content ranking."""
+"""Manual TikTok keyword discovery and lightweight human review."""
 from __future__ import annotations
 
 import json
 import os
 import re
 import threading
-import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -15,21 +14,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
-from zoneinfo import ZoneInfo
-
-
-DEFAULT_CREATORS = [
-    "leobagarolo",
-    "joselohn",
-    "camargoevelin",
-    "nossaloucuraaoficial",
-    "guipolemicoo",
-    "edsontheodoro1",
+DEFAULT_KEYWORDS = [
+    "couple comedy",
+    "relationship comedy",
+    "funny couple",
+    "husband wife comedy",
+    "couple prank",
+    "relationship skit",
+    "marriage humor",
+    "couple skit",
+    "humor de casal",
+    "comédia de casal",
+    "casal engraçado",
+    "pegadinha de casal",
+    "marido e mulher comédia",
+    "relacionamento com humor",
+    "esquete de casal",
 ]
-CREATOR_FORMAT_TAGS = {
-    "edsontheodoro1": ["一人分饰多角"],
-}
-DEFAULT_ACTOR_ID = "clockworks~tiktok-profile-scraper"
+DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
 VALID_DECISIONS = {"pending", "selected", "rejected"}
 
 
@@ -91,15 +93,15 @@ def normalize_text(value: Any) -> str:
 
 
 SIGNALS: dict[str, tuple[str, list[str]]] = {
-    "couple": ("夫妻/情侣", ["casal", "marido", "esposa", "namorado", "namorada", "mozão", "mozão", "amor", "casamento", "casado", "casada"]),
-    "prank": ("整蛊/反转", ["pegadinha", "trollagem", "trollei", "peguei", "flagra", "flagrante", "brincadeira", "vinganca", "vingança", "desafio"]),
-    "innuendo": ("暧昧双关", ["duplo sentido", "safado", "safada", "safadeza", "cama", "motel", "cueca", "calcinha", "amante", "traição", "traicao", "beijo", "sentada", "proposta indecente"]),
-    "family": ("家庭日常", ["familia", "família", "mae", "mãe", "pai", "filho", "filha", "sogra", "sogro", "cunhado", "cunhada", "em casa"]),
+    "couple": ("夫妻/情侣", ["couple", "relationship", "husband", "wife", "boyfriend", "girlfriend", "marriage", "married", "casal", "marido", "esposa", "namorado", "namorada", "amor", "casamento", "casado", "casada"]),
+    "prank": ("整蛊/反转", ["prank", "caught", "reaction", "plot twist", "pegadinha", "trollagem", "trollei", "peguei", "flagra", "flagrante", "brincadeira", "vinganca", "vingança", "desafio"]),
+    "innuendo": ("暧昧双关", ["innuendo", "naughty", "bed", "motel", "cheating", "kiss", "duplo sentido", "safado", "safada", "safadeza", "cama", "cueca", "calcinha", "amante", "traição", "traicao", "beijo", "sentada", "proposta indecente"]),
+    "family": ("家庭日常", ["family", "mom", "dad", "son", "daughter", "mother in law", "at home", "familia", "família", "mae", "mãe", "pai", "filho", "filha", "sogra", "sogro", "cunhado", "cunhada", "em casa"]),
 }
 NEGATIVE_SIGNALS: dict[str, tuple[str, list[str]]] = {
-    "school": ("校园场景", ["escola", "colegio", "colégio", "professor", "professora", "aluno", "aluna"]),
-    "dance": ("偏舞蹈", ["dancinha", "dança", "danca", "coreografia", "trend dance"]),
-    "series": ("连续短剧", ["episodio", "episódio", "capitulo", "capítulo", "parte 1", "parte 2", "ep. ", "ep "]),
+    "school": ("校园场景", ["school", "teacher", "student", "classroom", "escola", "colegio", "colégio", "professor", "professora", "aluno", "aluna"]),
+    "dance": ("偏舞蹈", ["dance", "dancing", "choreography", "dancinha", "dança", "danca", "coreografia", "trend dance"]),
+    "series": ("连续短剧", ["episode", "part 1", "part 2", "episodio", "episódio", "capitulo", "capítulo", "parte 1", "parte 2", "ep. ", "ep "]),
 }
 
 
@@ -172,15 +174,15 @@ def metadata_analysis(post: dict[str, Any]) -> dict[str, Any]:
 def normalize_apify_item(item: dict[str, Any]) -> dict[str, Any] | None:
     if item.get("errorCode"):
         return None
-    post_id = nested_value(item, "id", "post_id", "aweme_id")
-    username = nested_value(item, "authorMeta.name", "authorMeta.uniqueId", "author.uniqueId", "username")
+    post_id = nested_value(item, "videoId", "id", "post_id", "aweme_id")
+    username = nested_value(item, "authorUniqueId", "authorMeta.name", "authorMeta.uniqueId", "author.uniqueId", "username")
     if post_id is None or username is None:
         return None
     username = clean_username(str(username))
     published_at = nested_value(item, "createTimeISO", "create_time_iso", "published_at") or iso_from_epoch(
         nested_value(item, "createTime", "create_time", "timestamp")
     )
-    post_url = nested_value(item, "webVideoUrl", "url", "post_url") or f"https://www.tiktok.com/@{username}/video/{post_id}"
+    post_url = nested_value(item, "videoUrl", "shareUrl", "webVideoUrl", "url", "post_url") or f"https://www.tiktok.com/@{username}/video/{post_id}"
     raw_hashtags = item.get("hashtags") or item.get("hashtagNames") or []
     hashtags: list[str] = []
     if isinstance(raw_hashtags, list):
@@ -190,27 +192,29 @@ def normalize_apify_item(item: dict[str, Any]) -> dict[str, Any] | None:
             text = str(value or "").strip().lstrip("#")
             if text:
                 hashtags.append(text)
-    caption = str(nested_value(item, "text", "description", "title") or "").strip()
+    caption = str(nested_value(item, "caption", "text", "description", "title") or "").strip()
     post = {
         "id": f"tiktok:{post_id}",
         "platform": "tiktok",
         "creator_username": username,
-        "creator_name": str(nested_value(item, "authorMeta.nickName", "authorMeta.nickname", "author.nickname") or username),
-        "creator_avatar_url": str(nested_value(item, "authorMeta.avatar", "author.avatarThumb", "author.avatar") or ""),
-        "creator_tags": list(CREATOR_FORMAT_TAGS.get(username, [])),
+        "creator_name": str(nested_value(item, "authorNickname", "authorMeta.nickName", "authorMeta.nickname", "author.nickname") or username),
+        "creator_avatar_url": str(nested_value(item, "authorAvatarUrl", "authorMeta.avatar", "author.avatarThumb", "author.avatar") or ""),
+        "creator_tags": [],
         "post_id": str(post_id),
         "caption": caption,
         "hashtags": hashtags,
         "published_at": str(published_at or ""),
-        "duration_seconds": number(nested_value(item, "videoMeta.duration", "video.duration", "duration")),
+        "duration_seconds": number(nested_value(item, "duration", "videoMeta.duration", "video.duration")),
         "post_url": str(post_url),
-        "thumbnail_url": str(nested_value(item, "videoMeta.coverUrl", "videoMeta.originalCoverUrl", "video.cover", "cover") or ""),
+        "thumbnail_url": str(nested_value(item, "coverUrl", "originCoverUrl", "dynamicCoverUrl", "videoMeta.coverUrl", "videoMeta.originalCoverUrl", "video.cover", "cover") or ""),
         "metrics": {
-            "views": number(nested_value(item, "playCount", "stats.playCount", "view_count")),
-            "likes": number(nested_value(item, "diggCount", "stats.diggCount", "like_count")),
-            "comments": number(nested_value(item, "commentCount", "stats.commentCount", "comment_count")),
-            "shares": number(nested_value(item, "shareCount", "stats.shareCount", "share_count")),
+            "views": number(nested_value(item, "views", "playCount", "stats.playCount", "view_count")),
+            "likes": number(nested_value(item, "likes", "diggCount", "stats.diggCount", "like_count")),
+            "comments": number(nested_value(item, "comments", "commentCount", "stats.commentCount", "comment_count")),
+            "shares": number(nested_value(item, "shares", "shareCount", "stats.shareCount", "share_count")),
         },
+        "matched_keyword": str(item.get("keyword") or ""),
+        "discovery_mode": "keyword",
         "fetched_at": iso_now(),
     }
     post["analysis"] = metadata_analysis(post)
@@ -224,13 +228,14 @@ class ContentRadar:
         self.lock = threading.RLock()
         self.refresh_lock = threading.Lock()
         self._refreshing = False
-        creators = os.environ.get("CONTENT_RADAR_TIKTOK_CREATORS", ",".join(DEFAULT_CREATORS))
-        self.creators = [clean_username(value) for value in creators.split(",") if clean_username(value)]
-        self.per_creator_limit = max(1, min(50, int(os.environ.get("CONTENT_RADAR_POSTS_PER_CREATOR", "12"))))
+        keywords = os.environ.get("CONTENT_RADAR_TIKTOK_KEYWORDS", ",".join(DEFAULT_KEYWORDS))
+        self.keywords = list(dict.fromkeys(value.strip() for value in keywords.split(",") if value.strip()))[:20]
+        self.max_results = max(10, min(120, int(os.environ.get("CONTENT_RADAR_MAX_RESULTS", "40"))))
+        self.min_views = max(1_000_000, int(os.environ.get("CONTENT_RADAR_MIN_VIEWS", "1000000")))
+        lookback = os.environ.get("CONTENT_RADAR_LOOKBACK", "last30Days").strip()
+        self.lookback = lookback if lookback in {"last24Hours", "last7Days", "last30Days", "last90Days"} else "last30Days"
         self.actor_id = os.environ.get("APIFY_TIKTOK_ACTOR_ID", DEFAULT_ACTOR_ID).strip() or DEFAULT_ACTOR_ID
-        self.timezone_name = os.environ.get("CONTENT_RADAR_TIMEZONE", "Asia/Shanghai")
-        self.daily_hour = max(0, min(23, int(os.environ.get("CONTENT_RADAR_DAILY_HOUR", "8"))))
-        self.daily_enabled = str(os.environ.get("CONTENT_RADAR_DAILY_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        self.daily_enabled = False
 
     def _default_state(self) -> dict[str, Any]:
         return {"version": 1, "posts": {}, "runs": [], "last_run": None}
@@ -255,7 +260,7 @@ class ContentRadar:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             state = self._read()
-        posts = list(state.get("posts", {}).values())
+        posts = [post for post in state.get("posts", {}).values() if post.get("discovery_mode") == "keyword"]
         posts.sort(
             key=lambda post: (
                 number((post.get("analysis") or {}).get("score")),
@@ -266,17 +271,17 @@ class ContentRadar:
         counts = {decision: sum(1 for post in posts if post.get("decision", "pending") == decision) for decision in VALID_DECISIONS}
         return {
             "ok": True,
-            "creators": self.creators,
-            "creator_tags": {username: list(CREATOR_FORMAT_TAGS.get(username, [])) for username in self.creators},
+            "keywords": self.keywords,
+            "min_views": self.min_views,
+            "lookback": self.lookback,
+            "max_results": self.max_results,
             "posts": posts,
             "last_run": state.get("last_run"),
             "runs": (state.get("runs") or [])[:10],
             "refreshing": self._refreshing,
             "counts": counts,
-            "timezone": self.timezone_name,
-            "daily_hour": self.daily_hour,
             "daily_enabled": self.daily_enabled,
-            "ranking_note": "匹配分基于标题、标签、时长和互动量，仅用于运营初筛；最终判断需打开原视频确认。",
+            "collection_mode": "manual",
         }
 
     def set_decision(self, post_id: str, decision: str, note: str = "") -> dict[str, Any]:
@@ -295,20 +300,25 @@ class ContentRadar:
 
     def _call_apify(self, token: str) -> list[dict[str, Any]]:
         actor = urllib.parse.quote(self.actor_id, safe="~")
-        url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items?{urllib.parse.urlencode({'token': token})}"
+        url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
         payload = {
-            "profiles": self.creators,
-            "profileScrapeSections": ["videos"],
-            "profileSorting": "latest",
-            "resultsPerPage": self.per_creator_limit,
-            "excludePinnedPosts": True,
-            "shouldDownloadVideos": False,
-            "shouldDownloadCovers": False,
-            "shouldDownloadSlideshowImages": False,
-            "maxFollowersPerProfile": 0,
-            "maxFollowingPerProfile": 0,
+            "keywords": self.keywords,
+            "searchType": "video",
+            "maxItemsPerKeyword": 30,
+            "maxTotalResults": self.max_results,
+            "sort": "mostViewed",
+            "datePosted": self.lookback,
+            "deduplicateAcrossKeywords": True,
+            "minViews": self.min_views,
+            "includeKeywordInsights": False,
+            "includeDownloadUrl": False,
         }
-        request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
                 result = json.load(response)
@@ -439,25 +449,29 @@ class ContentRadar:
                 raise RuntimeError("服务尚未配置 APIFY_TOKEN")
             raw_items = self._call_apify(token)
             normalized = [post for item in raw_items if (post := normalize_apify_item(item)) is not None]
-            tracked = set(self.creators)
-            normalized = [post for post in normalized if post.get("creator_username") in tracked]
-            normalized.sort(key=lambda post: parse_datetime(post.get("published_at")), reverse=True)
-            counts: dict[str, int] = {}
-            limited: list[dict[str, Any]] = []
+            normalized = [post for post in normalized if number((post.get("metrics") or {}).get("views")) >= self.min_views]
+            unique: dict[str, dict[str, Any]] = {}
             for post in normalized:
-                username = str(post.get("creator_username") or "")
-                if counts.get(username, 0) >= self.per_creator_limit:
-                    continue
-                counts[username] = counts.get(username, 0) + 1
-                limited.append(post)
+                unique[post["id"]] = post
+            ranked = list(unique.values())
+            ranked.sort(
+                key=lambda post: (
+                    number((post.get("analysis") or {}).get("score")),
+                    number((post.get("metrics") or {}).get("views")),
+                ),
+                reverse=True,
+            )
             with self.lock:
                 state = self._read()
                 existing = state.setdefault("posts", {})
                 new_count = 0
-                for post in limited:
+                updated_count = 0
+                for post in ranked:
                     previous = existing.get(post["id"], {})
                     if not previous:
                         new_count += 1
+                    else:
+                        updated_count += 1
                     post["decision"] = previous.get("decision", "pending")
                     post["operator_note"] = previous.get("operator_note", "")
                     post["decision_updated_at"] = previous.get("decision_updated_at", "")
@@ -469,8 +483,9 @@ class ContentRadar:
                     "status": "success",
                     "reason": reason,
                     "items_received": len(raw_items),
-                    "posts_saved": len(limited),
+                    "posts_saved": len(ranked),
                     "new_posts": new_count,
+                    "updated_posts": updated_count,
                 }
                 state["last_run"] = run
                 state["runs"] = [run, *(state.get("runs") or [])][:30]
@@ -499,28 +514,6 @@ class ContentRadar:
         threading.Thread(target=self.refresh, kwargs={"reason": reason}, name="content-radar-refresh", daemon=True).start()
         return {"ok": True, "started": True, "message": "已开始调用 Apify，通常需要 1–3 分钟"}
 
-    def _ran_today(self, local_now: datetime) -> bool:
-        with self.lock:
-            last_run = self._read().get("last_run") or {}
-        finished = parse_datetime(last_run.get("finished_at"))
-        if finished == datetime.min.replace(tzinfo=timezone.utc):
-            return False
-        same_day = finished.astimezone(local_now.tzinfo).date() == local_now.date()
-        return same_day and (last_run.get("reason") == "daily" or last_run.get("status") == "success")
-
-    def scheduler_loop(self) -> None:
-        try:
-            local_tz = ZoneInfo(self.timezone_name)
-        except Exception:
-            local_tz = ZoneInfo("Asia/Shanghai")
-        time.sleep(20)
-        while True:
-            local_now = utc_now().astimezone(local_tz)
-            if os.environ.get("APIFY_TOKEN", "").strip() and local_now.hour >= self.daily_hour and not self._ran_today(local_now):
-                self.refresh(reason="daily")
-            time.sleep(600)
-
     def start_scheduler(self) -> None:
-        if not self.daily_enabled:
-            return
-        threading.Thread(target=self.scheduler_loop, name="content-radar-scheduler", daemon=True).start()
+        """Kept for app startup compatibility; collection is manual-only."""
+        return
