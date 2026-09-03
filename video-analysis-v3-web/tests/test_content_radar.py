@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 WEB_ROOT = Path(__file__).resolve().parents[1]
@@ -139,13 +139,27 @@ class ContentRadarTests(unittest.TestCase):
             selected = next(post for post in radar.snapshot()["posts"] if post["id"] == "tiktok:7675481187808300319")
             self.assertEqual(selected["decision"], "selected")
 
-    def test_dashboard_uses_bounded_internal_tiktok_players(self):
+    def test_dashboard_defers_single_player_until_cover_click(self):
         html = (WEB_ROOT / "content-radar.html").read_text(encoding="utf-8")
+        self.assertIn('class="cover-image"', html)
+        self.assertIn("data-play-id", html)
         self.assertIn("www.tiktok.com/player/v1/", html)
-        self.assertIn("const MAX_PLAYERS=4", html)
-        self.assertIn("autoplay=0", html)
-        self.assertIn("IntersectionObserver", html)
+        self.assertIn("activePlayer:null", html)
+        self.assertIn("autoplay=1", html)
+        self.assertNotIn("IntersectionObserver", html)
         self.assertNotIn('target="_blank"', html)
+
+    def test_thumbnail_cache_saves_a_stable_local_cover(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.headers.get_content_type.return_value = "image/jpeg"
+            response.read.return_value = b"jpeg-data"
+            with patch("urllib.request.urlopen", return_value=response):
+                result = radar._cache_thumbnail({"post_id": "123", "thumbnail_source_url": "https://example.com/cover.jpg"})
+            self.assertEqual(result, ("123", "/content-radar-cover/123.jpg"))
+            self.assertEqual((radar.cover_dir / "123.jpg").read_bytes(), b"jpeg-data")
 
 
 if __name__ == "__main__":

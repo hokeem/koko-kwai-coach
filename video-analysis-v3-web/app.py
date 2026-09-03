@@ -412,7 +412,6 @@ def log_runtime_info(event: str, message: str, **extra: Any) -> None:
 
 
 content_radar = ContentRadar(CONTENT_RADAR_STATE_FILE, logger=log_runtime_warning)
-content_radar.import_curated_batch()
 
 
 def best_timestamp_from_values(*values: object) -> datetime | None:
@@ -18360,7 +18359,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def send_file(self, path: Path) -> None:
+    def send_file(self, path: Path, *, cache_seconds: int = 0) -> None:
         if path.suffix == ".html":
             content_type = "text/html; charset=utf-8"
         elif path.suffix == ".json":
@@ -18397,9 +18396,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", content_type)
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-                self.send_header("Pragma", "no-cache")
-                self.send_header("Expires", "0")
+                self.send_header("Cache-Control", f"public, max-age={cache_seconds}" if cache_seconds else "no-store, no-cache, must-revalidate, max-age=0")
+                if not cache_seconds:
+                    self.send_header("Pragma", "no-cache")
+                    self.send_header("Expires", "0")
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -18409,9 +18409,10 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         if path.suffix == ".mp4":
             self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
+        self.send_header("Cache-Control", f"public, max-age={cache_seconds}" if cache_seconds else "no-store, no-cache, must-revalidate, max-age=0")
+        if not cache_seconds:
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         if path.suffix == ".docx":
             self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
         self.send_header("Content-Length", str(len(raw)))
@@ -18481,6 +18482,14 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        cover_match = re.fullmatch(r"/content-radar-cover/(\d+)\.(jpg|png|webp|gif)", parsed.path)
+        if cover_match:
+            cover_path = content_radar.cover_dir / f"{cover_match.group(1)}.{cover_match.group(2)}"
+            if not cover_path.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.send_file(cover_path, cache_seconds=86400)
+            return
         if parsed.path in {"/content-radar", "/content-radar/"}:
             if not CONTENT_RADAR_HTML.exists():
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -19826,6 +19835,9 @@ def main() -> int:
     start_translation_workers()
     start_watchdog()
     start_resource_janitor()
+    content_radar.import_curated_batch()
+    content_radar.hydrate_curated_metadata()
+    content_radar.start_thumbnail_cache()
     content_radar.start_scheduler()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AppHandler)
     print(json.dumps({"port": PORT, "data_root": str(DATA_ROOT), "skill_root": str(SKILL_ROOT)}, ensure_ascii=False))

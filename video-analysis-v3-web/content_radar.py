@@ -10,6 +10,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -34,6 +35,7 @@ DEFAULT_KEYWORDS = [
 DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
 VALID_DECISIONS = {"pending", "selected", "rejected"}
 CURATED_BATCH_ID = "2026-09-03-apify-tiktok-shortlist"
+CURATED_DATASET_ID = "v09ZyrDkrBEaovxOL"
 CURATED_TIKTOK_POSTS = [
     ("texasbaz", 36_800_000, "7675481187808300319"),
     ("chris978462", 14_800_000, "7676058284406754590"),
@@ -241,6 +243,7 @@ def normalize_apify_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "fetched_at": iso_now(),
     }
     post["analysis"] = metadata_analysis(post)
+    post["thumbnail_source_url"] = post["thumbnail_url"]
     return post
 
 
@@ -250,7 +253,10 @@ class ContentRadar:
         self.logger = logger
         self.lock = threading.RLock()
         self.refresh_lock = threading.Lock()
+        self.thumbnail_lock = threading.Lock()
         self._refreshing = False
+        self._thumbnail_thread: threading.Thread | None = None
+        self.cover_dir = state_path.parent / "content_radar_covers"
         keywords = os.environ.get("CONTENT_RADAR_TIKTOK_KEYWORDS", ",".join(DEFAULT_KEYWORDS))
         self.keywords = list(dict.fromkeys(value.strip() for value in keywords.split(",") if value.strip()))[:20]
         self.max_results = max(10, min(120, int(os.environ.get("CONTENT_RADAR_MAX_RESULTS", "40"))))
@@ -363,6 +369,121 @@ class ContentRadar:
             imported_batches.append(CURATED_BATCH_ID)
             self._write(state)
             return imported
+
+    def hydrate_curated_metadata(self) -> int:
+        """Restore captions and short-lived cover URLs from the already-paid dataset."""
+        curated_ids = {post_id for _, _, post_id in CURATED_TIKTOK_POSTS}
+        with self.lock:
+            current = self._read().get("posts", {})
+            if all(
+                (post := current.get(f"tiktok:{post_id}"))
+                and post.get("caption")
+                and self.cached_cover_url(post_id)
+                for post_id in curated_ids
+            ):
+                return 0
+        try:
+            url = f"https://api.apify.com/v2/datasets/{CURATED_DATASET_ID}/items?clean=true&format=json&limit=100"
+            request = urllib.request.Request(url, headers={"User-Agent": "Koko-Content-Radar/1.0"})
+            with urllib.request.urlopen(request, timeout=12) as response:
+                raw_items = json.load(response)
+        except Exception as exc:
+            if self.logger:
+                self.logger("content_radar_metadata_restore_failed", "Could not restore curated TikTok metadata.", error=str(exc))
+            return 0
+        normalized = [post for item in raw_items if isinstance(item, dict) and str(item.get("videoId")) in curated_ids if (post := normalize_apify_item(item))]
+        with self.lock:
+            state = self._read()
+            posts = state.setdefault("posts", {})
+            restored = 0
+            for fresh in normalized:
+                previous = posts.get(fresh["id"], {})
+                if not previous:
+                    continue
+                fresh["decision"] = previous.get("decision", "pending")
+                fresh["operator_note"] = previous.get("operator_note", "")
+                fresh["decision_updated_at"] = previous.get("decision_updated_at", "")
+                fresh["first_seen_at"] = previous.get("first_seen_at") or "2026-09-03T00:00:00Z"
+                cached = self.cached_cover_url(fresh["post_id"])
+                if cached:
+                    fresh["thumbnail_url"] = cached
+                posts[fresh["id"]] = fresh
+                restored += 1
+            if restored:
+                self._write(state)
+            return restored
+
+    def cached_cover_url(self, post_id: str) -> str:
+        for suffix in ("jpg", "png", "webp", "gif"):
+            if (self.cover_dir / f"{post_id}.{suffix}").is_file():
+                return f"/content-radar-cover/{post_id}.{suffix}"
+        return ""
+
+    def _cache_thumbnail(self, post: dict[str, Any]) -> tuple[str, str] | None:
+        post_id = str(post.get("post_id") or "")
+        existing = self.cached_cover_url(post_id)
+        if existing:
+            return post_id, existing
+        source = str(post.get("thumbnail_source_url") or post.get("thumbnail_url") or "")
+        if not re.fullmatch(r"https://[^\s]+", source):
+            return None
+        request = urllib.request.Request(
+            source,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.tiktok.com/", "Accept": "image/avif,image/webp,image/*"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                content_type = str(response.headers.get_content_type() or "").lower()
+                raw = response.read(5_000_001)
+        except Exception:
+            return None
+        suffixes = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}
+        suffix = suffixes.get(content_type)
+        if not suffix or not raw or len(raw) > 5_000_000:
+            return None
+        self.cover_dir.mkdir(parents=True, exist_ok=True)
+        target = self.cover_dir / f"{post_id}.{suffix}"
+        temporary = self.cover_dir / f"{post_id}.{uuid4().hex}.tmp"
+        temporary.write_bytes(raw)
+        temporary.replace(target)
+        return post_id, f"/content-radar-cover/{target.name}"
+
+    def _cache_thumbnails(self) -> None:
+        try:
+            with self.lock:
+                state = self._read()
+                candidates = [
+                    dict(post)
+                    for post in state.get("posts", {}).values()
+                    if post.get("discovery_mode") == "keyword" and not self.cached_cover_url(str(post.get("post_id") or ""))
+                ]
+            updates: dict[str, str] = {}
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(self._cache_thumbnail, post) for post in candidates]
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                    except Exception:
+                        continue
+                    if result:
+                        updates[result[0]] = result[1]
+            if updates:
+                with self.lock:
+                    state = self._read()
+                    for post in state.get("posts", {}).values():
+                        local_url = updates.get(str(post.get("post_id") or ""))
+                        if local_url:
+                            post["thumbnail_url"] = local_url
+                    self._write(state)
+        finally:
+            self.thumbnail_lock.release()
+
+    def start_thumbnail_cache(self) -> bool:
+        if not self.thumbnail_lock.acquire(blocking=False):
+            return False
+        self._thumbnail_thread = threading.Thread(target=self._cache_thumbnails, name="content-radar-thumbnail-cache", daemon=True)
+        self._thumbnail_thread.start()
+        return True
 
     def _call_apify(self, token: str) -> list[dict[str, Any]]:
         actor = urllib.parse.quote(self.actor_id, safe="~")
@@ -556,6 +677,7 @@ class ContentRadar:
                 state["last_run"] = run
                 state["runs"] = [run, *(state.get("runs") or [])][:30]
                 self._write(state)
+            self.start_thumbnail_cache()
             return {"ok": True, "started": True, "run": run}
         except Exception as exc:
             run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000]}
