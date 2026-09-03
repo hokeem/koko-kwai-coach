@@ -125,6 +125,20 @@ class ContentRadarTests(unittest.TestCase):
             self.assertEqual(saved["decision"], "selected")
             self.assertEqual(saved["metrics"]["views"], 2_500_000)
 
+    def test_curated_batch_imports_once_without_overwriting_decisions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            radar = ContentRadar(path)
+            self.assertEqual(radar.import_curated_batch(), 20)
+            self.assertEqual(radar.import_curated_batch(), 0)
+            snapshot = radar.snapshot()
+            self.assertEqual(len(snapshot["posts"]), 20)
+            self.assertEqual(snapshot["counts"]["pending"], 20)
+            radar.set_decision("tiktok:7675481187808300319", "selected")
+            self.assertEqual(radar.import_curated_batch(), 0)
+            selected = next(post for post in radar.snapshot()["posts"] if post["id"] == "tiktok:7675481187808300319")
+            self.assertEqual(selected["decision"], "selected")
+
 
 if __name__ == "__main__":
     unittest.main()

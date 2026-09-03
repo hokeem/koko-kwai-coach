@@ -33,6 +33,29 @@ DEFAULT_KEYWORDS = [
 ]
 DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
 VALID_DECISIONS = {"pending", "selected", "rejected"}
+CURATED_BATCH_ID = "2026-09-03-apify-tiktok-shortlist"
+CURATED_TIKTOK_POSTS = [
+    ("texasbaz", 36_800_000, "7675481187808300319"),
+    ("chris978462", 14_800_000, "7676058284406754590"),
+    ("cobyandashley", 10_900_000, "7676564075467246861"),
+    ("colbyandceleste", 7_550_000, "7678820562625400095"),
+    ("mccall_girl76", 7_280_000, "7679964637508488479"),
+    ("therealbeaufords", 6_000_000, "7679980069015538958"),
+    ("linneamullen", 4_720_000, "7676230229463141650"),
+    ("noelle.cefola", 4_120_000, "7678824104165690637"),
+    ("jilliangerhardt", 3_780_000, "7674316587377184030"),
+    ("bellagraceslife", 3_570_000, "7674698769425796383"),
+    ("helloginadarling", 3_310_000, "7674439076400909582"),
+    ("therealhammytv", 2_840_000, "7671743815505562894"),
+    ("deal_family", 2_810_000, "7680007917969411342"),
+    ("miranda_maeee", 2_630_000, "7676322356247203102"),
+    ("jackiemitchellll", 2_390_000, "7679900945559391502"),
+    ("thevaglefamily", 2_340_000, "7672780771047820575"),
+    ("rickandcarly", 2_290_000, "7670237528611474702"),
+    ("theblondebrewer", 2_210_000, "7679181892385590559"),
+    ("josephjamestiktok", 1_710_000, "7678301119537319190"),
+    ("drefiggysmalls", 1_580_000, "7678093976842292493"),
+]
 
 
 def utc_now() -> datetime:
@@ -297,6 +320,49 @@ class ContentRadar:
             post["decision_updated_at"] = iso_now()
             self._write(state)
             return post
+
+    def import_curated_batch(self) -> int:
+        """Import the already-paid September 3 shortlist once, without calling Apify."""
+        with self.lock:
+            state = self._read()
+            imported_batches = state.setdefault("imported_batches", [])
+            if CURATED_BATCH_ID in imported_batches:
+                return 0
+            posts = state.setdefault("posts", {})
+            imported = 0
+            for username, views, post_id in CURATED_TIKTOK_POSTS:
+                key = f"tiktok:{post_id}"
+                previous = posts.get(key, {})
+                post = {
+                    "id": key,
+                    "platform": "tiktok",
+                    "creator_username": username,
+                    "creator_name": previous.get("creator_name") or username,
+                    "creator_avatar_url": previous.get("creator_avatar_url", ""),
+                    "creator_tags": [],
+                    "post_id": post_id,
+                    "caption": previous.get("caption", ""),
+                    "hashtags": previous.get("hashtags", []),
+                    "published_at": previous.get("published_at", ""),
+                    "duration_seconds": number(previous.get("duration_seconds")),
+                    "post_url": f"https://www.tiktok.com/@{username}/video/{post_id}",
+                    "thumbnail_url": previous.get("thumbnail_url", ""),
+                    "metrics": {**(previous.get("metrics") or {}), "views": views},
+                    "matched_keyword": "curated test batch",
+                    "discovery_mode": "keyword",
+                    "fetched_at": previous.get("fetched_at") or "2026-09-03T00:00:00Z",
+                    "decision": previous.get("decision", "pending"),
+                    "operator_note": previous.get("operator_note", ""),
+                    "decision_updated_at": previous.get("decision_updated_at", ""),
+                    "first_seen_at": previous.get("first_seen_at") or "2026-09-03T00:00:00Z",
+                }
+                post["analysis"] = metadata_analysis(post)
+                posts[key] = post
+                if not previous:
+                    imported += 1
+            imported_batches.append(CURATED_BATCH_ID)
+            self._write(state)
+            return imported
 
     def _call_apify(self, token: str) -> list[dict[str, Any]]:
         actor = urllib.parse.quote(self.actor_id, safe="~")

@@ -412,6 +412,7 @@ def log_runtime_info(event: str, message: str, **extra: Any) -> None:
 
 
 content_radar = ContentRadar(CONTENT_RADAR_STATE_FILE, logger=log_runtime_warning)
+content_radar.import_curated_batch()
 
 
 def best_timestamp_from_values(*values: object) -> datetime | None:
