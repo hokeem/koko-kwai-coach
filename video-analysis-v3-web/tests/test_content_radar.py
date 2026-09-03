@@ -139,6 +139,14 @@ class ContentRadarTests(unittest.TestCase):
             selected = next(post for post in radar.snapshot()["posts"] if post["id"] == "tiktok:7675481187808300319")
             self.assertEqual(selected["decision"], "selected")
 
+    def test_dashboard_uses_bounded_internal_tiktok_players(self):
+        html = (WEB_ROOT / "content-radar.html").read_text(encoding="utf-8")
+        self.assertIn("www.tiktok.com/player/v1/", html)
+        self.assertIn("const MAX_PLAYERS=4", html)
+        self.assertIn("autoplay=0", html)
+        self.assertIn("IntersectionObserver", html)
+        self.assertNotIn('target="_blank"', html)
+
 
 if __name__ == "__main__":
     unittest.main()
