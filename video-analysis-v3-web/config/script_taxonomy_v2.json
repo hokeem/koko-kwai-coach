@@ -47,6 +47,8 @@
         {"id": "prank", "zh": "整蛊", "pt": "Pegadinha", "aliases": ["整蛊", "恶作剧", "假装", "戏弄", "pegadinha", "trollagem", "finge"]},
         {"id": "game_challenge", "zh": "游戏挑战", "pt": "Jogo e desafio", "aliases": ["游戏挑战", "游戏", "挑战", "比赛", "desafio", "jogo", "competição", "competicao"]},
         {"id": "adult_humor", "zh": "黄段子", "pt": "Humor adulto", "aliases": ["黄段子", "暧昧笑话", "性暗示", "成人笑话", "humor adulto", "duplo sentido", "piada picante"]},
+        {"id": "infidelity", "zh": "出轨", "pt": "Traição", "aliases": ["出轨", "外遇", "偷情", "背叛", "婚外情", "traição", "traicao", "infidelidade", "caso", "amante"]},
+        {"id": "flirting", "zh": "暧昧", "pt": "Paquera / clima romântico", "aliases": ["暧昧", "调情", "撩", "暗恋", "好感", "flertar", "flerte", "paquera", "clima romântico", "clima romantico", "sedução", "seducao"]},
         {"id": "debt_default", "zh": "催债&老赖", "pt": "Cobrança e calote", "aliases": ["催债", "老赖", "欠钱", "赖账", "讨债", "cobrança", "cobranca", "calote", "dívida", "divida"]},
         {"id": "street_scam", "zh": "江湖骗术", "pt": "Golpe de rua", "aliases": ["江湖骗术", "骗局", "诈骗", "骗钱", "圈套", "golpe", "fraude", "trapaça", "trapaca"]},
         {"id": "provoking_trouble", "zh": "寻衅滋事", "pt": "Provocação e desordem", "aliases": ["寻衅滋事", "挑衅", "找茬", "闹事", "provocação", "provocacao", "arrumar confusão", "arrumar confusao"]},
@@ -67,7 +69,7 @@
   },
   "legacy_content_type_map": {
     "夫妻整蛊/冲突": {"relationship": ["couple"], "format": ["story_acting"], "content": ["prank", "argument"]},
-    "夫妻暧昧": {"relationship": ["couple"], "format": ["story_acting"], "content": ["adult_humor"]},
+    "夫妻暧昧": {"relationship": ["couple"], "format": ["story_acting"], "content": ["adult_humor", "flirting"]},
     "家庭整蛊": {"relationship": ["family"], "format": ["story_acting"], "content": ["prank"]},
     "朋友整蛊": {"relationship": ["neighbors_friends"], "format": ["story_acting"], "content": ["prank"]}
   }

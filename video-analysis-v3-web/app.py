@@ -5146,8 +5146,7 @@ def update_library_entry_taxonomy(entry_id: str, payload: dict[str, Any]) -> dic
                     entry[f"{dimension}_tags"] = taxonomy_tags[dimension]
                     entry[f"{dimension}_tag_labels_zh"] = taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "zh")
                     entry[f"{dimension}_tag_labels_pt"] = taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "pt")
-                if raw_duration:
-                    entry["duration_bucket"] = raw_duration
+                entry["duration_bucket"] = raw_duration
             entry["taxonomy_version"] = SCRIPT_TAXONOMY_VERSION
             entry["taxonomy_source"] = "telekwai" if telekwai else "manual"
             entry["taxonomy_confidence"] = "manual"
@@ -5169,8 +5168,9 @@ def update_library_entry_taxonomy(entry_id: str, payload: dict[str, Any]) -> dic
                 else:
                     for dimension in SCRIPT_TAG_DIMENSIONS:
                         candidate[f"{dimension}_tags"] = taxonomy_tags[dimension]
-                    if raw_duration:
-                        candidate["duration_bucket"] = raw_duration
+                        candidate[f"{dimension}_tag_labels_zh"] = taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "zh")
+                        candidate[f"{dimension}_tag_labels_pt"] = taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "pt")
+                    candidate["duration_bucket"] = raw_duration
                 candidate["taxonomy_version"] = SCRIPT_TAXONOMY_VERSION
                 candidate["taxonomy_source"] = "telekwai" if telekwai else "manual"
                 candidate["taxonomy_confidence"] = "manual"
@@ -5234,12 +5234,14 @@ def apply_manual_item_taxonomy(parent_job_id: str, item_index: int, payload: dic
     changes["script_type"] = TELEKWAI_SCRIPT_TYPE if telekwai else "standard"
     for dimension in SCRIPT_TAG_DIMENSIONS:
         changes[f"{dimension}_tags"] = [] if telekwai else taxonomy_tags[dimension]
+        changes[f"{dimension}_tag_labels_zh"] = [] if telekwai else taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "zh")
+        changes[f"{dimension}_tag_labels_pt"] = [] if telekwai else taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "pt")
     if telekwai:
         changes["duration_bucket"] = ""
         changes["published"] = False
         changes["taxonomy_source"] = "telekwai"
         changes["manual_tags"] = {"telekwai": True}
-    elif duration_bucket:
+    else:
         changes["duration_bucket"] = duration_bucket
     with job_lock:
         if parent_job_id not in jobs:
@@ -13526,6 +13528,7 @@ def studio_html() -> str:
     const reviewTracker = Object.create(null);
     const reviewTerminalTracker = Object.create(null);
     const itemOpenState = Object.create(null);
+    const pendingManualTaxonomy = Object.create(null);
     const detailIframeCache = new Map();
     const pageParams = new URLSearchParams(window.location.search || "");
     let lastStatusMarkup = "";
@@ -14473,6 +14476,32 @@ def studio_html() -> str:
       return payload;
     }}
 
+    function rememberManualTaxonomy(itemId, payload) {{
+      if (!itemId || !payload) return;
+      const snapshot = {{
+        taxonomy_version: SCRIPT_TAXONOMY.version,
+        taxonomy_source: payload.telekwai ? "telekwai" : "manual",
+        telekwai: Boolean(payload.telekwai),
+        script_type: payload.telekwai ? "telekwai" : "standard",
+        duration_bucket: String(payload.duration_bucket || ""),
+      }};
+      Object.keys(TAXONOMY_DIMENSION_META).forEach((dimension) => {{
+        if (dimension === "duration") return;
+        const key = `${{dimension}}_tags`;
+        snapshot[key] = Array.isArray(payload[key]) ? payload[key].map(String) : [];
+      }});
+      pendingManualTaxonomy[itemId] = snapshot;
+    }}
+
+    function syncManualTaxonomyState(itemId, root = document) {{
+      rememberManualTaxonomy(itemId, selectedManualTaxonomy(itemId, root));
+    }}
+
+    function itemWithManualTaxonomyOverlay(item) {{
+      if (!item || !item.id || !pendingManualTaxonomy[item.id]) return item;
+      return {{ ...item, ...pendingManualTaxonomy[item.id] }};
+    }}
+
     function setTaxonomyFeedback(scope, message, kind = "") {{
       const feedback = scope?.querySelector?.("[data-taxonomy-feedback]");
       if (!feedback) return;
@@ -14851,6 +14880,7 @@ def studio_html() -> str:
     async function persistItemEdits(itemId, mode, button) {{
       const payload = collectItemEdits(itemId);
       if (!payload) return;
+      rememberManualTaxonomy(itemId, payload);
       const scope = button.closest("[data-editor-item]") || button.closest("[data-library-confirm-card]") || document;
       const original = button.textContent;
       button.disabled = true;
@@ -14885,12 +14915,14 @@ def studio_html() -> str:
       button.textContent = "入库中...";
       const scope = button.closest("[data-library-confirm-card]") || document;
       setTaxonomyFeedback(scope, "正在生成葡语版本并保存新标签...");
+      const taxonomyPayload = selectedManualTaxonomy(itemId, scope);
+      rememberManualTaxonomy(itemId, taxonomyPayload);
       try {{
         const response = await fetch(`/api/items/${{itemId}}/confirm-library`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
           body: JSON.stringify({{
-            ...selectedManualTaxonomy(itemId, scope),
+            ...taxonomyPayload,
             ...selectedLibraryOptions(itemId, scope),
           }}),
         }});
@@ -14942,6 +14974,7 @@ def studio_html() -> str:
     async function switchDisplayLanguage(itemId, language, button) {{
       const payload = collectItemEdits(itemId) || {{}};
       payload.language = language;
+      rememberManualTaxonomy(itemId, payload);
       const original = button.textContent;
       button.disabled = true;
       button.textContent = language === "pt" ? "转换中..." : "切换中...";
@@ -15153,6 +15186,7 @@ def studio_html() -> str:
     }}
 
     function renderItemCard(item, idx, open = false) {{
+      item = itemWithManualTaxonomyOverlay(item);
       const title = escapeHtml(item.title || `视频 ${{idx + 1}}`);
       const primaryEditor = buildPrimaryEditorMarkup(item);
       const review = buildReviewMarkup(item);
@@ -16138,6 +16172,7 @@ def studio_html() -> str:
         picker?.classList.toggle("telekwai-active", active);
         if (active) picker?.querySelectorAll("[data-manual-taxonomy].active").forEach((button) => button.classList.remove("active"));
         setTaxonomyFeedback(picker, active ? "Telekwai 已启用：无需其他标签，且不会展示在 kokocomedy。" : "已切回普通脚本，请选择所需标签。", active ? "success" : "");
+        syncManualTaxonomyState(picker?.getAttribute("data-manual-taxonomy-picker") || "", picker || document);
         return;
       }}
       const taxonomyChip = event.target.closest("[data-manual-taxonomy]");
@@ -16154,6 +16189,7 @@ def studio_html() -> str:
           taxonomyChip.classList.toggle("active");
         }}
         setTaxonomyFeedback(picker, "标签已修改，保存或入库后生效。");
+        syncManualTaxonomyState(picker?.getAttribute("data-manual-taxonomy-picker") || "", picker || document);
         return;
       }}
       const copyBtn = event.target.closest("[data-copy-text]");
