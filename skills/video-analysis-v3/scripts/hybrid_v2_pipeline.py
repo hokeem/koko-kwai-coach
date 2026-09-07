@@ -15,7 +15,15 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from gemini_video_observe import api_key, extract_text, files_api_observe, inline_observe, parse_json_text, retry_call
+from gemini_video_observe import (
+    DEFAULT_INLINE_MAX_MB,
+    api_key,
+    extract_text,
+    files_api_observe,
+    inline_observe,
+    parse_json_text,
+    retry_call,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 V3_SKILL_ROOT = SCRIPT_DIR.parent
@@ -971,7 +979,14 @@ def enforce_chinese_dialogue_translation(script_json: dict, key: str, models: li
     return script_json
 
 
-def run_video_json_prompt(video: Path, key: str, model: str, prompt: str, mime: str = "video/mp4", inline_max_mb: float = 18.0) -> tuple[dict, dict]:
+def run_video_json_prompt(
+    video: Path,
+    key: str,
+    model: str,
+    prompt: str,
+    mime: str = "video/mp4",
+    inline_max_mb: float = DEFAULT_INLINE_MAX_MB,
+) -> tuple[dict, dict]:
     if video.stat().st_size <= inline_max_mb * 1024 * 1024:
         return inline_observe(video, key, model, prompt, mime)
     return files_api_observe(video, key, model, prompt, mime)

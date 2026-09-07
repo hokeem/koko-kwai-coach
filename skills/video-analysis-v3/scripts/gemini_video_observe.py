@@ -15,6 +15,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+
+DEFAULT_INLINE_MAX_MB = max(0.0, float(os.environ.get("VIDEO_ANALYSIS_INLINE_MAX_MB", "0")))
+_ACTIVE_FILE_CACHE: dict[tuple[str, int, int, str, str], dict] = {}
+
 OBSERVATION_PROMPT = """你不是剧情分析师，你是视频证据提取器。
 你的职责不是总结剧情，而是把整段视频转成一个“逐秒多模态证据包”。
 
@@ -384,24 +388,7 @@ def upload_file(video: Path, key: str, mime: str) -> dict:
                 raise RuntimeError((proc.stderr or proc.stdout or f"curl exited with {proc.returncode}").strip())
             return json.loads(proc.stdout)
 
-        # Local fallback for environments without curl. Production uses the
-        # streaming curl path so large videos are not duplicated in RAM.
-        upload = urllib.request.Request(
-            upload_url,
-            data=video.read_bytes(),
-            headers={
-                "Content-Length": str(video.stat().st_size),
-                "X-Goog-Upload-Offset": "0",
-                "X-Goog-Upload-Command": "upload, finalize",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(upload, timeout=300) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"Gemini upload finalize HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError("curl is required for memory-safe Gemini video uploads")
 
     return retry_call("Gemini upload finalize", _upload, attempts=2, sleep_sec=3)
 
@@ -423,18 +410,32 @@ def get_file(file_name: str, key: str) -> dict:
 
 
 def files_api_observe(video: Path, key: str, model: str, prompt: str, mime: str) -> tuple[dict, dict]:
-    uploaded = upload_file(video, key, mime)
-    file_obj = uploaded.get("file", uploaded)
-    name = file_obj.get("name")
-    for _ in range(30):
-        current = get_file(name, key)
-        file_obj = current.get("file", current)
-        state = file_obj.get("state")
-        if state in (None, "ACTIVE"):
-            break
-        if state == "FAILED":
-            raise RuntimeError(f"Gemini file processing failed: {file_obj}")
-        time.sleep(2)
+    stat = video.stat()
+    cache_key = (
+        str(video.resolve()),
+        stat.st_size,
+        stat.st_mtime_ns,
+        mime,
+        # Separate uploads by credential without retaining the credential.
+        str(hash(key)),
+    )
+    file_obj = _ACTIVE_FILE_CACHE.get(cache_key)
+    reused_upload = file_obj is not None
+    uploaded: dict = {"file": file_obj, "reused": True} if file_obj else {}
+    if file_obj is None:
+        uploaded = upload_file(video, key, mime)
+        file_obj = uploaded.get("file", uploaded)
+        name = file_obj.get("name")
+        for _ in range(30):
+            current = get_file(name, key)
+            file_obj = current.get("file", current)
+            state = file_obj.get("state")
+            if state in (None, "ACTIVE"):
+                break
+            if state == "FAILED":
+                raise RuntimeError(f"Gemini file processing failed: {file_obj}")
+            time.sleep(2)
+        _ACTIVE_FILE_CACHE[cache_key] = file_obj
     body = {"contents": [{"parts": [{"file_data": {"mime_type": mime, "file_uri": file_obj["uri"]}}, {"text": prompt}]}]}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     req = urllib.request.Request(
@@ -451,7 +452,11 @@ def files_api_observe(video: Path, key: str, model: str, prompt: str, mime: str)
             raise RuntimeError(f"Gemini files generate HTTP {exc.code}: {detail}") from exc
 
     generate_resp = retry_call("Gemini files generate", _generate, attempts=2, sleep_sec=2)
-    return parse_json_text(extract_text(generate_resp)), {"upload": uploaded, "generate": generate_resp}
+    return parse_json_text(extract_text(generate_resp)), {
+        "upload": uploaded,
+        "upload_reused": reused_upload,
+        "generate": generate_resp,
+    }
 
 
 def main() -> int:
@@ -463,7 +468,7 @@ def main() -> int:
         ap.add_argument("--raw-out", required=True)
         ap.add_argument("--model", default="gemini-3-flash-preview")
         ap.add_argument("--mime", default="video/mp4")
-        ap.add_argument("--inline-max-mb", type=float, default=18.0)
+        ap.add_argument("--inline-max-mb", type=float, default=DEFAULT_INLINE_MAX_MB)
         ap.add_argument("--prompt-file")
         ap.add_argument("--api-key")
         ap.add_argument("--api-key-file")

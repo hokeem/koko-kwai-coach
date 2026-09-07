@@ -11,6 +11,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from gemini_video_observe import DEFAULT_INLINE_MAX_MB, upload_file as streaming_upload_file
+
 DEFAULT_PROMPT = """你是短视频拆解助手。请直接分析这个视频，输出严格 JSON，不要输出 markdown，不要加解释。
 要求：
 1. 只描述视频中可见/可听的信息，不要编造。
@@ -94,34 +96,7 @@ def inline_analyze(video: Path, key: str, model: str, prompt: str, mime: str) ->
 
 
 def upload_file(video: Path, key: str, mime: str) -> dict:
-    # Gemini resumable upload protocol.
-    meta = {"file": {"display_name": video.name}}
-    start = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={key}",
-        data=json.dumps(meta).encode(),
-        headers={
-            "X-Goog-Upload-Protocol": "resumable",
-            "X-Goog-Upload-Command": "start",
-            "X-Goog-Upload-Header-Content-Length": str(video.stat().st_size),
-            "X-Goog-Upload-Header-Content-Type": mime,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(start, timeout=60) as resp:
-        upload_url = resp.headers["X-Goog-Upload-URL"]
-    upload = urllib.request.Request(
-        upload_url,
-        data=video.read_bytes(),
-        headers={
-            "Content-Length": str(video.stat().st_size),
-            "X-Goog-Upload-Offset": "0",
-            "X-Goog-Upload-Command": "upload, finalize",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(upload, timeout=300) as resp:
-        return json.loads(resp.read().decode())
+    return streaming_upload_file(video, key, mime)
 
 
 def get_file(file_name: str, key: str) -> dict:
@@ -158,7 +133,7 @@ def main() -> int:
     ap.add_argument("--raw-out", required=True)
     ap.add_argument("--model", default="gemini-2.5-flash-lite")
     ap.add_argument("--mime", default="video/mp4")
-    ap.add_argument("--inline-max-mb", type=float, default=18.0)
+    ap.add_argument("--inline-max-mb", type=float, default=DEFAULT_INLINE_MAX_MB)
     ap.add_argument("--prompt-file")
     args = ap.parse_args()
 
