@@ -216,6 +216,9 @@ RAW_ARTIFACT_NAMES = {
     "review_refine_raw_gemini.json",
     "analysis_raw_gemini.json",
     "observations_raw_gemini.json",
+    # Gemini image responses contain the generated bitmap as base64. Keeping
+    # this beside preview + cover stored the same image up to three times.
+    "storyboard_image_raw_gemini.json",
 }
 
 job_lock = threading.RLock()
@@ -662,6 +665,30 @@ def _delete_artifact(path: Path) -> int:
         log_runtime_warning("artifact_cleanup_failed", "Could not remove a temporary analysis artifact.", path=str(path), error=str(exc))
         return 0
     return size if not path.exists() else 0
+
+
+def redact_large_binary_payloads(value: Any) -> Any:
+    """Keep useful Gemini diagnostics without persisting embedded image bytes."""
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, child in value.items():
+            if str(key).lower() in {"data", "bytesbase64", "file_data_base64"} and isinstance(child, str) and len(child) > 1024:
+                cleaned[key] = f"[binary payload omitted: {len(child)} chars]"
+            else:
+                cleaned[key] = redact_large_binary_payloads(child)
+        return cleaned
+    if isinstance(value, list):
+        return [redact_large_binary_payloads(child) for child in value]
+    return value
+
+
+def link_or_copy_file(source: Path, destination: Path) -> None:
+    """Create a second public filename without duplicating bytes when possible."""
+    destination.unlink(missing_ok=True)
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copyfile(source, destination)
 
 
 def _file_sha256(path: Path) -> bytes:
@@ -8780,7 +8807,7 @@ def generate_storyboard_assets(
             encoding="utf-8",
         )
         cover_name = STORYBOARD_COVER_BASENAME + ".png"
-        shutil.copyfile(preview_path, output_dir / cover_name)
+        link_or_copy_file(preview_path, output_dir / cover_name)
         save_storyboard_state(
             item_id,
             prompt=prompt,
@@ -8804,10 +8831,10 @@ def generate_storyboard_assets(
             preview_name = STORYBOARD_PREVIEW_BASENAME + guess_extension_from_mime(mime_type)
             preview_path = output_dir / preview_name
             preview_path.write_bytes(image_bytes)
-            (output_dir / "storyboard_image_raw_gemini.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            write_json_atomic(output_dir / "storyboard_image_raw_gemini.json", redact_large_binary_payloads(raw))
             (output_dir / STORYBOARD_PROMPT_FILE).write_text(prompt, encoding="utf-8")
             cover_name = STORYBOARD_COVER_BASENAME + preview_path.suffix.lower()
-            shutil.copyfile(preview_path, output_dir / cover_name)
+            link_or_copy_file(preview_path, output_dir / cover_name)
             save_storyboard_state(
                 item_id,
                 prompt=prompt,
