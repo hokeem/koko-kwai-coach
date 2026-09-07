@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import time
@@ -88,11 +87,7 @@ def parse_json_text(text: str) -> dict:
 
 
 def inline_analyze(video: Path, key: str, model: str, prompt: str, mime: str) -> tuple[dict, dict]:
-    data = base64.b64encode(video.read_bytes()).decode()
-    body = {"contents": [{"parts": [{"inline_data": {"mime_type": mime, "data": data}}, {"text": prompt}]}]}
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-    resp = post_json(url, body)
-    return parse_json_text(extract_text(resp)), resp
+    return files_api_analyze(video, key, model, prompt, mime)
 
 
 def upload_file(video: Path, key: str, mime: str) -> dict:
@@ -140,19 +135,11 @@ def main() -> int:
     video = Path(args.video)
     prompt = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else DEFAULT_PROMPT
     key = api_key()
-    route = "inline"
+    route = "files-api"
     try:
-        if video.stat().st_size <= args.inline_max_mb * 1024 * 1024:
-            result, raw = inline_analyze(video, key, args.model, prompt, args.mime)
-        else:
-            route = "files-api"
-            result, raw = files_api_analyze(video, key, args.model, prompt, args.mime)
+        result, raw = files_api_analyze(video, key, args.model, prompt, args.mime)
     except urllib.error.HTTPError as e:
-        if route == "inline":
-            route = "files-api"
-            result, raw = files_api_analyze(video, key, args.model, prompt, args.mime)
-        else:
-            raise
+        raise
 
     result.setdefault("timeline", [])
     result["analysis_route"] = route

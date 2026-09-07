@@ -22,12 +22,19 @@ class VideoUploadMemoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             video = Path(temp_dir) / "source.mp4"
             video.write_bytes(b"small-video")
-            with mock.patch.object(pipeline, "files_api_observe", return_value=({}, {})) as files_api, \
-                 mock.patch.object(pipeline, "inline_observe") as inline:
+            with mock.patch.object(pipeline, "files_api_observe", return_value=({}, {})) as files_api:
                 pipeline.run_video_json_prompt(video, "key", "model", "prompt")
 
             files_api.assert_called_once()
-            inline.assert_not_called()
+
+    def test_explicit_legacy_inline_limit_still_uses_files_api(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = Path(temp_dir) / "source.mp4"
+            video.write_bytes(b"small-video")
+            with mock.patch.object(pipeline, "files_api_observe", return_value=({}, {})) as files_api:
+                pipeline.run_video_json_prompt(video, "key", "model", "prompt", inline_max_mb=999)
+
+            files_api.assert_called_once()
 
     def test_files_api_reuses_uploaded_video_in_same_process(self) -> None:
         active_file = {"name": "files/123", "uri": "https://files.example/123", "state": "ACTIVE"}

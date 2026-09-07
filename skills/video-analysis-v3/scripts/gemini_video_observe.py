@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import shutil
@@ -310,24 +309,9 @@ def normalize_evidence_bundle(result: dict) -> dict:
 
 
 def inline_observe(video: Path, key: str, model: str, prompt: str, mime: str) -> tuple[dict, dict]:
-    data = base64.b64encode(video.read_bytes()).decode()
-    body = {"contents": [{"parts": [{"inline_data": {"mime_type": mime, "data": data}}, {"text": prompt}]}]}
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "x-goog-api-key": key},
-    )
-    def _send():
-        try:
-            with urllib.request.urlopen(req, timeout=240) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"Gemini inline HTTP {exc.code}: {detail}") from exc
-
-    api_resp = retry_call("Gemini inline request", _send, attempts=2, sleep_sec=2)
-    return parse_json_text(extract_text(api_resp)), api_resp
+    # Compatibility alias: video bytes are never embedded into JSON because
+    # that multiplies memory usage while Python builds the base64 request.
+    return files_api_observe(video, key, model, prompt, mime)
 
 
 def upload_file(video: Path, key: str, mime: str) -> dict:
@@ -477,22 +461,14 @@ def main() -> int:
         video = Path(args.video)
         prompt = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else OBSERVATION_PROMPT
         key, key_source = api_key(args.api_key, args.api_key_file)
-        route = "inline-observation"
-        if video.stat().st_size <= args.inline_max_mb * 1024 * 1024:
-            result, raw = inline_observe(video, key, args.model, prompt, args.mime)
-        else:
-            route = "files-api-observation"
-            result, raw = files_api_observe(video, key, args.model, prompt, args.mime)
+        route = "files-api-observation"
+        result, raw = files_api_observe(video, key, args.model, prompt, args.mime)
     except RuntimeError as exc:
         if "User location is not supported for the API use" in str(exc):
             print(str(exc), file=sys.stderr)
             return 1
-        if route == "inline-observation":
-            route = "files-api-observation"
-            result, raw = files_api_observe(video, key, args.model, prompt, args.mime)
-        else:
-            print(str(exc), file=sys.stderr)
-            return 1
+        print(str(exc), file=sys.stderr)
+        return 1
     try:
         result = normalize_evidence_bundle(result)
         result["analysis_route"] = route

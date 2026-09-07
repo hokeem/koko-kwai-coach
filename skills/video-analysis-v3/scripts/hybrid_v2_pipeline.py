@@ -20,7 +20,6 @@ from gemini_video_observe import (
     api_key,
     extract_text,
     files_api_observe,
-    inline_observe,
     parse_json_text,
     retry_call,
 )
@@ -987,8 +986,6 @@ def run_video_json_prompt(
     mime: str = "video/mp4",
     inline_max_mb: float = DEFAULT_INLINE_MAX_MB,
 ) -> tuple[dict, dict]:
-    if video.stat().st_size <= inline_max_mb * 1024 * 1024:
-        return inline_observe(video, key, model, prompt, mime)
     return files_api_observe(video, key, model, prompt, mime)
 
 
