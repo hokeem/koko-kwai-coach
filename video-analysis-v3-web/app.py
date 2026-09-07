@@ -17880,6 +17880,36 @@ def trigger_creator_center_sync_background(reason: str = "library_update") -> No
     threading.Thread(target=_run, name=f"creator-sync-{reason}", daemon=True).start()
 
 
+def trigger_creator_entry_sync_background(entry_id: str, reason: str = "library_entry_update") -> None:
+    entry_id = str(entry_id or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        return
+    target_url = urllib.parse.urljoin(CREATOR_CENTER_SYNC_URL, "sync-entry")
+
+    def _run() -> None:
+        try:
+            request = urllib.request.Request(
+                target_url,
+                data=json.dumps({"entry_id": entry_id}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json", "User-Agent": "KokoScriptLibrary/1.0"},
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+            if not isinstance(payload, dict) or not payload.get("ok"):
+                raise RuntimeError(str(payload))
+        except Exception as exc:
+            log_runtime_warning(
+                "creator_center_entry_sync_failed",
+                "Creator center entry sync failed.",
+                reason=reason,
+                entry_id=entry_id,
+                error=friendly_error(str(exc)),
+            )
+
+    threading.Thread(target=_run, name=f"creator-entry-sync-{reason}", daemon=True).start()
+
+
 def push_creator_import_to_center(entry: dict[str, Any], script_json: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     html_path = output_dir / "script_table_pt.html"
     if not html_path.exists():
@@ -18942,6 +18972,14 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/library":
             self.send_json({"entries": load_library_entries()})
             return
+        library_entry_match = re.fullmatch(r"/api/library/([0-9a-f]{32})", parsed.path)
+        if library_entry_match:
+            entry = library_entry_by_id(library_entry_match.group(1))
+            if not entry:
+                self.send_json({"ok": False, "error": "Script not found."}, status=404)
+                return
+            self.send_json({"ok": True, "entry": entry})
+            return
         library_workbench_match = re.fullmatch(r"/api/library-workbench/([0-9a-f]{32})", parsed.path)
         if library_workbench_match:
             try:
@@ -19190,6 +19228,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "Script not found."}, status=404)
                 return
             trigger_creator_center_sync_background("reference_video_update")
+            trigger_creator_entry_sync_background(agent_reference_match.group(1), "reference_video_update")
             self.send_json({"ok": True, **reference_video_state(entry)})
             return
         if parsed.path == "/api/content-radar/refresh":
@@ -19718,6 +19757,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": friendly_error(str(exc))}, status=500)
                     return
                 trigger_creator_center_sync_background("confirm_library")
+                trigger_creator_entry_sync_background(item_id, "confirm_library")
                 self.send_json({"ok": True, "item": updated_item, "saved_to_library": True})
                 return
             try:
