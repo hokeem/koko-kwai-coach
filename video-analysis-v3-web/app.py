@@ -1646,6 +1646,91 @@ def save_library_entries(entries: list[dict[str, Any]]) -> bool:
         raise
 
 
+def reference_video_state(entry: dict[str, Any]) -> dict[str, Any]:
+    enabled = entry.get("reference_video_enabled") is not False
+    return {
+        "entry_id": str(entry.get("entry_id") or ""),
+        "video_url": str(entry.get("video_url") or ""),
+        "reference_video_enabled": enabled,
+        "reference_video_status": str(
+            entry.get("reference_video_status")
+            or ("active" if enabled else "hidden_pending_replacement")
+        ),
+        "reference_video_replacement_key": str(
+            entry.get("reference_video_replacement_key") or entry.get("entry_id") or ""
+        ),
+        "reference_video_original_url": str(entry.get("reference_video_original_url") or ""),
+        "reference_video_updated_at": str(entry.get("reference_video_updated_at") or ""),
+        "reference_video_update_source": str(entry.get("reference_video_update_source") or ""),
+        "reference_video_request_id": str(entry.get("reference_video_request_id") or ""),
+    }
+
+
+def update_library_reference_video(entry_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    entry_id = str(entry_id or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", entry_id):
+        raise RuntimeError("Invalid script entry_id.")
+    video_url = str(payload.get("video_url") or "").strip()
+    if not video_url.startswith(("http://", "https://")):
+        raise RuntimeError("video_url must be a public HTTP(S) URL.")
+    enabled = parse_bool_setting(payload.get("reference_video_enabled", True), True)
+    request_id = str(payload.get("request_id") or "").strip()[:160]
+    update_source = str(payload.get("source") or "agent_api").strip()[:80] or "agent_api"
+    updated_at = now_iso()
+    updated_entry: dict[str, Any] | None = None
+    with job_lock:
+        entries = load_library_entries()
+        for entry in entries:
+            if str(entry.get("entry_id") or "") != entry_id:
+                continue
+            previous_url = str(entry.get("video_url") or "")
+            previous_enabled = entry.get("reference_video_enabled") is not False
+            if request_id and request_id == str(entry.get("reference_video_request_id") or ""):
+                return dict(entry)
+            history = entry.get("reference_video_history")
+            history = list(history) if isinstance(history, list) else []
+            if previous_url and (previous_url != video_url or previous_enabled != enabled):
+                history.append({
+                    "video_url": previous_url,
+                    "reference_video_enabled": previous_enabled,
+                    "replaced_at": updated_at,
+                    "source": update_source,
+                })
+            entry["reference_video_original_url"] = str(entry.get("reference_video_original_url") or previous_url)
+            entry["video_url"] = video_url
+            entry["reference_video_enabled"] = enabled
+            entry["reference_video_status"] = "active" if enabled else "hidden"
+            entry["reference_video_replacement_key"] = entry_id
+            entry["reference_video_updated_at"] = updated_at
+            entry["reference_video_update_source"] = update_source
+            entry["reference_video_request_id"] = request_id
+            entry["reference_video_history"] = history[-20:]
+            updated_entry = dict(entry)
+            break
+        if updated_entry is None:
+            return None
+        if not save_library_entries(entries):
+            raise RuntimeError("Could not save the script library.")
+        for job in jobs.values():
+            candidates = [job, *(job.get("items") or [])]
+            for candidate in candidates:
+                if str(candidate.get("id") or "") != entry_id:
+                    continue
+                candidate.update({
+                    "video_url": video_url,
+                    "reference_video_enabled": enabled,
+                    "reference_video_status": updated_entry["reference_video_status"],
+                    "reference_video_replacement_key": entry_id,
+                    "reference_video_original_url": updated_entry["reference_video_original_url"],
+                    "reference_video_updated_at": updated_at,
+                    "reference_video_update_source": update_source,
+                    "reference_video_request_id": request_id,
+                    "updated_at": updated_at,
+                })
+        save_jobs()
+    return updated_entry
+
+
 def load_error_case_entries() -> list[dict[str, Any]]:
     data = read_json_file(ERROR_CASE_LIBRARY_FILE, default=[])
     if not isinstance(data, list):
@@ -7318,6 +7403,9 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "edited": bool(item.get("edited")),
         "saved_to_library_at": item.get("saved_to_library_at") or "",
         "reference_video_enabled": item.get("reference_video_enabled") is not False,
+        "reference_video_status": item.get("reference_video_status") or "",
+        "reference_video_replacement_key": item.get("reference_video_replacement_key") or item.get("id") or "",
+        "reference_video_updated_at": item.get("reference_video_updated_at") or "",
         "library_date": normalize_library_date(item.get("library_date")) if item.get("library_date") else "",
         "in_library": bool(item.get("saved_to_library_at")) or library_entry_exists(str(item.get("id") or "")),
         "source_video_available": source_video_available,
@@ -7455,6 +7543,8 @@ def agent_item_view(item: dict[str, Any], *, include_script: bool = True) -> dic
         "location_tag": item.get("location_tag") or "",
         "library_date": public.get("library_date") or "",
         "reference_video_enabled": public.get("reference_video_enabled") is not False,
+        "reference_video_status": public.get("reference_video_status") or "",
+        "reference_video_replacement_key": public.get("reference_video_replacement_key") or public.get("id") or "",
         "telekwai": bool(public.get("telekwai")),
         "script_type": public.get("script_type") or "standard",
         "manual_tags": item.get("manual_tags") if isinstance(item.get("manual_tags"), dict) else {},
@@ -7473,6 +7563,8 @@ def agent_item_view(item: dict[str, Any], *, include_script: bool = True) -> dic
         "content_type": public.get("content_type") or "",
         "display_language": public.get("display_language") or "zh",
         "reference_video_enabled": public.get("reference_video_enabled") is not False,
+        "reference_video_status": public.get("reference_video_status") or "",
+        "reference_video_replacement_key": public.get("reference_video_replacement_key") or public.get("id") or "",
         "library_date": public.get("library_date") or "",
         "saved_to_library": bool(public.get("in_library")),
         "artifacts": {
@@ -8948,6 +9040,44 @@ def build_library_entry_payload(parent_job_id: str, item: dict[str, Any], *, use
         "actual_saved_at": now_iso(),
         "library_date": selected_library_date,
         "reference_video_enabled": bool(reference_video_enabled),
+        "reference_video_status": str(
+            item.get("reference_video_status")
+            or existing.get("reference_video_status")
+            or ("active" if reference_video_enabled else "hidden_pending_replacement")
+        ),
+        "reference_video_replacement_key": str(
+            item.get("reference_video_replacement_key")
+            or existing.get("reference_video_replacement_key")
+            or item.get("id")
+            or ""
+        ),
+        "reference_video_original_url": str(
+            item.get("reference_video_original_url")
+            or existing.get("reference_video_original_url")
+            or (item.get("video_url") if not reference_video_enabled else "")
+            or ""
+        ),
+        "reference_video_updated_at": str(
+            item.get("reference_video_updated_at")
+            or existing.get("reference_video_updated_at")
+            or item.get("saved_to_library_at")
+            or now_iso()
+        ),
+        "reference_video_update_source": str(
+            item.get("reference_video_update_source")
+            or existing.get("reference_video_update_source")
+            or ("batch_hidden_pending_replacement" if not reference_video_enabled else "analysis_source")
+        ),
+        "reference_video_request_id": str(
+            item.get("reference_video_request_id")
+            or existing.get("reference_video_request_id")
+            or ""
+        ),
+        "reference_video_history": (
+            list(existing.get("reference_video_history") or [])
+            if isinstance(existing.get("reference_video_history"), list)
+            else []
+        ),
         "location_tag": item.get("location_tag") or existing.get("location_tag") or "",
         "location_tag_pt": item.get("location_tag_pt") or existing.get("location_tag_pt") or "",
         "manual_tags": item.get("manual_tags") if isinstance(item.get("manual_tags"), dict) else existing.get("manual_tags") or {},
@@ -18514,6 +18644,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     "submit": "POST /api/agent/v1/video-analysis",
                     "status_and_result": "GET /api/agent/v1/video-analysis/{job_id}",
                     "cancel": "POST /api/agent/v1/video-analysis/{job_id}/cancel",
+                    "reference_video_status": "GET /api/agent/v1/library/{entry_id}/reference-video",
+                    "replace_reference_video": "POST /api/agent/v1/library/{entry_id}/reference-video",
                 },
                 "modes": ["full", "understanding"],
                 "content_types": LIBRARY_FILTER_LABELS,
@@ -18553,6 +18685,16 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "Job not found."}, status=404)
                 return
             self.send_json(agent_job_view(snapshot, include_script=include_script))
+            return
+        agent_reference_match = re.fullmatch(r"/api/agent/v1/library/([0-9a-f]{32})/reference-video", parsed.path)
+        if agent_reference_match:
+            if not self.require_agent_api():
+                return
+            entry = library_entry_by_id(agent_reference_match.group(1))
+            if not entry:
+                self.send_json({"ok": False, "error": "Script not found."}, status=404)
+                return
+            self.send_json({"ok": True, **reference_video_state(entry)})
             return
         if parsed.path == "/":
             self.send_html(page_html())
@@ -19028,6 +19170,28 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        agent_reference_match = re.fullmatch(r"/api/agent/v1/library/([0-9a-f]{32})/reference-video", parsed.path)
+        if agent_reference_match:
+            if not self.require_agent_api():
+                return
+            try:
+                payload = self.read_json()
+                entry = update_library_reference_video(agent_reference_match.group(1), payload)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"ok": False, "error": "Invalid JSON body."}, status=400)
+                return
+            except RuntimeError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
+                return
+            except Exception as exc:
+                self.send_json({"ok": False, "error": friendly_error(str(exc))}, status=500)
+                return
+            if not entry:
+                self.send_json({"ok": False, "error": "Script not found."}, status=404)
+                return
+            trigger_creator_center_sync_background("reference_video_update")
+            self.send_json({"ok": True, **reference_video_state(entry)})
+            return
         if parsed.path == "/api/content-radar/refresh":
             if not has_creator_admin_access(self):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
