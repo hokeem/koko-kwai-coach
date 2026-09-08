@@ -207,6 +207,42 @@ class ScriptTaxonomyTests(unittest.TestCase):
         finally:
             app.jobs = original_jobs
 
+    def test_library_workbench_preserves_telekwai_metadata(self) -> None:
+        entry_id = "a" * 32
+        original_jobs = app.jobs
+        app.jobs = {}
+        entry = {
+            "entry_id": entry_id,
+            "title": "Telekwai case",
+            "telekwai": True,
+            "script_type": "telekwai",
+            "taxonomy_source": "telekwai",
+            "duration_bucket": "",
+            "relationship_tags": ["couple"],
+            "format_tags": ["story_acting"],
+        }
+
+        def fake_read_json(path):
+            if str(path).endswith("script_table.json"):
+                return {"title": "Telekwai case", "rows": []}
+            return {}
+
+        try:
+            with (
+                mock.patch.object(app, "library_entry_by_id", return_value=entry),
+                mock.patch.object(app, "read_json", side_effect=fake_read_json),
+                mock.patch.object(app, "save_jobs"),
+            ):
+                _, _, item = app.ensure_library_edit_context(entry_id)
+
+            self.assertTrue(item["telekwai"])
+            self.assertEqual(item["script_type"], "telekwai")
+            self.assertEqual(item["taxonomy_source"], "telekwai")
+            self.assertIn("relationship_tags", item)
+            self.assertIn("format_tags", item)
+        finally:
+            app.jobs = original_jobs
+
 
 if __name__ == "__main__":
     unittest.main()

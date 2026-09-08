@@ -9199,6 +9199,16 @@ def find_item_context(item_id: str) -> tuple[str, int, dict[str, Any]] | None:
                     "content_type_source": job.get("content_type_source") or "auto",
                     "content_type_reasoning": job.get("content_type_reasoning") or "",
                     "content_type_confidence": job.get("content_type_confidence") or "",
+                    "telekwai": is_telekwai_script(job),
+                    "script_type": TELEKWAI_SCRIPT_TYPE if is_telekwai_script(job) else "standard",
+                    "taxonomy_version": job.get("taxonomy_version") or SCRIPT_TAXONOMY_VERSION,
+                    "taxonomy_source": job.get("taxonomy_source") or "",
+                    "taxonomy_confidence": job.get("taxonomy_confidence") or "",
+                    "duration_bucket": job.get("duration_bucket") or "",
+                    **{
+                        f"{dimension}_tags": normalize_taxonomy_tag_ids(dimension, job.get(f"{dimension}_tags"))
+                        for dimension in SCRIPT_TAG_DIMENSIONS
+                    },
                     "title": job.get("title") or "",
                     "reference_video_enabled": job.get("reference_video_enabled") is not False,
                     "library_date": job.get("library_date") or "",
@@ -9256,6 +9266,16 @@ def ensure_library_edit_context(entry_id: str) -> tuple[str, int, dict[str, Any]
         "content_type_source": entry.get("content_type_source") or "auto",
         "content_type_reasoning": entry.get("content_type_reasoning") or "",
         "content_type_confidence": entry.get("content_type_confidence") or "",
+        "telekwai": is_telekwai_script(entry),
+        "script_type": TELEKWAI_SCRIPT_TYPE if is_telekwai_script(entry) else "standard",
+        "taxonomy_version": entry.get("taxonomy_version") or SCRIPT_TAXONOMY_VERSION,
+        "taxonomy_source": entry.get("taxonomy_source") or "",
+        "taxonomy_confidence": entry.get("taxonomy_confidence") or "",
+        "duration_bucket": entry.get("duration_bucket") or "",
+        **{
+            f"{dimension}_tags": normalize_taxonomy_tag_ids(dimension, entry.get(f"{dimension}_tags"))
+            for dimension in SCRIPT_TAG_DIMENSIONS
+        },
         "title": entry.get("title") or current_script.get("title") or "Untitled Script",
         "display_language": display_language,
         "review_status": "",
@@ -19940,6 +19960,8 @@ class AppHandler(BaseHTTPRequestHandler):
             if not updated:
                 self.send_json({"error": "Library entry not found."}, status=404)
                 return
+            trigger_creator_center_sync_background("taxonomy_update")
+            trigger_creator_entry_sync_background(entry_id, "taxonomy_update")
             self.send_json({"ok": True, "entry": updated})
             return
         if parsed.path == "/api/library/sync-creator-center":
