@@ -241,7 +241,10 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn("data-play-id", html)
         self.assertIn("www.tiktok.com/player/v1/", html)
         self.assertIn("activePlayer:null", html)
-        self.assertIn("autoplay=1", html)
+        self.assertIn("autoplay=0", html)
+        self.assertIn("onPlayerReady", html)
+        self.assertIn("'x-tiktok-player':true", html)
+        self.assertIn("playerCommand(frame,'play')", html)
         self.assertNotIn("IntersectionObserver", html)
         self.assertNotIn('target="_blank"', html)
 
