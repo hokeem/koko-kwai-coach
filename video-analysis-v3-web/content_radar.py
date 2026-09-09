@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -55,7 +55,19 @@ V2_KEYWORDS = [
     "couple prank reaction",
 ]
 PROMPT_KEYWORD_SETS = {"v1": DEFAULT_KEYWORDS, "v2": V2_KEYWORDS}
-MANUAL_REFRESH_LIMIT = 30
+RELAXED_KEYWORDS = [
+    "funny relationship",
+    "married couple funny",
+    "husband wife funny",
+    "funny marriage",
+    "boyfriend girlfriend funny",
+    "couple jokes",
+    "relationship prank",
+    "casal divertido",
+    "relacionamento engraçado",
+    "pegadinha casal",
+]
+MANUAL_REFRESH_LIMIT = 50
 DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
 VALID_DECISIONS = {"pending", "selected", "produced", "rejected"}
 CURATED_BATCH_ID = "2026-09-03-apify-tiktok-shortlist"
@@ -565,7 +577,7 @@ class ContentRadar:
             raise ValueError("关键词版本必须是 v1 或 v2")
         return list(self.keyword_sets[version])
 
-    def _call_apify(self, token: str, *, keywords: list[str], max_results: int) -> list[dict[str, Any]]:
+    def _call_apify(self, token: str, *, keywords: list[str], max_results: int, lookback: str) -> list[dict[str, Any]]:
         actor = urllib.parse.quote(self.actor_id, safe="~")
         url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
         payload = {
@@ -574,7 +586,7 @@ class ContentRadar:
             "maxItemsPerKeyword": 30,
             "maxTotalResults": max_results,
             "sort": "mostViewed",
-            "datePosted": self.lookback,
+            "datePosted": lookback,
             "deduplicateAcrossKeywords": True,
             "minViews": self.min_views,
             "includeKeywordInsights": False,
@@ -705,61 +717,145 @@ class ContentRadar:
             })
         return {"ok": True, "items": items, "raw_count": len(raw_items)}
 
+    def _search_stages(self, version: str, target_count: int) -> list[dict[str, Any]]:
+        strict_keywords = self.keywords_for(version)
+        relaxed_keywords = list(dict.fromkeys([*strict_keywords, *DEFAULT_KEYWORDS, *V2_KEYWORDS, *RELAXED_KEYWORDS]))
+        return [
+            {"id": "strict_30", "label": "原关键词 · 近30天", "lookback": "last30Days", "max_age_days": 30, "keywords": strict_keywords, "max_results": max(80, target_count * 2)},
+            {"id": "strict_50", "label": "原关键词 · 近50天", "lookback": "last90Days", "max_age_days": 50, "keywords": strict_keywords, "max_results": max(100, target_count * 2)},
+            {"id": "strict_100", "label": "原关键词 · 近100天", "lookback": "any", "max_age_days": 100, "keywords": strict_keywords, "max_results": max(120, target_count * 3)},
+            {"id": "strict_300", "label": "原关键词 · 近300天", "lookback": "any", "max_age_days": 300, "keywords": strict_keywords, "max_results": max(150, target_count * 3)},
+            {"id": "relaxed_300", "label": "放宽关键词 · 近300天", "lookback": "any", "max_age_days": 300, "keywords": relaxed_keywords, "max_results": max(180, target_count * 4), "keywords_relaxed": True},
+        ]
+
     def refresh(self, *, reason: str = "manual", prompt_version: str | None = None, max_results: int | None = None) -> dict[str, Any]:
         version = str(prompt_version or self.prompt_version).strip().lower()
         keywords = self.keywords_for(version)
-        result_limit = max(1, min(120, int(max_results or self.max_results)))
+        target_count = max(1, min(120, int(max_results or self.max_results)))
         if not self.refresh_lock.acquire(blocking=False):
             return {"ok": True, "started": False, "message": "采集正在进行中"}
         self._refreshing = True
         started_at = iso_now()
+        stage_reports: list[dict[str, Any]] = []
         try:
             token = os.environ.get("APIFY_TOKEN", "").strip()
             if not token:
                 raise RuntimeError("服务尚未配置 APIFY_TOKEN")
-            raw_items = self._call_apify(token, keywords=keywords, max_results=result_limit)
-            normalized = [post for item in raw_items if (post := normalize_apify_item(item)) is not None]
-            normalized = [post for post in normalized if number((post.get("metrics") or {}).get("views")) >= self.min_views]
-            unique: dict[str, dict[str, Any]] = {}
-            for post in normalized:
-                unique[post["id"]] = post
-            ranked = list(unique.values())
-            ranked.sort(
-                key=lambda post: (
-                    number((post.get("analysis") or {}).get("score")),
-                    number((post.get("metrics") or {}).get("views")),
-                ),
-                reverse=True,
-            )
+            with self.lock:
+                existing_ids = set(self._read().get("posts", {}))
+            collected: dict[str, dict[str, Any]] = {}
+            items_received = 0
+            for stage in self._search_stages(version, target_count):
+                if len(collected) >= target_count:
+                    break
+                report = {
+                    "id": stage["id"],
+                    "label": stage["label"],
+                    "max_age_days": stage["max_age_days"],
+                    "keyword_count": len(stage["keywords"]),
+                    "keywords_relaxed": bool(stage.get("keywords_relaxed")),
+                }
+                try:
+                    raw_items = self._call_apify(
+                        token,
+                        keywords=stage["keywords"],
+                        max_results=stage["max_results"],
+                        lookback=stage["lookback"],
+                    )
+                except Exception as exc:
+                    report.update({"status": "error", "error": str(exc)[:500], "received": 0, "added": 0})
+                    stage_reports.append(report)
+                    break
+                items_received += len(raw_items)
+                normalized = [post for item in raw_items if (post := normalize_apify_item(item)) is not None]
+                invalid_count = len(raw_items) - len(normalized)
+                below_views = [post for post in normalized if number((post.get("metrics") or {}).get("views")) < self.min_views]
+                view_eligible = [post for post in normalized if number((post.get("metrics") or {}).get("views")) >= self.min_views]
+                cutoff = utc_now() - timedelta(days=stage["max_age_days"])
+                missing_published_at = [post for post in view_eligible if not post.get("published_at")]
+                age_eligible = [
+                    post for post in view_eligible
+                    if parse_datetime(post.get("published_at")) >= cutoff
+                    or (not post.get("published_at") and stage["lookback"] != "any")
+                ]
+                outside_age = len(view_eligible) - len(age_eligible) - (len(missing_published_at) if stage["lookback"] == "any" else 0)
+                stage_unique = {post["id"]: post for post in age_eligible}
+                duplicate_existing = sum(1 for post_id in stage_unique if post_id in existing_ids)
+                duplicate_batch = sum(1 for post_id in stage_unique if post_id in collected)
+                candidates = [
+                    post for post_id, post in stage_unique.items()
+                    if post_id not in existing_ids and post_id not in collected
+                ]
+                candidates.sort(
+                    key=lambda post: (
+                        number((post.get("analysis") or {}).get("score")),
+                        number((post.get("metrics") or {}).get("views")),
+                    ),
+                    reverse=True,
+                )
+                remaining = target_count - len(collected)
+                added = candidates[:remaining]
+                for post in added:
+                    post["search_stage"] = stage["id"]
+                    post["search_stage_label"] = stage["label"]
+                    collected[post["id"]] = post
+                report.update({
+                    "status": "success",
+                    "received": len(raw_items),
+                    "invalid": invalid_count,
+                    "below_min_views": len(below_views),
+                    "outside_time_window": outside_age,
+                    "missing_published_at": len(missing_published_at),
+                    "duplicate_existing": duplicate_existing,
+                    "duplicate_this_run": duplicate_batch,
+                    "eligible_new": len(candidates),
+                    "added": len(added),
+                    "total_new": len(collected),
+                })
+                stage_reports.append(report)
+            ranked = list(collected.values())
             with self.lock:
                 state = self._read()
                 existing = state.setdefault("posts", {})
-                new_count = 0
-                updated_count = 0
                 for post in ranked:
-                    previous = existing.get(post["id"], {})
-                    if not previous:
-                        new_count += 1
-                    else:
-                        updated_count += 1
-                    post["decision"] = previous.get("decision", "pending")
-                    post["operator_note"] = previous.get("operator_note", "")
-                    post["decision_updated_at"] = previous.get("decision_updated_at", "")
-                    post["first_seen_at"] = previous.get("first_seen_at", iso_now())
-                    post["prompt_version"] = previous.get("prompt_version") or version
+                    post["decision"] = "pending"
+                    post["operator_note"] = ""
+                    post["decision_updated_at"] = ""
+                    post["first_seen_at"] = iso_now()
+                    post["prompt_version"] = version
                     existing[post["id"]] = post
+                new_count = len(ranked)
+                target_met = new_count >= target_count
+                duplicate_total = sum(int(stage.get("duplicate_existing") or 0) + int(stage.get("duplicate_this_run") or 0) for stage in stage_reports)
+                below_views_total = sum(int(stage.get("below_min_views") or 0) for stage in stage_reports)
+                outside_time_total = sum(int(stage.get("outside_time_window") or 0) for stage in stage_reports)
+                if target_met:
+                    shortfall_reason = ""
+                elif any(stage.get("status") == "error" for stage in stage_reports):
+                    shortfall_reason = "Apify抓取阶段发生错误，流程提前停止。"
+                elif duplicate_total:
+                    shortfall_reason = "搜索结果中已有视频较多，去重后不足50条新内容。"
+                elif below_views_total or outside_time_total:
+                    shortfall_reason = "部分结果未达到100万播放量或超出300天时间范围。"
+                else:
+                    shortfall_reason = "TikTok在当前关键词和时间范围内返回的合格视频不足。"
                 run = {
                     "started_at": started_at,
                     "finished_at": iso_now(),
                     "status": "success",
                     "reason": reason,
-                    "items_received": len(raw_items),
+                    "items_received": items_received,
                     "posts_saved": len(ranked),
                     "new_posts": new_count,
-                    "updated_posts": updated_count,
+                    "updated_posts": 0,
                     "prompt_version": version,
                     "keywords": keywords,
-                    "requested_max_results": result_limit,
+                    "target_count": target_count,
+                    "target_met": target_met,
+                    "shortfall": max(0, target_count - new_count),
+                    "shortfall_reason": shortfall_reason,
+                    "stages": stage_reports,
+                    "relaxed_keywords_used": any(stage.get("keywords_relaxed") for stage in stage_reports),
                 }
                 state["last_run"] = run
                 state["runs"] = [run, *(state.get("runs") or [])][:30]
@@ -767,7 +863,7 @@ class ContentRadar:
             self.start_thumbnail_cache()
             return {"ok": True, "started": True, "run": run}
         except Exception as exc:
-            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": version, "keywords": keywords, "requested_max_results": result_limit}
+            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": version, "keywords": keywords, "target_count": target_count, "target_met": False, "shortfall": target_count, "shortfall_reason": "抓取服务运行失败。", "stages": stage_reports}
             with self.lock:
                 state = self._read()
                 state["last_run"] = run
@@ -794,7 +890,7 @@ class ContentRadar:
             name="content-radar-refresh",
             daemon=True,
         ).start()
-        return {"ok": True, "started": True, "prompt_version": version, "message": f"已开始抓取 {version.upper()}，本次最多 30 条，通常需要 1–3 分钟"}
+        return {"ok": True, "started": True, "prompt_version": version, "message": f"已开始抓取 {version.upper()}，将自动补足 50 条，可能需要 3–10 分钟"}
 
     def start_scheduler(self) -> None:
         """Kept for app startup compatibility; collection is manual-only."""

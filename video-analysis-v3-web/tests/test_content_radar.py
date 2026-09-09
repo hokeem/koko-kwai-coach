@@ -153,10 +153,10 @@ class ContentRadarTests(unittest.TestCase):
                 with patch.object(radar, "_call_apify", return_value=[{**item, "views": 2_500_000}]):
                     second = radar.refresh()
             self.assertEqual(second["run"]["new_posts"], 0)
-            self.assertEqual(second["run"]["updated_posts"], 1)
+            self.assertEqual(second["run"]["updated_posts"], 0)
             saved = radar.snapshot()["posts"][0]
             self.assertEqual(saved["decision"], "selected")
-            self.assertEqual(saved["metrics"]["views"], 2_500_000)
+            self.assertEqual(saved["metrics"]["views"], 2_000_000)
             self.assertEqual(saved["prompt_version"], "v1")
 
     def test_posts_are_sorted_by_latest_fetch_time_and_default_to_v1(self):
@@ -192,19 +192,35 @@ class ContentRadarTests(unittest.TestCase):
             versions = {post["id"]: post["prompt_version"] for post in radar.snapshot()["posts"]}
             self.assertEqual(versions, {"tiktok:2": "v2", "tiktok:1": "v1"})
 
-    def test_v2_refresh_uses_encapsulated_keywords_and_thirty_item_limit(self):
+    def test_v2_refresh_uses_encapsulated_keywords_and_fifty_item_target(self):
         with tempfile.TemporaryDirectory() as folder:
             radar = ContentRadar(Path(folder) / "state.json")
-            item = {"videoId": "2", "caption": "Couple daily life comedy", "authorUniqueId": "new", "views": 2_000_000}
+            items = [
+                {"videoId": str(index), "caption": "Couple daily life comedy", "authorUniqueId": f"new{index}", "views": 2_000_000}
+                for index in range(50)
+            ]
             with patch.dict(os.environ, {"APIFY_TOKEN": "test-token"}):
-                with patch.object(radar, "_call_apify", return_value=[item]) as call:
-                    result = radar.refresh(prompt_version="v2", max_results=30)
+                with patch.object(radar, "_call_apify", return_value=items) as call:
+                    result = radar.refresh(prompt_version="v2", max_results=50)
             self.assertTrue(result["ok"])
-            call.assert_called_once_with("test-token", keywords=V2_KEYWORDS, max_results=30)
-            saved = radar.snapshot()["posts"][0]
-            self.assertEqual(saved["prompt_version"], "v2")
+            call.assert_called_once_with("test-token", keywords=V2_KEYWORDS, max_results=100, lookback="last30Days")
+            self.assertTrue(all(post["prompt_version"] == "v2" for post in radar.snapshot()["posts"]))
             self.assertEqual(result["run"]["prompt_version"], "v2")
-            self.assertEqual(result["run"]["requested_max_results"], 30)
+            self.assertEqual(result["run"]["target_count"], 50)
+            self.assertTrue(result["run"]["target_met"])
+
+    def test_refresh_expands_time_before_keywords_and_reports_shortfall(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            with patch.dict(os.environ, {"APIFY_TOKEN": "test-token"}):
+                with patch.object(radar, "_call_apify", return_value=[]) as call:
+                    result = radar.refresh(prompt_version="v2", max_results=50)
+            self.assertFalse(result["run"]["target_met"])
+            self.assertEqual(result["run"]["shortfall"], 50)
+            self.assertEqual([stage["max_age_days"] for stage in result["run"]["stages"]], [30, 50, 100, 300, 300])
+            self.assertFalse(result["run"]["stages"][3]["keywords_relaxed"])
+            self.assertTrue(result["run"]["stages"][4]["keywords_relaxed"])
+            self.assertEqual(call.call_count, 5)
 
     def test_unknown_prompt_version_is_rejected_before_refresh_thread_starts(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -268,7 +284,9 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn('value="v1"', html)
         self.assertIn('value="v2"', html)
         self.assertIn("prompt_version:promptVersion", html)
-        self.assertIn("最多抓取 30 条", html)
+        self.assertIn("自动补足 50 条", html)
+        self.assertIn('id="shortfall-dialog"', html)
+        self.assertIn("shortfall_reason", html)
         self.assertNotIn("kokokwai" + "@2026", html)
 
     def test_thumbnail_cache_saves_a_stable_local_cover(self):

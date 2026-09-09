@@ -19294,7 +19294,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 result = content_radar.trigger_refresh(
                     reason="manual",
                     prompt_version=str(payload.get("prompt_version") or "v1"),
-                    max_results=30,
+                    max_results=50,
                 )
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
