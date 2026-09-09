@@ -124,6 +124,40 @@ class ContentRadarTests(unittest.TestCase):
             saved = radar.snapshot()["posts"][0]
             self.assertEqual(saved["decision"], "selected")
             self.assertEqual(saved["metrics"]["views"], 2_500_000)
+            self.assertEqual(saved["prompt_version"], "v1")
+
+    def test_posts_are_sorted_by_latest_fetch_time_and_default_to_v1(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            path.write_text(json.dumps({
+                "version": 1,
+                "posts": {
+                    "tiktok:older": {"id": "tiktok:older", "discovery_mode": "keyword", "fetched_at": "2026-09-01T08:00:00Z", "analysis": {"score": 99}},
+                    "tiktok:newer": {"id": "tiktok:newer", "discovery_mode": "keyword", "fetched_at": "2026-09-02T08:00:00Z", "analysis": {"score": 1}},
+                },
+                "runs": [],
+                "last_run": None,
+            }), encoding="utf-8")
+            posts = ContentRadar(path).snapshot()["posts"]
+            self.assertEqual([post["id"] for post in posts], ["tiktok:newer", "tiktok:older"])
+            self.assertTrue(all(post["prompt_version"] == "v1" for post in posts))
+
+    def test_new_prompt_version_is_saved_without_relabeling_existing_video(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            with patch.dict(os.environ, {"CONTENT_RADAR_PROMPT_VERSION": "v2", "APIFY_TOKEN": "test-token"}):
+                radar = ContentRadar(path)
+                old_item = {"videoId": "1", "caption": "Couple comedy", "authorUniqueId": "old", "views": 2_000_000}
+                with patch.object(radar, "_call_apify", return_value=[old_item]):
+                    radar.refresh()
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                saved["posts"]["tiktok:1"]["prompt_version"] = "v1"
+                path.write_text(json.dumps(saved), encoding="utf-8")
+                new_item = {"videoId": "2", "caption": "Couple skit", "authorUniqueId": "new", "views": 3_000_000}
+                with patch.object(radar, "_call_apify", return_value=[old_item, new_item]):
+                    radar.refresh()
+            versions = {post["id"]: post["prompt_version"] for post in radar.snapshot()["posts"]}
+            self.assertEqual(versions, {"tiktok:2": "v2", "tiktok:1": "v1"})
 
     def test_curated_batch_imports_once_without_overwriting_decisions(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -165,6 +199,8 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn('id="refresh-password"', html)
         self.assertIn("复制今年全部链接", html)
         self.assertIn("已完成", html)
+        self.assertIn("version-badge", html)
+        self.assertIn("post.prompt_version", html)
         self.assertNotIn("kokokwai" + "@2026", html)
 
     def test_thumbnail_cache_saves_a_stable_local_cover(self):

@@ -268,6 +268,8 @@ class ContentRadar:
         self.cover_dir = state_path.parent / "content_radar_covers"
         keywords = os.environ.get("CONTENT_RADAR_TIKTOK_KEYWORDS", ",".join(DEFAULT_KEYWORDS))
         self.keywords = list(dict.fromkeys(value.strip() for value in keywords.split(",") if value.strip()))[:20]
+        configured_version = os.environ.get("CONTENT_RADAR_PROMPT_VERSION", "v1").strip().lower()
+        self.prompt_version = configured_version if re.fullmatch(r"v[1-9]\d{0,2}", configured_version) else "v1"
         self.max_results = max(10, min(120, int(os.environ.get("CONTENT_RADAR_MAX_RESULTS", "40"))))
         self.min_views = max(1_000_000, int(os.environ.get("CONTENT_RADAR_MIN_VIEWS", "1000000")))
         lookback = os.environ.get("CONTENT_RADAR_LOOKBACK", "last30Days").strip()
@@ -299,9 +301,12 @@ class ContentRadar:
         with self.lock:
             state = self._read()
         posts = [post for post in state.get("posts", {}).values() if post.get("discovery_mode") == "keyword"]
+        for post in posts:
+            post["prompt_version"] = str(post.get("prompt_version") or "v1")
         posts.sort(
             key=lambda post: (
-                number((post.get("analysis") or {}).get("score")),
+                parse_datetime(post.get("fetched_at")),
+                parse_datetime(post.get("first_seen_at")),
                 parse_datetime(post.get("published_at")),
             ),
             reverse=True,
@@ -310,6 +315,7 @@ class ContentRadar:
         return {
             "ok": True,
             "keywords": self.keywords,
+            "prompt_version": self.prompt_version,
             "min_views": self.min_views,
             "lookback": self.lookback,
             "max_results": self.max_results,
@@ -341,7 +347,14 @@ class ContentRadar:
         with self.lock:
             state = self._read()
             imported_batches = state.setdefault("imported_batches", [])
+            backfilled = False
+            for existing_post in state.setdefault("posts", {}).values():
+                if existing_post.get("discovery_mode") == "keyword" and not existing_post.get("prompt_version"):
+                    existing_post["prompt_version"] = "v1"
+                    backfilled = True
             if CURATED_BATCH_ID in imported_batches:
+                if backfilled:
+                    self._write(state)
                 return 0
             posts = state.setdefault("posts", {})
             imported = 0
@@ -364,6 +377,7 @@ class ContentRadar:
                     "thumbnail_url": previous.get("thumbnail_url", ""),
                     "metrics": {**(previous.get("metrics") or {}), "views": views},
                     "matched_keyword": "curated test batch",
+                    "prompt_version": previous.get("prompt_version") or "v1",
                     "discovery_mode": "keyword",
                     "fetched_at": previous.get("fetched_at") or "2026-09-03T00:00:00Z",
                     "decision": previous.get("decision", "pending"),
@@ -414,6 +428,7 @@ class ContentRadar:
                 fresh["decision_updated_at"] = previous.get("decision_updated_at", "")
                 fresh["first_seen_at"] = previous.get("first_seen_at") or "2026-09-03T00:00:00Z"
                 fresh["fetched_at"] = previous.get("fetched_at") or fresh.get("fetched_at") or "2026-09-03T00:00:00Z"
+                fresh["prompt_version"] = previous.get("prompt_version") or "v1"
                 cached = self.cached_cover_url(fresh["post_id"])
                 if cached:
                     fresh["thumbnail_url"] = cached
@@ -673,6 +688,7 @@ class ContentRadar:
                     post["operator_note"] = previous.get("operator_note", "")
                     post["decision_updated_at"] = previous.get("decision_updated_at", "")
                     post["first_seen_at"] = previous.get("first_seen_at", iso_now())
+                    post["prompt_version"] = previous.get("prompt_version") or self.prompt_version
                     existing[post["id"]] = post
                 run = {
                     "started_at": started_at,
@@ -683,6 +699,7 @@ class ContentRadar:
                     "posts_saved": len(ranked),
                     "new_posts": new_count,
                     "updated_posts": updated_count,
+                    "prompt_version": self.prompt_version,
                 }
                 state["last_run"] = run
                 state["runs"] = [run, *(state.get("runs") or [])][:30]
@@ -690,7 +707,7 @@ class ContentRadar:
             self.start_thumbnail_cache()
             return {"ok": True, "started": True, "run": run}
         except Exception as exc:
-            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000]}
+            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": self.prompt_version}
             with self.lock:
                 state = self._read()
                 state["last_run"] = run
