@@ -89,6 +89,39 @@ class ContentRadarTests(unittest.TestCase):
             self.assertEqual(saved["posts"]["tiktok:1"]["decision"], "selected")
             self.assertEqual(saved["posts"]["tiktok:1"]["operator_note"], "适合翻拍")
 
+    def test_bulk_marks_selected_posts_as_produced(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            path.write_text(json.dumps({
+                "version": 1,
+                "posts": {
+                    "tiktok:1": {"id": "tiktok:1", "discovery_mode": "keyword", "decision": "selected"},
+                    "tiktok:2": {"id": "tiktok:2", "discovery_mode": "keyword", "decision": "selected"},
+                    "tiktok:3": {"id": "tiktok:3", "discovery_mode": "keyword", "decision": "rejected"},
+                },
+                "runs": [],
+                "last_run": None,
+            }), encoding="utf-8")
+            radar = ContentRadar(path)
+            updated = radar.set_decisions(["tiktok:1", "tiktok:2", "tiktok:2"], "produced")
+            self.assertEqual(len(updated), 2)
+            snapshot = radar.snapshot()
+            self.assertEqual(snapshot["counts"], {"pending": 0, "selected": 0, "produced": 2, "rejected": 1})
+
+    def test_bulk_decision_rejects_missing_posts_without_partial_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            path.write_text(json.dumps({
+                "version": 1,
+                "posts": {"tiktok:1": {"id": "tiktok:1", "discovery_mode": "keyword", "decision": "selected"}},
+                "runs": [],
+                "last_run": None,
+            }), encoding="utf-8")
+            radar = ContentRadar(path)
+            with self.assertRaises(KeyError):
+                radar.set_decisions(["tiktok:1", "tiktok:missing"], "produced")
+            self.assertEqual(radar.snapshot()["posts"][0]["decision"], "selected")
+
     def test_daily_collection_is_paused_by_default(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.dict(os.environ, {"CONTENT_RADAR_DAILY_ENABLED": "1"}):
@@ -197,10 +230,17 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn("post.fetched_at", html)
         self.assertIn('id="refresh-auth-form"', html)
         self.assertIn('id="refresh-password"', html)
-        self.assertIn("复制今年全部链接", html)
+        self.assertIn("复制今年链接", html)
         self.assertIn("已完成", html)
         self.assertIn("version-badge", html)
         self.assertIn("post.prompt_version", html)
+        self.assertIn('data-view="produced"', html)
+        self.assertIn("已制作", html)
+        self.assertIn("未通过", html)
+        self.assertIn('id="select-all"', html)
+        self.assertIn('id="mark-produced"', html)
+        self.assertIn("/api/content-radar/decision-bulk", html)
+        self.assertIn("复制未通过链接", html)
         self.assertNotIn("kokokwai" + "@2026", html)
 
     def test_thumbnail_cache_saves_a_stable_local_cover(self):

@@ -35,7 +35,7 @@ DEFAULT_KEYWORDS = [
     "esquete de casal",
 ]
 DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
-VALID_DECISIONS = {"pending", "selected", "rejected"}
+VALID_DECISIONS = {"pending", "selected", "produced", "rejected"}
 CURATED_BATCH_ID = "2026-09-03-apify-tiktok-shortlist"
 CURATED_DATASET_ID = "v09ZyrDkrBEaovxOL"
 DEFAULT_REFRESH_PASSWORD_SHA256 = "65fea9f52c567036ccee405d09f214764054fe64c451b0b4d7f30afdd49a77e4"
@@ -330,7 +330,7 @@ class ContentRadar:
 
     def set_decision(self, post_id: str, decision: str, note: str = "") -> dict[str, Any]:
         if decision not in VALID_DECISIONS:
-            raise ValueError("decision must be pending, selected, or rejected")
+            raise ValueError("decision must be pending, selected, produced, or rejected")
         with self.lock:
             state = self._read()
             post = state.get("posts", {}).get(post_id)
@@ -341,6 +341,29 @@ class ContentRadar:
             post["decision_updated_at"] = iso_now()
             self._write(state)
             return post
+
+    def set_decisions(self, post_ids: list[str], decision: str) -> list[dict[str, Any]]:
+        """Apply one workflow decision to multiple posts in a single state write."""
+        if decision not in VALID_DECISIONS:
+            raise ValueError("decision must be pending, selected, produced, or rejected")
+        cleaned = list(dict.fromkeys(str(post_id or "").strip() for post_id in post_ids if str(post_id or "").strip()))[:500]
+        if not cleaned:
+            raise ValueError("post_ids must contain at least one post id")
+        with self.lock:
+            state = self._read()
+            posts = state.get("posts", {})
+            missing = [post_id for post_id in cleaned if not isinstance(posts.get(post_id), dict)]
+            if missing:
+                raise KeyError(missing[0])
+            updated_at = iso_now()
+            updated: list[dict[str, Any]] = []
+            for post_id in cleaned:
+                post = posts[post_id]
+                post["decision"] = decision
+                post["decision_updated_at"] = updated_at
+                updated.append(post)
+            self._write(state)
+            return updated
 
     def import_curated_batch(self) -> int:
         """Import the already-paid September 3 shortlist once, without calling Apify."""

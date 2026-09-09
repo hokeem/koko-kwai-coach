@@ -19314,6 +19314,30 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "post": post})
             return
+        if parsed.path == "/api/content-radar/decision-bulk":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            try:
+                payload = self.read_json()
+                raw_post_ids = payload.get("post_ids") or []
+                if not isinstance(raw_post_ids, list):
+                    raise ValueError("post_ids 必须是数组")
+                posts = content_radar.set_decisions(
+                    [str(value or "").strip() for value in raw_post_ids],
+                    str(payload.get("decision") or "").strip(),
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"error": "Invalid JSON body."}, status=400)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except KeyError:
+                self.send_json({"error": "部分视频记录不存在，请刷新后重试。"}, status=404)
+                return
+            self.send_json({"ok": True, "updated": len(posts), "posts": posts})
+            return
         if parsed.path == "/api/content-radar/search":
             if not has_creator_admin_access(self):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
