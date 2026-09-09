@@ -34,6 +34,28 @@ DEFAULT_KEYWORDS = [
     "relacionamento com humor",
     "esquete de casal",
 ]
+V2_KEYWORDS = [
+    "humor de casal",
+    "couple comedy",
+    "couples comedy",
+    "husband wife comedy",
+    "husband wife humor",
+    "boyfriend girlfriend comedy",
+    "couple skit",
+    "couple daily life comedy",
+    "funny couple at home",
+    "casal engraçado",
+    "comédia de casal",
+    "marido e mulher humor",
+    "humor de pareja",
+    "comedia de pareja",
+    "matrimonio humor",
+    "funny couple prank",
+    "wife husband reaction",
+    "couple prank reaction",
+]
+PROMPT_KEYWORD_SETS = {"v1": DEFAULT_KEYWORDS, "v2": V2_KEYWORDS}
+MANUAL_REFRESH_LIMIT = 30
 DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
 VALID_DECISIONS = {"pending", "selected", "produced", "rejected"}
 CURATED_BATCH_ID = "2026-09-03-apify-tiktok-shortlist"
@@ -266,10 +288,10 @@ class ContentRadar:
         self._refreshing = False
         self._thumbnail_thread: threading.Thread | None = None
         self.cover_dir = state_path.parent / "content_radar_covers"
-        keywords = os.environ.get("CONTENT_RADAR_TIKTOK_KEYWORDS", ",".join(DEFAULT_KEYWORDS))
-        self.keywords = list(dict.fromkeys(value.strip() for value in keywords.split(",") if value.strip()))[:20]
         configured_version = os.environ.get("CONTENT_RADAR_PROMPT_VERSION", "v1").strip().lower()
-        self.prompt_version = configured_version if re.fullmatch(r"v[1-9]\d{0,2}", configured_version) else "v1"
+        self.prompt_version = configured_version if configured_version in PROMPT_KEYWORD_SETS else "v1"
+        self.keyword_sets = {version: list(keywords) for version, keywords in PROMPT_KEYWORD_SETS.items()}
+        self.keywords = self.keyword_sets[self.prompt_version]
         self.max_results = max(10, min(120, int(os.environ.get("CONTENT_RADAR_MAX_RESULTS", "40"))))
         self.min_views = max(1_000_000, int(os.environ.get("CONTENT_RADAR_MIN_VIEWS", "1000000")))
         lookback = os.environ.get("CONTENT_RADAR_LOOKBACK", "last30Days").strip()
@@ -316,6 +338,10 @@ class ContentRadar:
             "ok": True,
             "keywords": self.keywords,
             "prompt_version": self.prompt_version,
+            "keyword_versions": {
+                version: {"keywords": keywords, "keyword_count": len(keywords)}
+                for version, keywords in self.keyword_sets.items()
+            },
             "min_views": self.min_views,
             "lookback": self.lookback,
             "max_results": self.max_results,
@@ -533,14 +559,20 @@ class ContentRadar:
         self._thumbnail_thread.start()
         return True
 
-    def _call_apify(self, token: str) -> list[dict[str, Any]]:
+    def keywords_for(self, prompt_version: str) -> list[str]:
+        version = str(prompt_version or "").strip().lower()
+        if version not in self.keyword_sets:
+            raise ValueError("关键词版本必须是 v1 或 v2")
+        return list(self.keyword_sets[version])
+
+    def _call_apify(self, token: str, *, keywords: list[str], max_results: int) -> list[dict[str, Any]]:
         actor = urllib.parse.quote(self.actor_id, safe="~")
         url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
         payload = {
-            "keywords": self.keywords,
+            "keywords": keywords,
             "searchType": "video",
             "maxItemsPerKeyword": 30,
-            "maxTotalResults": self.max_results,
+            "maxTotalResults": max_results,
             "sort": "mostViewed",
             "datePosted": self.lookback,
             "deduplicateAcrossKeywords": True,
@@ -673,7 +705,10 @@ class ContentRadar:
             })
         return {"ok": True, "items": items, "raw_count": len(raw_items)}
 
-    def refresh(self, *, reason: str = "manual") -> dict[str, Any]:
+    def refresh(self, *, reason: str = "manual", prompt_version: str | None = None, max_results: int | None = None) -> dict[str, Any]:
+        version = str(prompt_version or self.prompt_version).strip().lower()
+        keywords = self.keywords_for(version)
+        result_limit = max(1, min(120, int(max_results or self.max_results)))
         if not self.refresh_lock.acquire(blocking=False):
             return {"ok": True, "started": False, "message": "采集正在进行中"}
         self._refreshing = True
@@ -682,7 +717,7 @@ class ContentRadar:
             token = os.environ.get("APIFY_TOKEN", "").strip()
             if not token:
                 raise RuntimeError("服务尚未配置 APIFY_TOKEN")
-            raw_items = self._call_apify(token)
+            raw_items = self._call_apify(token, keywords=keywords, max_results=result_limit)
             normalized = [post for item in raw_items if (post := normalize_apify_item(item)) is not None]
             normalized = [post for post in normalized if number((post.get("metrics") or {}).get("views")) >= self.min_views]
             unique: dict[str, dict[str, Any]] = {}
@@ -711,7 +746,7 @@ class ContentRadar:
                     post["operator_note"] = previous.get("operator_note", "")
                     post["decision_updated_at"] = previous.get("decision_updated_at", "")
                     post["first_seen_at"] = previous.get("first_seen_at", iso_now())
-                    post["prompt_version"] = previous.get("prompt_version") or self.prompt_version
+                    post["prompt_version"] = previous.get("prompt_version") or version
                     existing[post["id"]] = post
                 run = {
                     "started_at": started_at,
@@ -722,7 +757,9 @@ class ContentRadar:
                     "posts_saved": len(ranked),
                     "new_posts": new_count,
                     "updated_posts": updated_count,
-                    "prompt_version": self.prompt_version,
+                    "prompt_version": version,
+                    "keywords": keywords,
+                    "requested_max_results": result_limit,
                 }
                 state["last_run"] = run
                 state["runs"] = [run, *(state.get("runs") or [])][:30]
@@ -730,7 +767,7 @@ class ContentRadar:
             self.start_thumbnail_cache()
             return {"ok": True, "started": True, "run": run}
         except Exception as exc:
-            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": self.prompt_version}
+            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": version, "keywords": keywords, "requested_max_results": result_limit}
             with self.lock:
                 state = self._read()
                 state["last_run"] = run
@@ -746,11 +783,18 @@ class ContentRadar:
             self._refreshing = False
             self.refresh_lock.release()
 
-    def trigger_refresh(self, *, reason: str = "manual") -> dict[str, Any]:
+    def trigger_refresh(self, *, reason: str = "manual", prompt_version: str = "v1", max_results: int = MANUAL_REFRESH_LIMIT) -> dict[str, Any]:
+        version = str(prompt_version or "v1").strip().lower()
+        self.keywords_for(version)
         if self._refreshing:
             return {"ok": True, "started": False, "message": "采集正在进行中"}
-        threading.Thread(target=self.refresh, kwargs={"reason": reason}, name="content-radar-refresh", daemon=True).start()
-        return {"ok": True, "started": True, "message": "已开始调用 Apify，通常需要 1–3 分钟"}
+        threading.Thread(
+            target=self.refresh,
+            kwargs={"reason": reason, "prompt_version": version, "max_results": max_results},
+            name="content-radar-refresh",
+            daemon=True,
+        ).start()
+        return {"ok": True, "started": True, "prompt_version": version, "message": f"已开始抓取 {version.upper()}，本次最多 30 条，通常需要 1–3 分钟"}
 
     def start_scheduler(self) -> None:
         """Kept for app startup compatibility; collection is manual-only."""

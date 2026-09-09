@@ -11,7 +11,7 @@ WEB_ROOT = Path(__file__).resolve().parents[1]
 if str(WEB_ROOT) not in sys.path:
     sys.path.insert(0, str(WEB_ROOT))
 
-from content_radar import ContentRadar, metadata_analysis, normalize_apify_item, verify_refresh_password
+from content_radar import ContentRadar, V2_KEYWORDS, metadata_analysis, normalize_apify_item, verify_refresh_password
 
 
 class ContentRadarTests(unittest.TestCase):
@@ -192,6 +192,26 @@ class ContentRadarTests(unittest.TestCase):
             versions = {post["id"]: post["prompt_version"] for post in radar.snapshot()["posts"]}
             self.assertEqual(versions, {"tiktok:2": "v2", "tiktok:1": "v1"})
 
+    def test_v2_refresh_uses_encapsulated_keywords_and_thirty_item_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            item = {"videoId": "2", "caption": "Couple daily life comedy", "authorUniqueId": "new", "views": 2_000_000}
+            with patch.dict(os.environ, {"APIFY_TOKEN": "test-token"}):
+                with patch.object(radar, "_call_apify", return_value=[item]) as call:
+                    result = radar.refresh(prompt_version="v2", max_results=30)
+            self.assertTrue(result["ok"])
+            call.assert_called_once_with("test-token", keywords=V2_KEYWORDS, max_results=30)
+            saved = radar.snapshot()["posts"][0]
+            self.assertEqual(saved["prompt_version"], "v2")
+            self.assertEqual(result["run"]["prompt_version"], "v2")
+            self.assertEqual(result["run"]["requested_max_results"], 30)
+
+    def test_unknown_prompt_version_is_rejected_before_refresh_thread_starts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            with self.assertRaisesRegex(ValueError, "v1 或 v2"):
+                radar.trigger_refresh(prompt_version="v3")
+
     def test_curated_batch_imports_once_without_overwriting_decisions(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "state.json"
@@ -241,6 +261,11 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn('id="mark-produced"', html)
         self.assertIn("/api/content-radar/decision-bulk", html)
         self.assertIn("复制未通过链接", html)
+        self.assertIn('name="prompt-version"', html)
+        self.assertIn('value="v1"', html)
+        self.assertIn('value="v2"', html)
+        self.assertIn("prompt_version:promptVersion", html)
+        self.assertIn("最多抓取 30 条", html)
         self.assertNotIn("kokokwai" + "@2026", html)
 
     def test_thumbnail_cache_saves_a_stable_local_cover(self):

@@ -19290,7 +19290,16 @@ class AppHandler(BaseHTTPRequestHandler):
             if not verify_refresh_password(str(payload.get("password") or "")):
                 self.send_json({"error": "抓取密码错误。"}, status=403)
                 return
-            self.send_json(content_radar.trigger_refresh(reason="manual"), status=202)
+            try:
+                result = content_radar.trigger_refresh(
+                    reason="manual",
+                    prompt_version=str(payload.get("prompt_version") or "v1"),
+                    max_results=30,
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result, status=202)
             return
         if parsed.path == "/api/content-radar/decision":
             if not has_creator_admin_access(self):
