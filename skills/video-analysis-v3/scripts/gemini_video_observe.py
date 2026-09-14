@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -17,6 +18,8 @@ from pathlib import Path
 
 DEFAULT_INLINE_MAX_MB = max(0.0, float(os.environ.get("VIDEO_ANALYSIS_INLINE_MAX_MB", "0")))
 _ACTIVE_FILE_CACHE: dict[tuple[str, int, int, str, str], dict] = {}
+_ACTIVE_FILE_CACHE_LOCK = threading.Lock()
+_ACTIVE_FILE_UPLOAD_LOCKS: dict[tuple[str, int, int, str, str], threading.Lock] = {}
 
 OBSERVATION_PROMPT = """你不是剧情分析师，你是视频证据提取器。
 你的职责不是总结剧情，而是把整段视频转成一个“逐秒多模态证据包”。
@@ -403,23 +406,35 @@ def files_api_observe(video: Path, key: str, model: str, prompt: str, mime: str)
         # Separate uploads by credential without retaining the credential.
         str(hash(key)),
     )
-    file_obj = _ACTIVE_FILE_CACHE.get(cache_key)
+    with _ACTIVE_FILE_CACHE_LOCK:
+        file_obj = _ACTIVE_FILE_CACHE.get(cache_key)
+        upload_lock = _ACTIVE_FILE_UPLOAD_LOCKS.setdefault(cache_key, threading.Lock())
     reused_upload = file_obj is not None
     uploaded: dict = {"file": file_obj, "reused": True} if file_obj else {}
     if file_obj is None:
-        uploaded = upload_file(video, key, mime)
-        file_obj = uploaded.get("file", uploaded)
-        name = file_obj.get("name")
-        for _ in range(30):
-            current = get_file(name, key)
-            file_obj = current.get("file", current)
-            state = file_obj.get("state")
-            if state in (None, "ACTIVE"):
-                break
-            if state == "FAILED":
-                raise RuntimeError(f"Gemini file processing failed: {file_obj}")
-            time.sleep(2)
-        _ACTIVE_FILE_CACHE[cache_key] = file_obj
+        # Parallel analysts share one upload. Only the model generation requests
+        # run concurrently; the video is never duplicated in memory or storage.
+        with upload_lock:
+            with _ACTIVE_FILE_CACHE_LOCK:
+                file_obj = _ACTIVE_FILE_CACHE.get(cache_key)
+            if file_obj is not None:
+                reused_upload = True
+                uploaded = {"file": file_obj, "reused": True}
+            else:
+                uploaded = upload_file(video, key, mime)
+                file_obj = uploaded.get("file", uploaded)
+                name = file_obj.get("name")
+                for _ in range(30):
+                    current = get_file(name, key)
+                    file_obj = current.get("file", current)
+                    state = file_obj.get("state")
+                    if state in (None, "ACTIVE"):
+                        break
+                    if state == "FAILED":
+                        raise RuntimeError(f"Gemini file processing failed: {file_obj}")
+                    time.sleep(2)
+                with _ACTIVE_FILE_CACHE_LOCK:
+                    _ACTIVE_FILE_CACHE[cache_key] = file_obj
     body = {"contents": [{"parts": [{"file_data": {"mime_type": mime, "file_uri": file_obj["uri"]}}, {"text": prompt}]}]}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     req = urllib.request.Request(

@@ -18,6 +18,10 @@ services:
         value: "1"
       - key: VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC
         value: "480"
+      - key: VIDEO_ANALYSIS_MODEL
+        value: gemini-3.8-flash
+      - key: VIDEO_ANALYSIS_SECONDARY_MODEL
+        value: gemini-3.7-flash
     disk:
       name: koko-kwai-coach-data
       mountPath: /var/data

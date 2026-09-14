@@ -12,6 +12,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -438,6 +439,47 @@ LOGIC_AUDIT_PROMPT = """你现在负责做“故事逻辑审查”，不是总�
 """
 
 
+CONSOLIDATED_REVIEW_PROMPT = """你是 Koko 视频理解流程的文本审核员。你不能查看原始视频，只能审核两个独立视频分析结果。
+
+请在一次审核中完成过去 comparison、logic audit 和 arbitration 三个步骤的工作：
+1. 对比故事主轴、人物关系、关键物体、关键动作、对白、起因、经过和结果。
+2. 检查每个候选自身是否完整、因果是否通顺、是否把推测写成事实。
+3. 逐字段判断采用 candidate_a、candidate_b、合并版本或保守表达。
+4. 只有核心事实冲突、关键字段缺失或用户方向明显不符时才要求重新看视频。
+5. 两个候选一致不代表一定正确；如果共同结论缺少时间点、对白或画面证据，应保守表达。
+6. 你不能创造两个候选都没有提供的新视频事实。
+
+输出严格 JSON：
+{
+  "story_spine_alignment": {
+    "status": "pass/conflict",
+    "gemini_summary": "candidate_a 的故事主轴",
+    "v2_summary": "candidate_b 的故事主轴",
+    "issue": "冲突说明；没有则为空"
+  },
+  "character_alignment": {"status": "pass/conflict", "issues": []},
+  "object_alignment": {"status": "pass/conflict", "issues": []},
+  "causal_alignment": {"status": "pass/conflict", "issues": []},
+  "fact_consistency": {"status": "pass/fail", "issues": []},
+  "story_structure": {"status": "pass/fail", "issues": []},
+  "causal_coherence": {"status": "pass/fail", "issues": []},
+  "user_direction_alignment": {"status": "pass/fail/not_applicable", "issues": []},
+  "field_decisions": [
+    {"field": "whole_video_summary", "decision": "candidate_a/candidate_b/merged/conservative", "reason": ""}
+  ],
+  "focus_windows": [
+    {"time": "00:20-00:35", "reason": "需要复核的核心冲突", "question": "需要视频模型回答的具体问题"}
+  ],
+  "recommended_action": "proceed/force_recheck/conservative_merge",
+  "accepted_pipeline": "gemini/v2/merged/conservative",
+  "accepted_story_spine": "当前证据支持的故事主轴",
+  "rejected_claims": [],
+  "guardrails": [],
+  "reasoning": "一次性审核结论"
+}
+"""
+
+
 CONFLICT_RECHECK_PROMPT = """你现在是在做一次“冲突复核”，目标不是重新分析整条视频，而是解决 Gemini 版本和 v2 版本之间的关键冲突。
 
 你会看到：
@@ -523,18 +565,17 @@ TRANSLATE_DIALOGUE_PROMPT = """你是一个严格的对白翻译器。
 }
 """
 
+DEFAULT_PRIMARY_VIDEO_MODEL = "gemini-3.8-flash"
+DEFAULT_SECONDARY_VIDEO_MODEL = "gemini-3.7-flash"
+
 PRIMARY_FALLBACK_MODELS = [
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-3-flash-preview",
+    DEFAULT_PRIMARY_VIDEO_MODEL,
+    DEFAULT_SECONDARY_VIDEO_MODEL,
 ]
 
 SUPPLEMENT_FALLBACK_MODELS = [
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-3-flash-preview",
+    DEFAULT_SECONDARY_VIDEO_MODEL,
+    DEFAULT_PRIMARY_VIDEO_MODEL,
 ]
 
 AUDIO_MULTIVIEW_MAX_BYTES = 18 * 1024 * 1024
@@ -1618,13 +1659,54 @@ def harden_user_prompt_alignment(user_prompt: str, logic_audit: dict) -> dict:
     return audit
 
 
+def build_legacy_review_views(review: dict) -> tuple[dict, dict, dict]:
+    """Keep old artifact contracts while the model performs one consolidated review."""
+    comparison = {
+        key: review.get(key)
+        for key in (
+            "story_spine_alignment",
+            "character_alignment",
+            "object_alignment",
+            "causal_alignment",
+            "focus_windows",
+            "recommended_action",
+            "reasoning",
+        )
+        if key in review
+    }
+    logic_audit = {
+        key: review.get(key)
+        for key in (
+            "fact_consistency",
+            "story_structure",
+            "causal_coherence",
+            "user_direction_alignment",
+            "recommended_action",
+            "reasoning",
+        )
+        if key in review
+    }
+    arbitration = {
+        "accepted_pipeline": review.get("accepted_pipeline") or "conservative",
+        "accepted_story_spine": review.get("accepted_story_spine") or "",
+        "reasoning": review.get("reasoning") or "",
+        "rejected_claims": review.get("rejected_claims") or [],
+        "guardrails": review.get("guardrails") or [],
+        "field_decisions": review.get("field_decisions") or [],
+    }
+    return comparison, logic_audit, arbitration
+
+
 def main() -> int:
     try:
         ap = argparse.ArgumentParser()
         ap.add_argument("source_path")
         ap.add_argument("--out", required=True)
-        ap.add_argument("--model", default="gemini-2.5-flash-lite")
-        ap.add_argument("--supplement-model", default="gemini-2.5-flash-lite")
+        ap.add_argument("--model", default=DEFAULT_PRIMARY_VIDEO_MODEL)
+        ap.add_argument(
+            "--supplement-model",
+            default=os.environ.get("VIDEO_ANALYSIS_SECONDARY_MODEL", DEFAULT_SECONDARY_VIDEO_MODEL),
+        )
         ap.add_argument("--api-key")
         ap.add_argument("--api-key-file")
         ap.add_argument("--user-prompt", default="", help="Optional operator guidance for story analysis.")
@@ -1677,10 +1759,39 @@ def main() -> int:
         write_progress(out_dir, "media_prep", "正在做媒体预处理")
         media_probe = run_media_probe(video, media_probe_path)
 
-        write_progress(out_dir, "gemini_analysis", "正在运行 Gemini 主分析链")
-        primary_result, primary_raw, primary_model_used = run_video_json_prompt_with_fallback(
-            video, key, primary_models, PRIMARY_PROMPT + direction_block, "primary analysis"
-        )
+        audio_multiview_result: dict = {
+            "skipped": True,
+            "fallback_mode": "dual-analysis",
+            "reason": "精简流程已将音频与说话人检查合并到两个独立视频分析中。",
+            "source_url": args.source_path,
+        }
+        audio_multiview_model_used = ""
+
+        write_progress(out_dir, "gemini_analysis", "正在并行运行两个独立视频分析")
+
+        def _run_primary_analysis() -> tuple[dict, dict, str]:
+            return run_video_json_prompt_with_fallback(
+                video, key, primary_models, PRIMARY_PROMPT + direction_block, "primary analysis"
+            )
+
+        def _run_secondary_analysis() -> tuple[dict, dict, str]:
+            return run_video_json_prompt_with_fallback(
+                video,
+                key,
+                supplement_models,
+                V2_LOCAL_PROMPT
+                + direction_block
+                + "\n\nmedia_probe:\n"
+                + json.dumps(media_probe, ensure_ascii=False),
+                "secondary analysis",
+            )
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="koko-video-analyst") as executor:
+            primary_future = executor.submit(_run_primary_analysis)
+            secondary_future = executor.submit(_run_secondary_analysis)
+            primary_result, primary_raw, primary_model_used = primary_future.result()
+            v2_local_payload, v2_local_raw, v2_local_model_used = secondary_future.result()
+
         primary_result = normalize_script_payload(primary_result, args.source_path)
         primary_result["primary_model_used"] = primary_model_used
         if user_prompt:
@@ -1688,31 +1799,15 @@ def main() -> int:
         primary_json_path.write_text(json.dumps(primary_result, ensure_ascii=False, indent=2), encoding="utf-8")
         primary_raw_path.write_text(json.dumps(primary_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        audio_multiview_result: dict = {}
-        audio_multiview_model_used = ""
-        should_audio_multiview, audio_multiview_reason = should_run_audio_multiview(primary_result, video)
         primary_result["audio_multiview_decision"] = {
-            "enabled": should_audio_multiview,
-            "reason": audio_multiview_reason,
+            "enabled": False,
+            "reason": audio_multiview_result["reason"],
         }
 
         metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
         type_router = build_type_router(primary_result, audio_multiview_result, metadata, args.source_path)
         type_router_path.write_text(json.dumps(type_router, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        write_progress(out_dir, "v2_analysis", "正在运行 v2 本地分析链")
-        v2_local_payload, v2_local_raw, v2_local_model_used = run_video_json_prompt_with_fallback(
-            video,
-            key,
-            supplement_models,
-            V2_LOCAL_PROMPT
-            + direction_block
-            + "\n\nmedia_probe:\n"
-            + json.dumps(media_probe, ensure_ascii=False)
-            + "\n\ntype_router:\n"
-            + json.dumps(type_router, ensure_ascii=False),
-            "v2 local analysis",
-        )
         v2_local_result = normalize_script_payload(v2_local_payload, args.source_path)
         v2_local_result["v2_local_model_used"] = v2_local_model_used
         if user_prompt:
@@ -1720,80 +1815,54 @@ def main() -> int:
         v2_local_json_path.write_text(json.dumps(v2_local_result, ensure_ascii=False, indent=2), encoding="utf-8")
         v2_local_raw_path.write_text(json.dumps(v2_local_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        write_progress(out_dir, "consistency_audit", "正在做 Gemini 与 v2 的一致性审查")
-        comparison_report, comparison_raw, comparison_model_used = run_text_json_prompt_with_fallback(
+        write_progress(out_dir, "consistency_audit", "正在一次性完成差异、逻辑和采用规则审核")
+        consolidated_review, comparison_raw, comparison_model_used = run_text_json_prompt_with_fallback(
             attach_user_prompt({
                 "source_metadata": metadata,
                 "media_probe": media_probe,
-                "gemini_result": primary_result,
-                "v2_result": v2_local_result,
+                "candidate_a": primary_result,
+                "candidate_b": v2_local_result,
             }, user_prompt),
             key,
             supplement_models,
-            COMPARISON_PROMPT + direction_block,
-            "comparison report",
+            CONSOLIDATED_REVIEW_PROMPT + direction_block,
+            "consolidated review",
         )
+        comparison_report, logic_audit, arbitration_result = build_legacy_review_views(consolidated_review)
         comparison_report = harden_comparison_report(primary_result, v2_local_result, comparison_report)
-        comparison_report["comparison_model_used"] = comparison_model_used
-        if user_prompt:
-            comparison_report["user_prompt"] = user_prompt
-        comparison_report_path.write_text(json.dumps(comparison_report, ensure_ascii=False, indent=2), encoding="utf-8")
-        comparison_raw_path.write_text(json.dumps(comparison_raw, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        logic_audit, logic_audit_raw, logic_audit_model_used = run_text_json_prompt_with_fallback(
-            attach_user_prompt({
-                "source_metadata": metadata,
-                "gemini_result": primary_result,
-                "v2_result": v2_local_result,
-                "comparison_report": comparison_report,
-            }, user_prompt),
-            key,
-            supplement_models,
-            LOGIC_AUDIT_PROMPT + direction_block,
-            "logic audit",
-        )
         logic_audit = harden_logic_audit(primary_result, v2_local_result, logic_audit, comparison_report)
         logic_audit = harden_user_prompt_alignment(user_prompt, logic_audit)
+        comparison_report["comparison_model_used"] = comparison_model_used
+        logic_audit_model_used = comparison_model_used
+        arbitration_model_used = comparison_model_used
         logic_audit["logic_audit_model_used"] = logic_audit_model_used
+        arbitration_result["arbitration_model_used"] = arbitration_model_used
         if user_prompt:
+            comparison_report["user_prompt"] = user_prompt
             logic_audit["user_prompt"] = user_prompt
+            arbitration_result["user_prompt"] = user_prompt
+        comparison_report_path.write_text(json.dumps(comparison_report, ensure_ascii=False, indent=2), encoding="utf-8")
+        comparison_raw_path.write_text(json.dumps(comparison_raw, ensure_ascii=False, indent=2), encoding="utf-8")
         logic_audit_path.write_text(json.dumps(logic_audit, ensure_ascii=False, indent=2), encoding="utf-8")
-        logic_audit_raw_path.write_text(json.dumps(logic_audit_raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        logic_audit_raw_path.write_text(
+            json.dumps({"reused_from": comparison_raw_path.name}, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        arbitration_path.write_text(json.dumps(arbitration_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        arbitration_raw_path.write_text(
+            json.dumps({"reused_from": comparison_raw_path.name}, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
         memory_entries = load_case_memory(case_memory_path)
         similar_cases = find_similar_cases(memory_entries, type_router, primary_result)
 
-        supplement_result: dict = {"windows": []}
-        supplement_model_used = ""
-        if should_audio_multiview:
-            write_progress(out_dir, "targeted_recheck", "正在做目标复核与说话人校验")
-            try:
-                audio_multiview_result, audio_multiview_raw, audio_multiview_model_used = run_video_json_prompt_with_fallback(
-                    video, key, supplement_models, AUDIO_MULTIVIEW_PROMPT, "audio multiview"
-                )
-                audio_multiview_result.setdefault("source_url", args.source_path)
-                audio_multiview_result["model_used"] = audio_multiview_model_used
-                audio_multiview_result["decision_reason"] = audio_multiview_reason
-                audio_multiview_path.write_text(json.dumps(audio_multiview_result, ensure_ascii=False, indent=2), encoding="utf-8")
-                audio_multiview_raw_path.write_text(json.dumps(audio_multiview_raw, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception as exc:
-                audio_multiview_result = {
-                    "skipped": True,
-                    "fallback_mode": "primary-only",
-                    "reason": f"audio_multiview 降级跳过：{exc}",
-                    "decision_reason": audio_multiview_reason,
-                    "source_url": args.source_path,
-                }
-                audio_multiview_path.write_text(json.dumps(audio_multiview_result, ensure_ascii=False, indent=2), encoding="utf-8")
-        else:
-            audio_multiview_result = {
-                "skipped": True,
-                "fallback_mode": "primary-only",
-                "reason": audio_multiview_reason,
-                "source_url": args.source_path,
-            }
-            audio_multiview_path.write_text(json.dumps(audio_multiview_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        audio_multiview_path.write_text(json.dumps(audio_multiview_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        audio_multiview_raw_path.write_text(
+            json.dumps({"skipped": True, "reason": audio_multiview_result["reason"]}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
+        supplement_result: dict = {"skipped": True, "windows": [], "reason": "候选结果无需视频复核。"}
+        supplement_model_used = ""
         windows = list(primary_result.get("needs_evidence_enrichment") or [])
         windows.extend(infer_object_review_windows(primary_result))
         windows = merge_candidate_windows(
@@ -1801,62 +1870,36 @@ def main() -> int:
             comparison_windows(comparison_report),
             comparison_windows({"focus_windows": v2_local_result.get("must_verify_windows") or []}),
         )
-        if windows:
-            write_progress(out_dir, "targeted_recheck", "正在补充关键证据")
-            supplement_prompt = SUPPLEMENT_PROMPT + "\n需要重点检查的窗口如下：\n" + json.dumps(windows, ensure_ascii=False)
+        should_recheck, recheck_reason = should_run_conflict_recheck(comparison_report, logic_audit)
+        if should_recheck or windows:
+            write_progress(out_dir, "targeted_recheck", "正在进行唯一一次目标证据复核")
+            supplement_prompt = (
+                SUPPLEMENT_PROMPT
+                + "\n本次复核同时负责解决两个候选之间的关键冲突，不要重新生成整份脚本。"
+                + "\n合并审核结果：\n"
+                + json.dumps(consolidated_review, ensure_ascii=False)
+                + "\n需要重点检查的窗口如下：\n"
+                + json.dumps(windows, ensure_ascii=False)
+            )
             supplement_prompt += direction_block
             supplement_result, supplement_raw, supplement_model_used = run_video_json_prompt_with_fallback(
-                video, key, supplement_models, supplement_prompt, "supplement evidence"
+                video, key, supplement_models, supplement_prompt, "targeted evidence recheck"
             )
             supplement_result["supplement_model_used"] = supplement_model_used
-            supplement_json_path.write_text(json.dumps(supplement_result, ensure_ascii=False, indent=2), encoding="utf-8")
-            supplement_raw_path.write_text(json.dumps(supplement_raw, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        conflict_recheck: dict = {"skipped": True, "reason": ""}
-        conflict_recheck_model_used = ""
-        should_recheck, recheck_reason = should_run_conflict_recheck(comparison_report, logic_audit)
-        if should_recheck:
-            write_progress(out_dir, "targeted_recheck", "正在复核 Gemini 与 v2 的冲突点")
-            conflict_prompt = (
-                CONFLICT_RECHECK_PROMPT
-                + "\n\ncomparison_report:\n"
-                + json.dumps(comparison_report, ensure_ascii=False)
-                + "\n\nlogic_audit:\n"
-                + json.dumps(logic_audit, ensure_ascii=False)
-                + direction_block
-            )
-            conflict_recheck, conflict_recheck_raw, conflict_recheck_model_used = run_video_json_prompt_with_fallback(
-                video, key, supplement_models, conflict_prompt, "conflict recheck"
-            )
-            conflict_recheck["conflict_recheck_model_used"] = conflict_recheck_model_used
-            conflict_recheck_path.write_text(json.dumps(conflict_recheck, ensure_ascii=False, indent=2), encoding="utf-8")
-            conflict_recheck_raw_path.write_text(json.dumps(conflict_recheck_raw, ensure_ascii=False, indent=2), encoding="utf-8")
         else:
-            conflict_recheck = {"skipped": True, "reason": recheck_reason}
-            conflict_recheck_path.write_text(json.dumps(conflict_recheck, ensure_ascii=False, indent=2), encoding="utf-8")
+            supplement_raw = {"skipped": True, "reason": recheck_reason}
 
-        write_progress(out_dir, "arbitration", "正在仲裁 Gemini 与 v2 的差异")
-        arbitration_result, arbitration_raw, arbitration_model_used = run_text_json_prompt_with_fallback(
-            attach_user_prompt({
-                "source_metadata": metadata,
-                "gemini_result": primary_result,
-                "v2_result": v2_local_result,
-                "comparison_report": comparison_report,
-                "logic_audit": logic_audit,
-                "conflict_recheck": conflict_recheck,
-            }, user_prompt),
-            key,
-            refine_models,
-            ARBITRATION_PROMPT + direction_block,
-            "arbitration",
+        supplement_json_path.write_text(json.dumps(supplement_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        supplement_raw_path.write_text(json.dumps(supplement_raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        conflict_recheck = dict(supplement_result)
+        conflict_recheck["shared_targeted_recheck"] = True
+        conflict_recheck_model_used = supplement_model_used
+        conflict_recheck_path.write_text(json.dumps(conflict_recheck, ensure_ascii=False, indent=2), encoding="utf-8")
+        conflict_recheck_raw_path.write_text(
+            json.dumps({"reused_from": supplement_raw_path.name}, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        arbitration_result["arbitration_model_used"] = arbitration_model_used
-        if user_prompt:
-            arbitration_result["user_prompt"] = user_prompt
-        arbitration_path.write_text(json.dumps(arbitration_result, ensure_ascii=False, indent=2), encoding="utf-8")
-        arbitration_raw_path.write_text(json.dumps(arbitration_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        write_progress(out_dir, "final_output", "正在整理最终脚本并生成输出")
+        write_progress(out_dir, "final_output", "正在按合并审核结果生成最终脚本")
         final_result, final_raw, refine_model_used = run_text_json_prompt_with_fallback(
             attach_user_prompt({
                 "source_metadata": json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {},
@@ -1889,6 +1932,7 @@ def main() -> int:
         final_result["conflict_recheck_model_used"] = conflict_recheck_model_used
         final_result["arbitration_model_used"] = arbitration_model_used
         final_result["refine_model_used"] = refine_model_used
+        final_result["pipeline_mode"] = "streamlined_dual_review_v1"
         final_result["type_router"] = type_router
         final_result["similar_cases_used"] = similar_cases
         final_result["comparison_report"] = comparison_report
