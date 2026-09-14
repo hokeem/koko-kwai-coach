@@ -8992,7 +8992,7 @@ def confirm_storyboard_cover(item_id: str) -> dict[str, Any]:
     cover_name = STORYBOARD_COVER_BASENAME + preview_path.suffix.lower()
     cover_path = RESULTS_ROOT / item_id / cover_name
     if preview_path != cover_path:
-        shutil.copyfile(preview_path, cover_path)
+        link_or_copy_file(preview_path, cover_path)
     state = save_storyboard_state(item_id, cover_name=cover_name)
     cover_url = state.get("storyboard_cover_url") or f"/results/{item_id}/{cover_name}"
     refreshed = apply_storyboard_cover_to_scripts(parent_job_id, item_index, item_id, cover_url)
