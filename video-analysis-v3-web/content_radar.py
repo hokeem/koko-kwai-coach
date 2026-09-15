@@ -67,6 +67,55 @@ RELAXED_KEYWORDS = [
     "relacionamento engraçado",
     "pegadinha casal",
 ]
+CHEATING_KEYWORDS = [
+    "cheating husband comedy",
+    "cheating wife comedy",
+    "cheating boyfriend skit",
+    "cheating girlfriend skit",
+    "caught cheating comedy",
+    "caught in the act couple skit",
+    "affair comedy skit",
+    "side chick comedy skit",
+    "other woman comedy skit",
+    "husband caught cheating prank",
+    "wife caught cheating prank",
+    "cheating prank on boyfriend",
+    "cheating prank on girlfriend",
+    "marido traindo comédia",
+    "esposa traindo comédia",
+    "traição de casal comédia",
+    "pegadinha de traição",
+    "flagrante de traição humor",
+    "amante escondida comédia",
+    "amante do marido humor",
+    "infidelidade casal humor",
+]
+CHEATING_RELAXED_KEYWORDS = [
+    "cheating husband",
+    "cheating wife",
+    "caught cheating",
+    "side chick drama",
+    "other woman skit",
+    "marido infiel humor",
+    "esposa infiel humor",
+    "traição relacionamento",
+    "amante pegadinha",
+]
+DEFAULT_CONTENT_TYPE = "couple_comedy"
+CONTENT_TYPE_CONFIG = {
+    "couple_comedy": {
+        "label": "夫妻情侣喜剧",
+        "short_label": "情侣",
+        "versions": PROMPT_KEYWORD_SETS,
+        "relaxed_keywords": RELAXED_KEYWORDS,
+    },
+    "cheating_comedy": {
+        "label": "出轨 / 抓包喜剧",
+        "short_label": "出轨",
+        "versions": {"v1": CHEATING_KEYWORDS},
+        "relaxed_keywords": CHEATING_RELAXED_KEYWORDS,
+    },
+}
 MANUAL_REFRESH_LIMIT = 50
 DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
 VALID_DECISIONS = {"pending", "selected", "produced", "rejected"}
@@ -337,6 +386,9 @@ class ContentRadar:
         posts = [post for post in state.get("posts", {}).values() if post.get("discovery_mode") == "keyword"]
         for post in posts:
             post["prompt_version"] = str(post.get("prompt_version") or "v1")
+            post["content_type"] = str(post.get("content_type") or DEFAULT_CONTENT_TYPE)
+            config = CONTENT_TYPE_CONFIG.get(post["content_type"], CONTENT_TYPE_CONFIG[DEFAULT_CONTENT_TYPE])
+            post["content_type_label"] = str(post.get("content_type_label") or config["short_label"])
         posts.sort(
             key=lambda post: (
                 parse_datetime(post.get("fetched_at")),
@@ -353,6 +405,17 @@ class ContentRadar:
             "keyword_versions": {
                 version: {"keywords": keywords, "keyword_count": len(keywords)}
                 for version, keywords in self.keyword_sets.items()
+            },
+            "content_types": {
+                content_type: {
+                    "label": config["label"],
+                    "short_label": config["short_label"],
+                    "versions": {
+                        version: {"keywords": list(words), "keyword_count": len(words)}
+                        for version, words in config["versions"].items()
+                    },
+                }
+                for content_type, config in CONTENT_TYPE_CONFIG.items()
             },
             "min_views": self.min_views,
             "lookback": self.lookback,
@@ -571,11 +634,21 @@ class ContentRadar:
         self._thumbnail_thread.start()
         return True
 
-    def keywords_for(self, prompt_version: str) -> list[str]:
+    def content_type_config(self, content_type: str) -> dict[str, Any]:
+        normalized = str(content_type or DEFAULT_CONTENT_TYPE).strip().lower()
+        config = CONTENT_TYPE_CONFIG.get(normalized)
+        if config is None:
+            raise ValueError("内容类型必须是 couple_comedy 或 cheating_comedy")
+        return config
+
+    def keywords_for(self, prompt_version: str, content_type: str = DEFAULT_CONTENT_TYPE) -> list[str]:
         version = str(prompt_version or "").strip().lower()
-        if version not in self.keyword_sets:
-            raise ValueError("关键词版本必须是 v1 或 v2")
-        return list(self.keyword_sets[version])
+        config = self.content_type_config(content_type)
+        versions = config["versions"]
+        if version not in versions:
+            allowed = "、".join(item.upper() for item in versions)
+            raise ValueError(f"该内容类型只支持关键词版本：{allowed}")
+        return list(versions[version])
 
     def _call_apify(self, token: str, *, keywords: list[str], max_results: int, lookback: str) -> list[dict[str, Any]]:
         actor = urllib.parse.quote(self.actor_id, safe="~")
@@ -717,9 +790,10 @@ class ContentRadar:
             })
         return {"ok": True, "items": items, "raw_count": len(raw_items)}
 
-    def _search_stages(self, version: str, target_count: int) -> list[dict[str, Any]]:
-        strict_keywords = self.keywords_for(version)
-        relaxed_keywords = list(dict.fromkeys([*strict_keywords, *DEFAULT_KEYWORDS, *V2_KEYWORDS, *RELAXED_KEYWORDS]))
+    def _search_stages(self, content_type: str, version: str, target_count: int) -> list[dict[str, Any]]:
+        config = self.content_type_config(content_type)
+        strict_keywords = self.keywords_for(version, content_type)
+        relaxed_keywords = list(dict.fromkeys([*strict_keywords, *config["relaxed_keywords"]]))
         return [
             {"id": "strict_30", "label": "原关键词 · 近30天", "lookback": "last30Days", "max_age_days": 30, "keywords": strict_keywords, "max_results": max(80, target_count * 2)},
             {"id": "strict_50", "label": "原关键词 · 近50天", "lookback": "last90Days", "max_age_days": 50, "keywords": strict_keywords, "max_results": max(100, target_count * 2)},
@@ -728,9 +802,11 @@ class ContentRadar:
             {"id": "relaxed_300", "label": "放宽关键词 · 近300天", "lookback": "any", "max_age_days": 300, "keywords": relaxed_keywords, "max_results": max(180, target_count * 4), "keywords_relaxed": True},
         ]
 
-    def refresh(self, *, reason: str = "manual", prompt_version: str | None = None, max_results: int | None = None) -> dict[str, Any]:
+    def refresh(self, *, reason: str = "manual", content_type: str = DEFAULT_CONTENT_TYPE, prompt_version: str | None = None, max_results: int | None = None) -> dict[str, Any]:
+        content_type = str(content_type or DEFAULT_CONTENT_TYPE).strip().lower()
+        content_config = self.content_type_config(content_type)
         version = str(prompt_version or self.prompt_version).strip().lower()
-        keywords = self.keywords_for(version)
+        keywords = self.keywords_for(version, content_type)
         target_count = max(1, min(120, int(max_results or self.max_results)))
         if not self.refresh_lock.acquire(blocking=False):
             return {"ok": True, "started": False, "message": "采集正在进行中"}
@@ -745,7 +821,7 @@ class ContentRadar:
                 existing_ids = set(self._read().get("posts", {}))
             collected: dict[str, dict[str, Any]] = {}
             items_received = 0
-            for stage in self._search_stages(version, target_count):
+            for stage in self._search_stages(content_type, version, target_count):
                 if len(collected) >= target_count:
                     break
                 report = {
@@ -823,6 +899,8 @@ class ContentRadar:
                     post["decision_updated_at"] = ""
                     post["first_seen_at"] = iso_now()
                     post["prompt_version"] = version
+                    post["content_type"] = content_type
+                    post["content_type_label"] = content_config["short_label"]
                     existing[post["id"]] = post
                 new_count = len(ranked)
                 target_met = new_count >= target_count
@@ -849,6 +927,8 @@ class ContentRadar:
                     "new_posts": new_count,
                     "updated_posts": 0,
                     "prompt_version": version,
+                    "content_type": content_type,
+                    "content_type_label": content_config["label"],
                     "keywords": keywords,
                     "target_count": target_count,
                     "target_met": target_met,
@@ -863,7 +943,7 @@ class ContentRadar:
             self.start_thumbnail_cache()
             return {"ok": True, "started": True, "run": run}
         except Exception as exc:
-            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": version, "keywords": keywords, "target_count": target_count, "target_met": False, "shortfall": target_count, "shortfall_reason": "抓取服务运行失败。", "stages": stage_reports}
+            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": version, "content_type": content_type, "content_type_label": content_config["label"], "keywords": keywords, "target_count": target_count, "target_met": False, "shortfall": target_count, "shortfall_reason": "抓取服务运行失败。", "stages": stage_reports}
             with self.lock:
                 state = self._read()
                 state["last_run"] = run
@@ -879,18 +959,20 @@ class ContentRadar:
             self._refreshing = False
             self.refresh_lock.release()
 
-    def trigger_refresh(self, *, reason: str = "manual", prompt_version: str = "v1", max_results: int = MANUAL_REFRESH_LIMIT) -> dict[str, Any]:
+    def trigger_refresh(self, *, reason: str = "manual", content_type: str = DEFAULT_CONTENT_TYPE, prompt_version: str = "v1", max_results: int = MANUAL_REFRESH_LIMIT) -> dict[str, Any]:
+        content_type = str(content_type or DEFAULT_CONTENT_TYPE).strip().lower()
+        content_config = self.content_type_config(content_type)
         version = str(prompt_version or "v1").strip().lower()
-        self.keywords_for(version)
+        self.keywords_for(version, content_type)
         if self._refreshing:
             return {"ok": True, "started": False, "message": "采集正在进行中"}
         threading.Thread(
             target=self.refresh,
-            kwargs={"reason": reason, "prompt_version": version, "max_results": max_results},
+            kwargs={"reason": reason, "content_type": content_type, "prompt_version": version, "max_results": max_results},
             name="content-radar-refresh",
             daemon=True,
         ).start()
-        return {"ok": True, "started": True, "prompt_version": version, "message": f"已开始抓取 {version.upper()}，将自动补足 50 条，可能需要 3–10 分钟"}
+        return {"ok": True, "started": True, "content_type": content_type, "prompt_version": version, "message": f"已开始抓取{content_config['label']} {version.upper()}，将自动补足 50 条，可能需要 3–10 分钟"}
 
     def start_scheduler(self) -> None:
         """Kept for app startup compatibility; collection is manual-only."""

@@ -19293,6 +19293,7 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 result = content_radar.trigger_refresh(
                     reason="manual",
+                    content_type=str(payload.get("content_type") or "couple_comedy"),
                     prompt_version=str(payload.get("prompt_version") or "v1"),
                     max_results=50,
                 )

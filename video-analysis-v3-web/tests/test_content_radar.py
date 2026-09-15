@@ -11,7 +11,7 @@ WEB_ROOT = Path(__file__).resolve().parents[1]
 if str(WEB_ROOT) not in sys.path:
     sys.path.insert(0, str(WEB_ROOT))
 
-from content_radar import ContentRadar, V2_KEYWORDS, metadata_analysis, normalize_apify_item, verify_refresh_password
+from content_radar import CHEATING_KEYWORDS, ContentRadar, V2_KEYWORDS, metadata_analysis, normalize_apify_item, verify_refresh_password
 
 
 class ContentRadarTests(unittest.TestCase):
@@ -225,8 +225,30 @@ class ContentRadarTests(unittest.TestCase):
     def test_unknown_prompt_version_is_rejected_before_refresh_thread_starts(self):
         with tempfile.TemporaryDirectory() as folder:
             radar = ContentRadar(Path(folder) / "state.json")
-            with self.assertRaisesRegex(ValueError, "v1 或 v2"):
+            with self.assertRaisesRegex(ValueError, "只支持关键词版本"):
                 radar.trigger_refresh(prompt_version="v3")
+
+    def test_cheating_content_type_uses_its_own_keywords_and_badge_metadata(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            items = [
+                {"videoId": str(index), "caption": "Caught cheating comedy skit", "authorUniqueId": f"actor{index}", "views": 2_000_000}
+                for index in range(50)
+            ]
+            with patch.dict(os.environ, {"APIFY_TOKEN": "test-token"}):
+                with patch.object(radar, "_call_apify", return_value=items) as call:
+                    result = radar.refresh(content_type="cheating_comedy", prompt_version="v1", max_results=50)
+            call.assert_called_once_with("test-token", keywords=CHEATING_KEYWORDS, max_results=100, lookback="last30Days")
+            self.assertEqual(result["run"]["content_type"], "cheating_comedy")
+            self.assertEqual(result["run"]["content_type_label"], "出轨 / 抓包喜剧")
+            self.assertTrue(all(post["content_type"] == "cheating_comedy" for post in radar.snapshot()["posts"]))
+            self.assertTrue(all(post["content_type_label"] == "出轨" for post in radar.snapshot()["posts"]))
+
+    def test_cheating_content_type_rejects_unavailable_v2(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            with self.assertRaisesRegex(ValueError, "V1"):
+                radar.trigger_refresh(content_type="cheating_comedy", prompt_version="v2")
 
     def test_curated_batch_imports_once_without_overwriting_decisions(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -281,12 +303,18 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn("/api/content-radar/decision-bulk", html)
         self.assertIn("复制未通过链接", html)
         self.assertIn('name="prompt-version"', html)
+        self.assertIn('name="content-type"', html)
+        self.assertIn('value="couple_comedy"', html)
+        self.assertIn('value="cheating_comedy"', html)
+        self.assertIn("出轨 / 抓包喜剧", html)
         self.assertIn('value="v1"', html)
         self.assertIn('value="v2"', html)
         self.assertIn("prompt_version:promptVersion", html)
         self.assertIn("自动补足 50 条", html)
         self.assertIn('id="shortfall-dialog"', html)
         self.assertIn("shortfall_reason", html)
+        self.assertIn("content_type:contentType", html)
+        self.assertIn("post.content_type_label", html)
         self.assertNotIn("kokokwai" + "@2026", html)
 
     def test_thumbnail_cache_saves_a_stable_local_cover(self):
