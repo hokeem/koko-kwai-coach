@@ -114,6 +114,7 @@ CONTENT_TYPE_CONFIG = {
         "short_label": "出轨",
         "versions": {"v1": CHEATING_KEYWORDS},
         "relaxed_keywords": CHEATING_RELAXED_KEYWORDS,
+        "min_views": 100_000,
     },
 }
 MANUAL_REFRESH_LIMIT = 50
@@ -220,6 +221,48 @@ NEGATIVE_SIGNALS: dict[str, tuple[str, list[str]]] = {
     "dance": ("偏舞蹈", ["dance", "dancing", "choreography", "dancinha", "dança", "danca", "coreografia", "trend dance"]),
     "series": ("连续短剧", ["episode", "part 1", "part 2", "episodio", "episódio", "capitulo", "capítulo", "parte 1", "parte 2", "ep. ", "ep "]),
 }
+CHEATING_TOPIC_TERMS = [
+    "cheating", "affair", "unfaithful", "infidelity", "side chick", "mistress", "other woman", "other man", "caught in the act",
+    "traicao", "traindo", "traiu", "infiel", "amante", "outra mulher", "outro homem", "chifre", "corno", "corna",
+]
+PERFORMANCE_TERMS = [
+    "comedy", "comedic", "skit", "sketch", "prank", "funny", "humor", "acting", "acted", "pov", "parody",
+    "comedia", "pegadinha", "trollagem", "encenacao", "cena", "parodia", "interpretacao",
+]
+NON_PERFORMANCE_TERMS = [
+    "news", "breaking news", "podcast", "interview", "storytime", "confession", "true story", "documentary", "reddit story",
+    "noticia", "noticias", "entrevista", "desabafo", "historia real", "relato real", "documentario", "fofoca de famosos",
+]
+
+
+def validate_content_type(post: dict[str, Any], content_type: str) -> dict[str, Any]:
+    """Apply high-precision metadata gates before a post enters a specialized queue."""
+    if content_type != "cheating_comedy":
+        return {"eligible": True, "mode": "default"}
+    searchable = normalize_text(" ".join([
+        str(post.get("caption") or ""),
+        " ".join(str(value) for value in (post.get("hashtags") or [])),
+    ]))
+    topic_hits = [term for term in CHEATING_TOPIC_TERMS if normalize_text(term) in searchable]
+    performance_hits = [term for term in PERFORMANCE_TERMS if normalize_text(term) in searchable]
+    excluded_hits = [term for term in NON_PERFORMANCE_TERMS if normalize_text(term) in searchable]
+    eligible = bool(topic_hits and performance_hits and not excluded_hits)
+    if not topic_hits:
+        reason = "标题或标签没有明确出轨语义"
+    elif not performance_hits:
+        reason = "标题或标签没有剧情演绎、喜剧或整蛊语义"
+    elif excluded_hits:
+        reason = "疑似新闻、播客、真人倾诉或故事口播"
+    else:
+        reason = "同时命中出轨与剧情演绎信号"
+    return {
+        "eligible": eligible,
+        "mode": "strict_metadata",
+        "reason": reason,
+        "topic_hits": topic_hits[:5],
+        "performance_hits": performance_hits[:5],
+        "excluded_hits": excluded_hits[:5],
+    }
 
 
 def metadata_analysis(post: dict[str, Any]) -> dict[str, Any]:
@@ -650,7 +693,7 @@ class ContentRadar:
             raise ValueError(f"该内容类型只支持关键词版本：{allowed}")
         return list(versions[version])
 
-    def _call_apify(self, token: str, *, keywords: list[str], max_results: int, lookback: str) -> list[dict[str, Any]]:
+    def _call_apify(self, token: str, *, keywords: list[str], max_results: int, lookback: str, min_views: int) -> list[dict[str, Any]]:
         actor = urllib.parse.quote(self.actor_id, safe="~")
         url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
         payload = {
@@ -661,7 +704,7 @@ class ContentRadar:
             "sort": "mostViewed",
             "datePosted": lookback,
             "deduplicateAcrossKeywords": True,
-            "minViews": self.min_views,
+            "minViews": min_views,
             "includeKeywordInsights": False,
             "includeDownloadUrl": False,
         }
@@ -807,6 +850,7 @@ class ContentRadar:
         content_config = self.content_type_config(content_type)
         version = str(prompt_version or self.prompt_version).strip().lower()
         keywords = self.keywords_for(version, content_type)
+        category_min_views = int(content_config.get("min_views") or self.min_views)
         target_count = max(1, min(120, int(max_results or self.max_results)))
         if not self.refresh_lock.acquire(blocking=False):
             return {"ok": True, "started": False, "message": "采集正在进行中"}
@@ -830,6 +874,7 @@ class ContentRadar:
                     "max_age_days": stage["max_age_days"],
                     "keyword_count": len(stage["keywords"]),
                     "keywords_relaxed": bool(stage.get("keywords_relaxed")),
+                    "min_views": category_min_views,
                 }
                 try:
                     raw_items = self._call_apify(
@@ -837,6 +882,7 @@ class ContentRadar:
                         keywords=stage["keywords"],
                         max_results=stage["max_results"],
                         lookback=stage["lookback"],
+                        min_views=category_min_views,
                     )
                 except Exception as exc:
                     report.update({"status": "error", "error": str(exc)[:500], "received": 0, "added": 0})
@@ -845,16 +891,25 @@ class ContentRadar:
                 items_received += len(raw_items)
                 normalized = [post for item in raw_items if (post := normalize_apify_item(item)) is not None]
                 invalid_count = len(raw_items) - len(normalized)
-                below_views = [post for post in normalized if number((post.get("metrics") or {}).get("views")) < self.min_views]
-                view_eligible = [post for post in normalized if number((post.get("metrics") or {}).get("views")) >= self.min_views]
+                below_views = [post for post in normalized if number((post.get("metrics") or {}).get("views")) < category_min_views]
+                view_eligible = [post for post in normalized if number((post.get("metrics") or {}).get("views")) >= category_min_views]
+                content_eligible = []
+                content_mismatch = 0
+                for post in view_eligible:
+                    validation = validate_content_type(post, content_type)
+                    post["content_validation"] = validation
+                    if validation["eligible"]:
+                        content_eligible.append(post)
+                    else:
+                        content_mismatch += 1
                 cutoff = utc_now() - timedelta(days=stage["max_age_days"])
-                missing_published_at = [post for post in view_eligible if not post.get("published_at")]
+                missing_published_at = [post for post in content_eligible if not post.get("published_at")]
                 age_eligible = [
-                    post for post in view_eligible
+                    post for post in content_eligible
                     if parse_datetime(post.get("published_at")) >= cutoff
                     or (not post.get("published_at") and stage["lookback"] != "any")
                 ]
-                outside_age = len(view_eligible) - len(age_eligible) - (len(missing_published_at) if stage["lookback"] == "any" else 0)
+                outside_age = len(content_eligible) - len(age_eligible) - (len(missing_published_at) if stage["lookback"] == "any" else 0)
                 stage_unique = {post["id"]: post for post in age_eligible}
                 duplicate_existing = sum(1 for post_id in stage_unique if post_id in existing_ids)
                 duplicate_batch = sum(1 for post_id in stage_unique if post_id in collected)
@@ -880,6 +935,7 @@ class ContentRadar:
                     "received": len(raw_items),
                     "invalid": invalid_count,
                     "below_min_views": len(below_views),
+                    "content_mismatch": content_mismatch,
                     "outside_time_window": outside_age,
                     "missing_published_at": len(missing_published_at),
                     "duplicate_existing": duplicate_existing,
@@ -906,11 +962,14 @@ class ContentRadar:
                 target_met = new_count >= target_count
                 duplicate_total = sum(int(stage.get("duplicate_existing") or 0) + int(stage.get("duplicate_this_run") or 0) for stage in stage_reports)
                 below_views_total = sum(int(stage.get("below_min_views") or 0) for stage in stage_reports)
+                content_mismatch_total = sum(int(stage.get("content_mismatch") or 0) for stage in stage_reports)
                 outside_time_total = sum(int(stage.get("outside_time_window") or 0) for stage in stage_reports)
                 if target_met:
                     shortfall_reason = ""
                 elif any(stage.get("status") == "error" for stage in stage_reports):
                     shortfall_reason = "Apify抓取阶段发生错误，流程提前停止。"
+                elif content_type == "cheating_comedy" and content_mismatch_total:
+                    shortfall_reason = "部分结果没有同时满足“明确出轨语义”和“剧情演绎语义”，已按准确性要求剔除。"
                 elif duplicate_total:
                     shortfall_reason = "搜索结果中已有视频较多，去重后不足50条新内容。"
                 elif below_views_total or outside_time_total:
@@ -929,6 +988,7 @@ class ContentRadar:
                     "prompt_version": version,
                     "content_type": content_type,
                     "content_type_label": content_config["label"],
+                    "min_views": category_min_views,
                     "keywords": keywords,
                     "target_count": target_count,
                     "target_met": target_met,
@@ -943,7 +1003,7 @@ class ContentRadar:
             self.start_thumbnail_cache()
             return {"ok": True, "started": True, "run": run}
         except Exception as exc:
-            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": version, "content_type": content_type, "content_type_label": content_config["label"], "keywords": keywords, "target_count": target_count, "target_met": False, "shortfall": target_count, "shortfall_reason": "抓取服务运行失败。", "stages": stage_reports}
+            run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": version, "content_type": content_type, "content_type_label": content_config["label"], "min_views": category_min_views, "keywords": keywords, "target_count": target_count, "target_met": False, "shortfall": target_count, "shortfall_reason": "抓取服务运行失败。", "stages": stage_reports}
             with self.lock:
                 state = self._read()
                 state["last_run"] = run

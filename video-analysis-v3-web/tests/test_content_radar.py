@@ -11,10 +11,20 @@ WEB_ROOT = Path(__file__).resolve().parents[1]
 if str(WEB_ROOT) not in sys.path:
     sys.path.insert(0, str(WEB_ROOT))
 
-from content_radar import CHEATING_KEYWORDS, ContentRadar, V2_KEYWORDS, metadata_analysis, normalize_apify_item, verify_refresh_password
+from content_radar import CHEATING_KEYWORDS, ContentRadar, V2_KEYWORDS, metadata_analysis, normalize_apify_item, validate_content_type, verify_refresh_password
 
 
 class ContentRadarTests(unittest.TestCase):
+    def test_cheating_gate_requires_both_topic_and_performance_signals(self):
+        accepted_en = validate_content_type({"caption": "POV: cheating husband comedy skit", "hashtags": []}, "cheating_comedy")
+        accepted_pt = validate_content_type({"caption": "Pegadinha de traição com meu marido 😂", "hashtags": ["comédia"]}, "cheating_comedy")
+        real_story = validate_content_type({"caption": "My husband was cheating: true story", "hashtags": []}, "cheating_comedy")
+        unrelated_prank = validate_content_type({"caption": "Funny prank on my boyfriend", "hashtags": []}, "cheating_comedy")
+        self.assertTrue(accepted_en["eligible"])
+        self.assertTrue(accepted_pt["eligible"])
+        self.assertFalse(real_story["eligible"])
+        self.assertFalse(unrelated_prank["eligible"])
+
     def test_couple_prank_metadata_ranks_above_school_dance(self):
         strong = metadata_analysis({
             "caption": "Pegadinha com meu marido na cama 😂 #casal",
@@ -203,7 +213,7 @@ class ContentRadarTests(unittest.TestCase):
                 with patch.object(radar, "_call_apify", return_value=items) as call:
                     result = radar.refresh(prompt_version="v2", max_results=50)
             self.assertTrue(result["ok"])
-            call.assert_called_once_with("test-token", keywords=V2_KEYWORDS, max_results=100, lookback="last30Days")
+            call.assert_called_once_with("test-token", keywords=V2_KEYWORDS, max_results=100, lookback="last30Days", min_views=1_000_000)
             self.assertTrue(all(post["prompt_version"] == "v2" for post in radar.snapshot()["posts"]))
             self.assertEqual(result["run"]["prompt_version"], "v2")
             self.assertEqual(result["run"]["target_count"], 50)
@@ -238,9 +248,10 @@ class ContentRadarTests(unittest.TestCase):
             with patch.dict(os.environ, {"APIFY_TOKEN": "test-token"}):
                 with patch.object(radar, "_call_apify", return_value=items) as call:
                     result = radar.refresh(content_type="cheating_comedy", prompt_version="v1", max_results=50)
-            call.assert_called_once_with("test-token", keywords=CHEATING_KEYWORDS, max_results=100, lookback="last30Days")
+            call.assert_called_once_with("test-token", keywords=CHEATING_KEYWORDS, max_results=100, lookback="last30Days", min_views=100_000)
             self.assertEqual(result["run"]["content_type"], "cheating_comedy")
             self.assertEqual(result["run"]["content_type_label"], "出轨 / 抓包喜剧")
+            self.assertEqual(result["run"]["min_views"], 100_000)
             self.assertTrue(all(post["content_type"] == "cheating_comedy" for post in radar.snapshot()["posts"]))
             self.assertTrue(all(post["content_type_label"] == "出轨" for post in radar.snapshot()["posts"]))
 
