@@ -326,7 +326,42 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn("shortfall_reason", html)
         self.assertIn("content_type:contentType", html)
         self.assertIn("post.content_type_label", html)
+        self.assertIn('id="fetch-progress"', html)
+        self.assertIn('id="cancel-fetch"', html)
+        self.assertIn("/api/content-radar/cancel", html)
+        self.assertIn("已找到 ${found}/${target} 条", html)
         self.assertNotIn("kokokwai" + "@2026", html)
+
+    def test_cancel_refresh_sets_observable_stopping_state(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            radar._refreshing = True
+            radar._refresh_progress = {"status": "running", "found_count": 12, "target_count": 50}
+            result = radar.cancel_refresh()
+            snapshot = radar.snapshot()
+            self.assertTrue(result["cancelled"])
+            self.assertTrue(radar._cancel_event.is_set())
+            self.assertEqual(snapshot["progress"]["status"], "stopping")
+            self.assertEqual(snapshot["progress"]["found_count"], 12)
+
+    def test_async_apify_run_polls_status_then_reads_dataset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            radar._refresh_progress = {"status": "starting"}
+            responses = [
+                {"data": {"id": "run-1", "defaultDatasetId": "dataset-1"}},
+                {"data": {"id": "run-1", "status": "RUNNING", "defaultDatasetId": "dataset-1", "stats": {"runTimeSecs": 2}}},
+                {"data": {"itemCount": 7}},
+                {"data": {"id": "run-1", "status": "SUCCEEDED", "defaultDatasetId": "dataset-1", "stats": {"runTimeSecs": 4}}},
+                {"data": {"itemCount": 9}},
+                [{"videoId": "1"}],
+            ]
+            with patch.object(radar, "_request_json", side_effect=responses) as request_json:
+                with patch("content_radar.time.sleep"):
+                    result = radar._call_apify("test-token", keywords=["couple comedy"], max_results=50, lookback="last30Days", min_views=1_000_000)
+            self.assertEqual(result, [{"videoId": "1"}])
+            self.assertEqual(radar._refresh_progress["stage_items"], 9)
+            self.assertEqual(request_json.call_count, 6)
 
     def test_thumbnail_cache_saves_a_stable_local_cover(self):
         with tempfile.TemporaryDirectory() as folder:

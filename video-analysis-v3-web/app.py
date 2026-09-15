@@ -19302,6 +19302,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(result, status=202)
             return
+        if parsed.path == "/api/content-radar/cancel":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            self.send_json(content_radar.cancel_refresh(), status=202)
+            return
         if parsed.path == "/api/content-radar/decision":
             if not has_creator_admin_access(self):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)

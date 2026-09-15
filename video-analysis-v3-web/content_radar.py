@@ -8,6 +8,7 @@ import json
 import os
 import re
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -34,6 +35,17 @@ DEFAULT_KEYWORDS = [
     "relacionamento com humor",
     "esquete de casal",
 ]
+
+REFRESH_TIMEOUT_SECONDS = 600
+APIFY_POLL_SECONDS = 2
+
+
+class RefreshCancelled(RuntimeError):
+    pass
+
+
+class RefreshTimedOut(RuntimeError):
+    pass
 V2_KEYWORDS = [
     "humor de casal",
     "couple comedy",
@@ -390,6 +402,12 @@ class ContentRadar:
         self.refresh_lock = threading.Lock()
         self.thumbnail_lock = threading.Lock()
         self._refreshing = False
+        self._refresh_progress: dict[str, Any] | None = None
+        self._cancel_event = threading.Event()
+        self._active_apify_run_id = ""
+        self._active_apify_token = ""
+        self._refresh_deadline = 0.0
+        self._refresh_started_monotonic = 0.0
         self._thumbnail_thread: threading.Thread | None = None
         self.cover_dir = state_path.parent / "content_radar_covers"
         configured_version = os.environ.get("CONTENT_RADAR_PROMPT_VERSION", "v1").strip().lower()
@@ -426,6 +444,9 @@ class ContentRadar:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             state = self._read()
+            progress = dict(self._refresh_progress) if self._refresh_progress else None
+            if progress is not None and self._refreshing and self._refresh_started_monotonic:
+                progress["elapsed_seconds"] = max(0, int(time.monotonic() - self._refresh_started_monotonic))
         posts = [post for post in state.get("posts", {}).values() if post.get("discovery_mode") == "keyword"]
         for post in posts:
             post["prompt_version"] = str(post.get("prompt_version") or "v1")
@@ -467,6 +488,7 @@ class ContentRadar:
             "last_run": state.get("last_run"),
             "runs": (state.get("runs") or [])[:10],
             "refreshing": self._refreshing,
+            "progress": progress,
             "counts": counts,
             "daily_enabled": self.daily_enabled,
             "collection_mode": "manual",
@@ -693,9 +715,54 @@ class ContentRadar:
             raise ValueError(f"该内容类型只支持关键词版本：{allowed}")
         return list(versions[version])
 
+    def _update_progress(self, **changes: Any) -> None:
+        with self.lock:
+            current = dict(self._refresh_progress or {})
+            current.update(changes)
+            if self._refresh_started_monotonic:
+                current["elapsed_seconds"] = max(0, int(time.monotonic() - self._refresh_started_monotonic))
+            self._refresh_progress = current
+
+    def _request_json(self, url: str, token: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: int = 30) -> Any:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            raise RuntimeError(f"Apify HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"无法连接 Apify：{exc.reason}") from exc
+
+    def _abort_apify_run(self, run_id: str, token: str) -> None:
+        if not run_id or not token:
+            return
+        encoded = urllib.parse.quote(run_id, safe="")
+        try:
+            self._request_json(f"https://api.apify.com/v2/actor-runs/{encoded}/abort", token, method="POST", payload={}, timeout=20)
+        except Exception:
+            pass
+
+    def cancel_refresh(self) -> dict[str, Any]:
+        with self.lock:
+            if not self._refreshing:
+                return {"ok": True, "cancelled": False, "message": "当前没有抓取任务"}
+            self._cancel_event.set()
+            run_id = self._active_apify_run_id
+            token = self._active_apify_token
+        self._update_progress(status="stopping", stage_label="正在停止抓取…", cancel_requested=True)
+        if run_id and token:
+            threading.Thread(target=self._abort_apify_run, args=(run_id, token), name="content-radar-abort", daemon=True).start()
+        return {"ok": True, "cancelled": True, "message": "已发送停止请求，将保留本轮已找到的视频"}
+
     def _call_apify(self, token: str, *, keywords: list[str], max_results: int, lookback: str, min_views: int) -> list[dict[str, Any]]:
         actor = urllib.parse.quote(self.actor_id, safe="~")
-        url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
+        url = f"https://api.apify.com/v2/acts/{actor}/runs"
         payload = {
             "keywords": keywords,
             "searchType": "video",
@@ -708,20 +775,58 @@ class ContentRadar:
             "includeKeywordInsights": False,
             "includeDownloadUrl": False,
         }
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=300) as response:
-                result = json.load(response)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:800]
-            raise RuntimeError(f"Apify HTTP {exc.code}: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"无法连接 Apify：{exc.reason}") from exc
+        created = self._request_json(url, token, method="POST", payload=payload)
+        run = created.get("data") if isinstance(created, dict) else None
+        if not isinstance(run, dict) or not run.get("id"):
+            raise RuntimeError("Apify 未返回任务编号")
+        run_id = str(run["id"])
+        dataset_id = str(run.get("defaultDatasetId") or "")
+        with self.lock:
+            self._active_apify_run_id = run_id
+            self._active_apify_token = token
+        terminal_failures = {"FAILED", "TIMING-OUT", "TIMED-OUT", "ABORTING", "ABORTED"}
+        while True:
+            if self._cancel_event.is_set():
+                self._abort_apify_run(run_id, token)
+                raise RefreshCancelled("用户已停止抓取")
+            if self._refresh_deadline and time.monotonic() >= self._refresh_deadline:
+                self._abort_apify_run(run_id, token)
+                raise RefreshTimedOut("抓取超过10分钟，已自动停止")
+            status_payload = self._request_json(f"https://api.apify.com/v2/actor-runs/{urllib.parse.quote(run_id, safe='')}", token)
+            current = status_payload.get("data") if isinstance(status_payload, dict) else None
+            if not isinstance(current, dict):
+                raise RuntimeError("Apify 任务状态格式异常")
+            status = str(current.get("status") or "RUNNING").upper()
+            dataset_id = str(current.get("defaultDatasetId") or dataset_id)
+            stats = current.get("stats") if isinstance(current.get("stats"), dict) else {}
+            stage_items = 0
+            if dataset_id:
+                try:
+                    dataset_meta = self._request_json(f"https://api.apify.com/v2/datasets/{urllib.parse.quote(dataset_id, safe='')}", token, timeout=15)
+                    stage_items = int(((dataset_meta.get("data") or {}).get("itemCount") or 0))
+                except Exception:
+                    stage_items = int((self._refresh_progress or {}).get("stage_items") or 0)
+            self._update_progress(
+                status="running",
+                apify_status=status,
+                stage_items=stage_items,
+                run_time_seconds=int(stats.get("runTimeSecs") or 0),
+            )
+            if status == "SUCCEEDED":
+                break
+            if status in terminal_failures:
+                if self._cancel_event.is_set() or status in {"ABORTING", "ABORTED"}:
+                    raise RefreshCancelled("用户已停止抓取")
+                if status in {"TIMING-OUT", "TIMED-OUT"}:
+                    raise RefreshTimedOut("Apify 任务运行超时")
+                raise RuntimeError(f"Apify 任务失败：{status}")
+            time.sleep(APIFY_POLL_SECONDS)
+        if not dataset_id:
+            return []
+        query = urllib.parse.urlencode({"clean": "true", "format": "json", "limit": max_results})
+        result = self._request_json(f"https://api.apify.com/v2/datasets/{urllib.parse.quote(dataset_id, safe='')}/items?{query}", token, timeout=60)
+        with self.lock:
+            self._active_apify_run_id = ""
         if not isinstance(result, list):
             raise RuntimeError("Apify 返回格式异常")
         return result
@@ -854,9 +959,34 @@ class ContentRadar:
         target_count = max(1, min(120, int(max_results or self.max_results)))
         if not self.refresh_lock.acquire(blocking=False):
             return {"ok": True, "started": False, "message": "采集正在进行中"}
+        triggered = bool(self._refresh_progress and self._refresh_progress.get("status") == "starting")
         self._refreshing = True
         started_at = iso_now()
+        if not triggered:
+            self._cancel_event.clear()
+        self._refresh_started_monotonic = time.monotonic()
+        self._refresh_deadline = self._refresh_started_monotonic + REFRESH_TIMEOUT_SECONDS
+        stages = self._search_stages(content_type, version, target_count)
+        if not self._refresh_progress or self._refresh_progress.get("status") not in {"starting", "running"}:
+            self._refresh_progress = {
+                "status": "starting",
+                "content_type": content_type,
+                "content_type_label": content_config["label"],
+                "prompt_version": version,
+                "target_count": target_count,
+                "found_count": 0,
+                "stage_index": 0,
+                "stage_count": len(stages),
+                "stage_label": "准备启动 Apify",
+                "stage_items": 0,
+                "percent": 1,
+                "started_at": started_at,
+                "elapsed_seconds": 0,
+                "cancel_requested": False,
+            }
         stage_reports: list[dict[str, Any]] = []
+        cancelled = False
+        timed_out = False
         try:
             token = os.environ.get("APIFY_TOKEN", "").strip()
             if not token:
@@ -865,9 +995,25 @@ class ContentRadar:
                 existing_ids = set(self._read().get("posts", {}))
             collected: dict[str, dict[str, Any]] = {}
             items_received = 0
-            for stage in self._search_stages(content_type, version, target_count):
+            for stage_index, stage in enumerate(stages, start=1):
                 if len(collected) >= target_count:
                     break
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+                if time.monotonic() >= self._refresh_deadline:
+                    timed_out = True
+                    break
+                self._update_progress(
+                    status="running",
+                    stage_index=stage_index,
+                    stage_count=len(stages),
+                    stage_label=stage["label"],
+                    stage_items=0,
+                    apify_status="READY",
+                    found_count=len(collected),
+                    percent=min(94, max(2, int(((stage_index - 1) / len(stages)) * 90))),
+                )
                 report = {
                     "id": stage["id"],
                     "label": stage["label"],
@@ -884,6 +1030,16 @@ class ContentRadar:
                         lookback=stage["lookback"],
                         min_views=category_min_views,
                     )
+                except RefreshCancelled as exc:
+                    cancelled = True
+                    report.update({"status": "cancelled", "error": str(exc), "received": 0, "added": 0})
+                    stage_reports.append(report)
+                    break
+                except RefreshTimedOut as exc:
+                    timed_out = True
+                    report.update({"status": "timed_out", "error": str(exc), "received": 0, "added": 0})
+                    stage_reports.append(report)
+                    break
                 except Exception as exc:
                     report.update({"status": "error", "error": str(exc)[:500], "received": 0, "added": 0})
                     stage_reports.append(report)
@@ -945,6 +1101,11 @@ class ContentRadar:
                     "total_new": len(collected),
                 })
                 stage_reports.append(report)
+                self._update_progress(
+                    found_count=len(collected),
+                    stage_items=len(raw_items),
+                    percent=min(95, int((stage_index / len(stages)) * 90)),
+                )
             ranked = list(collected.values())
             with self.lock:
                 state = self._read()
@@ -964,7 +1125,11 @@ class ContentRadar:
                 below_views_total = sum(int(stage.get("below_min_views") or 0) for stage in stage_reports)
                 content_mismatch_total = sum(int(stage.get("content_mismatch") or 0) for stage in stage_reports)
                 outside_time_total = sum(int(stage.get("outside_time_window") or 0) for stage in stage_reports)
-                if target_met:
+                if cancelled:
+                    shortfall_reason = "用户主动停止抓取，已保留停止前找到的合格视频。"
+                elif timed_out:
+                    shortfall_reason = "抓取达到10分钟资源上限，已自动停止并保留已有结果。"
+                elif target_met:
                     shortfall_reason = ""
                 elif any(stage.get("status") == "error" for stage in stage_reports):
                     shortfall_reason = "Apify抓取阶段发生错误，流程提前停止。"
@@ -979,7 +1144,7 @@ class ContentRadar:
                 run = {
                     "started_at": started_at,
                     "finished_at": iso_now(),
-                    "status": "success",
+                    "status": "cancelled" if cancelled else "timed_out" if timed_out else "success",
                     "reason": reason,
                     "items_received": items_received,
                     "posts_saved": len(ranked),
@@ -996,11 +1161,20 @@ class ContentRadar:
                     "shortfall_reason": shortfall_reason,
                     "stages": stage_reports,
                     "relaxed_keywords_used": any(stage.get("keywords_relaxed") for stage in stage_reports),
+                    "cancelled": cancelled,
+                    "timed_out": timed_out,
                 }
                 state["last_run"] = run
                 state["runs"] = [run, *(state.get("runs") or [])][:30]
                 self._write(state)
             self.start_thumbnail_cache()
+            self._update_progress(
+                status="cancelled" if cancelled else "timed_out" if timed_out else "completed",
+                stage_label="已停止" if cancelled else "达到时限，已停止" if timed_out else "抓取完成",
+                found_count=len(ranked),
+                percent=100,
+                finished_at=run["finished_at"],
+            )
             return {"ok": True, "started": True, "run": run}
         except Exception as exc:
             run = {"started_at": started_at, "finished_at": iso_now(), "status": "error", "reason": reason, "error": str(exc)[:1000], "prompt_version": version, "content_type": content_type, "content_type_label": content_config["label"], "min_views": category_min_views, "keywords": keywords, "target_count": target_count, "target_met": False, "shortfall": target_count, "shortfall_reason": "抓取服务运行失败。", "stages": stage_reports}
@@ -1014,9 +1188,14 @@ class ContentRadar:
                     self.logger("content_radar_refresh_failed", "Content Radar Apify refresh failed.", error=str(exc))
                 except Exception:
                     pass
+            self._update_progress(status="error", stage_label="抓取失败", error=str(exc)[:500], percent=100, finished_at=run["finished_at"])
             return {"ok": False, "started": True, "run": run, "error": str(exc)}
         finally:
             self._refreshing = False
+            with self.lock:
+                self._active_apify_run_id = ""
+                self._active_apify_token = ""
+            self._refresh_deadline = 0.0
             self.refresh_lock.release()
 
     def trigger_refresh(self, *, reason: str = "manual", content_type: str = DEFAULT_CONTENT_TYPE, prompt_version: str = "v1", max_results: int = MANUAL_REFRESH_LIMIT) -> dict[str, Any]:
@@ -1026,13 +1205,32 @@ class ContentRadar:
         self.keywords_for(version, content_type)
         if self._refreshing:
             return {"ok": True, "started": False, "message": "采集正在进行中"}
+        target_count = max(1, min(120, int(max_results)))
+        self._cancel_event.clear()
+        self._refreshing = True
+        self._refresh_progress = {
+            "status": "starting",
+            "content_type": content_type,
+            "content_type_label": content_config["label"],
+            "prompt_version": version,
+            "target_count": target_count,
+            "found_count": 0,
+            "stage_index": 0,
+            "stage_count": 5,
+            "stage_label": "正在创建抓取任务",
+            "stage_items": 0,
+            "percent": 1,
+            "started_at": iso_now(),
+            "elapsed_seconds": 0,
+            "cancel_requested": False,
+        }
         threading.Thread(
             target=self.refresh,
             kwargs={"reason": reason, "content_type": content_type, "prompt_version": version, "max_results": max_results},
             name="content-radar-refresh",
             daemon=True,
         ).start()
-        return {"ok": True, "started": True, "content_type": content_type, "prompt_version": version, "message": f"已开始抓取{content_config['label']} {version.upper()}，将自动补足 50 条，可能需要 3–10 分钟"}
+        return {"ok": True, "started": True, "content_type": content_type, "prompt_version": version, "message": f"已开始抓取{content_config['label']} {version.upper()}，最长运行10分钟，可随时停止"}
 
     def start_scheduler(self) -> None:
         """Kept for app startup compatibility; collection is manual-only."""
