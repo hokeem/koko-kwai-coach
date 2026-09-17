@@ -142,6 +142,21 @@ class ScriptTaxonomyTests(unittest.TestCase):
         for dimension in app.SCRIPT_TAG_DIMENSIONS:
             self.assertEqual(entry[f"{dimension}_tags"], [])
 
+    def test_telekwai_is_excluded_from_local_creator_recommendations(self) -> None:
+        visible = {"title": "Regular", "whole_video_summary": "Summary", "html_url": "/regular", "published": True}
+        telekwai = {"title": "Telekwai", "whole_video_summary": "Summary", "html_url": "/telekwai", "telekwai": True}
+        self.assertEqual(app.creator_effective_entries([telekwai, visible]), [visible])
+
+    def test_taxonomy_api_reports_unsaved_telekwai_change(self) -> None:
+        entry_id = "a" * 32
+        entry = {"entry_id": entry_id, "title": "Script", "published": True}
+        with (
+            mock.patch.object(app, "load_library_entries", return_value=[entry]),
+            mock.patch.object(app, "save_library_entries", return_value=False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "could not be saved"):
+                app.update_library_entry_taxonomy(entry_id, {"telekwai": True})
+
     def test_agent_job_can_create_telekwai_without_taxonomy(self) -> None:
         with mock.patch.object(app, "ensure_capacity_for_new_job"), mock.patch.object(app, "save_jobs"), mock.patch.object(app, "enqueue_job"):
             created = app.create_job(

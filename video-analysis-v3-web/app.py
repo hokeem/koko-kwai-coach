@@ -5252,6 +5252,7 @@ def update_library_entry_taxonomy(entry_id: str, payload: dict[str, Any]) -> dic
             if telekwai:
                 apply_telekwai_isolation(entry, True)
             else:
+                entry["published"] = True
                 for dimension in SCRIPT_TAG_DIMENSIONS:
                     entry[f"{dimension}_tags"] = taxonomy_tags[dimension]
                     entry[f"{dimension}_tag_labels_zh"] = taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "zh")
@@ -5265,7 +5266,8 @@ def update_library_entry_taxonomy(entry_id: str, payload: dict[str, Any]) -> dic
             break
         if updated_entry is None:
             return None
-        save_library_entries(entries)
+        if not save_library_entries(entries):
+            raise RuntimeError("Script library could not be saved. Please retry.")
         for job in jobs.values():
             candidates = [job, *(job.get("items") or [])]
             for candidate in candidates:
@@ -5276,6 +5278,7 @@ def update_library_entry_taxonomy(entry_id: str, payload: dict[str, Any]) -> dic
                 if telekwai:
                     apply_telekwai_isolation(candidate, True)
                 else:
+                    candidate["published"] = True
                     for dimension in SCRIPT_TAG_DIMENSIONS:
                         candidate[f"{dimension}_tags"] = taxonomy_tags[dimension]
                         candidate[f"{dimension}_tag_labels_zh"] = taxonomy_tag_labels(dimension, taxonomy_tags[dimension], "zh")
@@ -18000,6 +18003,8 @@ def creator_effective_entries(entries: list[dict[str, Any]]) -> list[dict[str, A
     filtered = [
         entry for entry in entries
         if str(entry.get("title") or "").strip()
+        and not is_telekwai_script(entry)
+        and entry.get("published") is not False
         and str(entry.get("whole_video_summary") or "").strip()
         and (entry.get("html_url") or entry.get("zh_html_url") or entry.get("video_url"))
     ]
