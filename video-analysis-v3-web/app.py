@@ -223,6 +223,7 @@ job_lock = threading.RLock()
 jobs: dict[str, dict[str, Any]] = {}
 job_queue: deque[str] = deque()
 queued_job_ids: set[str] = set()
+active_job_ids: set[str] = set()
 queue_condition = threading.Condition()
 analysis_slots = threading.BoundedSemaphore(MAX_CONCURRENT_ANALYSES)
 resource_cleanup_lock = threading.Lock()
@@ -1375,6 +1376,7 @@ def stop_all_tasks() -> dict[str, int]:
                     stopped_reviews += 1
                     job_touched = True
             if job_touched:
+                job["stop_requested"] = True
                 recompute_job_status(job_id)
                 job["error"] = "任务已手动停止。"
                 stopped_jobs += 1
@@ -1556,12 +1558,23 @@ def job_worker_loop() -> None:
                 job_id = job_queue.popleft()
                 queued_job_ids.discard(job_id)
             with job_lock:
-                job_exists = job_id in jobs
-            if not job_exists:
+                job = jobs.get(job_id)
+                runnable = bool(job and not job.get("stop_requested") and any(
+                    item.get("status") == "queued" for item in job.get("items") or []
+                ))
+            if not runnable:
                 log_runtime_warning("analysis_worker_skipped_missing_job", "Skipped queued analysis job because it no longer exists.", job_id=job_id)
                 continue
             with analysis_slots:
-                run_job_batch(job_id)
+                with job_lock:
+                    if jobs[job_id].get("stop_requested"):
+                        continue
+                    active_job_ids.add(job_id)
+                try:
+                    run_job_batch(job_id)
+                finally:
+                    with job_lock:
+                        active_job_ids.discard(job_id)
         except Exception as exc:
             log_runtime_warning("analysis_worker_loop_error", "Analysis worker recovered after an unexpected error.", error=str(exc))
             time.sleep(1)
@@ -3682,20 +3695,33 @@ def build_system_queue_snapshot(current_job_id: str | None = None) -> dict[str, 
     current_job_ahead = 0
     with job_lock:
         queued_order = list(job_queue)
-        for job in jobs.values():
+        for job_id in active_job_ids:
+            job = jobs.get(job_id)
+            if not job or job.get("stop_requested"):
+                continue
             items = job.get("items") or []
             is_active = any(
                 str(item.get("status") or "").strip() == "running" or str(item.get("review_status") or "").strip() == "running"
                 for item in items
             )
             if is_active:
-                active_workloads.append(summarize_job_focus(job))
-        for idx, job_id in enumerate(queued_order):
+                focus = summarize_job_focus(job)
+                finished = sum(item.get("status") in {"completed", "failed"} for item in items)
+                current = next((item for item in items if item.get("status") == "running"), None)
+                focus["progress_percent"] = min(99, round(100 * (finished + AGENT_STAGE_PROGRESS.get(
+                    str((current or {}).get("stage") or "queued"), 0
+                ) / 100) / max(1, len(items))))
+                focus["completed_items"] = finished
+                focus["total_items"] = len(items)
+                active_workloads.append(focus)
+        for job_id in queued_order:
             job = jobs.get(job_id)
-            if not job:
+            if not job or job.get("stop_requested") or not any(
+                item.get("status") == "queued" for item in job.get("items") or []
+            ):
                 continue
             focus = summarize_job_focus(job)
-            queue_position = len(active_workloads) + idx + 1
+            queue_position = len(active_workloads) + len(queued_jobs) + 1
             queued_jobs.append(
                 {
                     "job_id": job_id,
@@ -3703,6 +3729,7 @@ def build_system_queue_snapshot(current_job_id: str | None = None) -> dict[str, 
                     "video_url": focus["video_url"],
                     "stage": focus["stage"],
                     "stage_message": focus["stage_message"],
+                    "progress_percent": 0,
                     "queue_position": queue_position,
                 }
             )
@@ -3715,6 +3742,7 @@ def build_system_queue_snapshot(current_job_id: str | None = None) -> dict[str, 
                     current_job_position = idx + 1
                     current_job_ahead = idx
                     break
+    workloads = active_workloads + queued_jobs
     return {
         "running_count": len(active_workloads),
         "queued_count": len(queued_jobs),
@@ -3722,6 +3750,7 @@ def build_system_queue_snapshot(current_job_id: str | None = None) -> dict[str, 
         "queued_jobs": queued_jobs,
         "current_job_position": current_job_position,
         "current_job_ahead": current_job_ahead,
+        "ahead_workloads": workloads[:current_job_ahead] if current_job_position else [],
     }
 
 
@@ -9954,6 +9983,10 @@ def run_review_with_slot(parent_job_id: str, item_index: int, item_id: str, feed
 
 
 def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str, Any]) -> None:
+    with job_lock:
+        if jobs[parent_job_id].get("stop_requested") or item.get("status") != "queued" or is_item_cancelled(item["id"]):
+            return
+        update_job_item(parent_job_id, item_index, status="running", started_at=now_iso(), command=[], stage="queued", stage_message="Queued for analysis.")
     output_dir = RESULTS_ROOT / item["id"]
     progress_path = output_dir / "progress.json"
     proc_env = os.environ.copy()
@@ -9966,9 +9999,9 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
     last_error = "Unknown pipeline failure"
     tried: list[str] = []
     manual_stop = False
-    clear_item_cancelled(item["id"])
-    update_job_item(parent_job_id, item_index, status="running", started_at=now_iso(), command=[], stage="queued", stage_message="Queued for analysis.")
     for model_name in dict.fromkeys(MODEL_CANDIDATES):
+        if jobs[parent_job_id].get("stop_requested") or is_item_cancelled(item["id"]):
+            return
         cmd = [
             os.environ.get("PYTHON_BIN", "python3"),
             str(AUTO_ANALYZE),
@@ -9994,14 +10027,17 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
             stage_message=f"Preparing {model_name}.",
         )
         try:
-            proc = subprocess.Popen(
-                cmd,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=proc_env,
-            )
-            register_active_process(item["id"], proc)
+            with job_lock:
+                if jobs[parent_job_id].get("stop_requested") or is_item_cancelled(item["id"]):
+                    return
+                proc = subprocess.Popen(
+                    cmd,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=proc_env,
+                )
+                register_active_process(item["id"], proc)
             start_time = time.time()
             stdout_lines: list[str] = []
             progress_mtime = 0.0
@@ -10056,7 +10092,7 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                 proc_stdout = "".join(stdout_lines)
                 result_json = extract_json_line(proc_stdout or "")
                 if proc.returncode == 0:
-                    if is_item_cancelled(item["id"]):
+                    if is_item_cancelled(item["id"]) or jobs[parent_job_id].get("stop_requested"):
                         manual_stop = True
                         last_error = "任务已手动停止。"
                         break
@@ -10080,36 +10116,39 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
                         use_llm=False,
                     )
                     content_type = decision["content_type"]
-                    update_job_item(
-                        parent_job_id,
-                        item_index,
-                        status="completed",
-                        error="",
-                        raw_error="",
-                        completed_at=now_iso(),
-                        html_url=f"/results/{item['id']}/script_table.html",
-                        zh_html_url=f"/results/{item['id']}/script_table.html",
-                        pt_html_url="",
-                        report_url=product["report_url"],
-                        evidence_url=product["evidence_url"],
-                        docx_url=docx_url,
-                        zh_docx_url=docx_url,
-                        pt_docx_url="",
-                        artifacts=summarize_artifacts(item["id"], output_dir),
-                        result_json=script_json,
-                        zh_result_json=script_json,
-                        pt_result_json=None,
-                        original_result_json=script_json,
-                        display_language="zh",
-                        tried_models=tried,
-                        stage="completed",
-                        stage_message="Completed.",
-                        content_type=content_type,
-                        content_type_source=decision["content_type_source"],
-                        content_type_reasoning=decision["content_type_reasoning"],
-                        content_type_confidence=decision["content_type_confidence"],
-                        title=script_json.get("title") or "Video Script",
-                    )
+                    with job_lock:
+                        if is_item_cancelled(item["id"]) or jobs[parent_job_id].get("stop_requested"):
+                            return
+                        update_job_item(
+                            parent_job_id,
+                            item_index,
+                            status="completed",
+                            error="",
+                            raw_error="",
+                            completed_at=now_iso(),
+                            html_url=f"/results/{item['id']}/script_table.html",
+                            zh_html_url=f"/results/{item['id']}/script_table.html",
+                            pt_html_url="",
+                            report_url=product["report_url"],
+                            evidence_url=product["evidence_url"],
+                            docx_url=docx_url,
+                            zh_docx_url=docx_url,
+                            pt_docx_url="",
+                            artifacts=summarize_artifacts(item["id"], output_dir),
+                            result_json=script_json,
+                            zh_result_json=script_json,
+                            pt_result_json=None,
+                            original_result_json=script_json,
+                            display_language="zh",
+                            tried_models=tried,
+                            stage="completed",
+                            stage_message="Completed.",
+                            content_type=content_type,
+                            content_type_source=decision["content_type_source"],
+                            content_type_reasoning=decision["content_type_reasoning"],
+                            content_type_confidence=decision["content_type_confidence"],
+                            title=script_json.get("title") or "Video Script",
+                        )
                     return
                 last_error = (stderr_text or proc_stdout or "").strip() or "Unknown pipeline failure"
                 if not should_try_next_model(last_error):
@@ -10125,6 +10164,8 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
             continue
         finally:
             unregister_active_process(item["id"])
+    if jobs[parent_job_id].get("stop_requested"):
+        return
     update_job_item(
         parent_job_id,
         item_index,
@@ -10140,13 +10181,21 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
 
 def run_job_batch(job_id: str) -> None:
     try:
+        if jobs[job_id].get("stop_requested"):
+            return
         update_job(job_id, status="running", started_at=now_iso(), stage="queued", stage_message="Batch task started.")
         items = jobs[job_id]["items"]
         understanding_mode = str(jobs[job_id].get("mode") or "").strip() == "understanding"
         for idx, item in enumerate(items):
+            if jobs[job_id].get("stop_requested") or item.get("status") != "queued":
+                break
             retry_attempt = 0
             while True:
+                if jobs[job_id].get("stop_requested"):
+                    break
                 execute_single_pipeline(job_id, idx, item)
+                if jobs[job_id].get("stop_requested"):
+                    break
                 current_item = jobs[job_id]["items"][idx]
                 if understanding_mode and current_item.get("status") == "completed":
                     summary = build_understanding_summary(
@@ -10199,6 +10248,8 @@ def run_job_batch(job_id: str) -> None:
                     item = jobs[job_id]["items"][idx]
                     continue
                 break
+        if jobs[job_id].get("stop_requested"):
+            return
         final_items = jobs[job_id]["items"]
         completed = sum(1 for item in final_items if item.get("status") == "completed")
         failed = sum(1 for item in final_items if item.get("status") == "failed")
@@ -10217,7 +10268,8 @@ def run_job_batch(job_id: str) -> None:
             error="" if completed else "All batch items failed.",
         )
     except Exception as exc:
-        update_job(job_id, status="failed", error=friendly_error(str(exc)), completed_at=now_iso(), stage="failed", stage_message="Batch failed.")
+        if not jobs.get(job_id, {}).get("stop_requested"):
+            update_job(job_id, status="failed", error=friendly_error(str(exc)), completed_at=now_iso(), stage="failed", stage_message="Batch failed.")
     finally:
         job = jobs.get(job_id)
         if isinstance(job, dict) and str(job.get("mode") or "").strip() == "understanding":
@@ -11522,6 +11574,14 @@ def studio_html() -> str:
       line-height: 1.65;
       color: var(--muted);
     }}
+    .ahead-list {{ display: grid; gap: 10px; margin: 14px 0; }}
+    .ahead-task {{ padding: 12px 14px; border: 1px solid rgba(255,111,0,.22); border-radius: 8px; background: #fff; }}
+    .ahead-task-top {{ display: flex; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 700; }}
+    .ahead-task-title {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .ahead-task-meta {{ margin: 5px 0 8px; color: var(--muted); font-size: 12px; }}
+    .ahead-task .progress-rail {{ margin: 0; }}
+    .queue-stop-btn {{ margin: 8px 0 14px; background: #fff; color: #b84a08; border: 1px solid #e88556; border-radius: 8px; padding: 10px 14px; cursor: pointer; font-weight: 700; }}
+    .queue-stop-btn:disabled {{ opacity: .6; cursor: wait; }}
     .queue-shell {{
       border: 1px solid rgba(31,31,31,.08);
       border-radius: 24px;
@@ -15467,6 +15527,7 @@ def studio_html() -> str:
       const globalQueued = Number(systemQueue.queued_count || 0);
       const currentPosition = Number(systemQueue.current_job_position || 0);
       const currentAhead = Number(systemQueue.current_job_ahead || 0);
+      const aheadWorkloads = Array.isArray(systemQueue.ahead_workloads) ? systemQueue.ahead_workloads : [];
       const globalFocus = activeWorkloads[0] || null;
       const currentItem = findCurrentItem(items);
       const effectiveStage = effectiveStatus === "completed"
@@ -15492,7 +15553,13 @@ def studio_html() -> str:
         ? `<a class="batch-overview-subtitle" href="${{escapeHtml(currentItem.video_url || "")}}" target="_blank" rel="noreferrer">${{escapeHtml(currentItem.video_url || "")}}</a>`
         : `<div class="focus-note">${{escapeHtml(subtitle)}}</div>`;
       const queueHint = effectiveStatus === "queued" && currentPosition
-        ? `<div class="focus-note">你的任务当前排队第 ${{currentPosition}} 位，前方还有 ${{currentAhead}} 条任务。</div>`
+        ? `<div class="focus-note">你的任务当前排队第 ${{currentPosition}} 位，前方还有 ${{currentAhead}} 条任务。</div>
+           <div class="ahead-list">${{aheadWorkloads.map((workload) => {{
+             const percent = Math.max(0, Math.min(100, Number(workload.progress_percent || 0)));
+             const stage = STAGE_LABELS[workload.stage] || workload.stage_message || "等待拆解";
+             return `<div class="ahead-task"><div class="ahead-task-top"><span class="ahead-task-title">${{escapeHtml(workload.title || "其他任务")}}</span><span>阶段进度 ${{percent}}%</span></div><div class="ahead-task-meta">${{escapeHtml(stage)}}${{workload.total_items ? ` · ${{Number(workload.completed_items || 0)}}/${{workload.total_items}} 条已结束` : ""}}</div><div class="progress-rail"><div class="progress-fill" style="width:${{percent}}%"></div></div></div>`;
+           }}).join("")}}</div>
+           <button class="queue-stop-btn" type="button" data-stop-queue="true" title="停止当前全部分析任务，包括你自己的任务">确认出现 Bug，停止前方排队任务</button>`
         : "";
       const systemHint = globalFocus
         ? `<div class="focus-note">系统当前占用：${{escapeHtml(globalFocus.title || "其他任务")}} · ${{escapeHtml(workloadKindLabel(globalFocus.kind))}}${{globalFocus.stage ? ` · ${{escapeHtml(STAGE_LABELS[globalFocus.stage] || globalFocus.stage)}}` : ""}}</div>`
@@ -16211,11 +16278,10 @@ def studio_html() -> str:
       }});
     }}
 
-    if (stopAllBtn) {{
-      stopAllBtn.addEventListener("click", async () => {{
-        const original = stopAllBtn.textContent;
-        stopAllBtn.disabled = true;
-        stopAllBtn.textContent = "停止中...";
+    async function stopAllAnalysisTasks(button) {{
+        const original = button.textContent;
+        button.disabled = true;
+        button.textContent = "停止中...";
         try {{
           const res = await fetch("/api/stop-all", {{
             method: "POST",
@@ -16232,10 +16298,18 @@ def studio_html() -> str:
           showToast("停止失败", String(error.message || error));
           updateStopAllButtonState(!!activeJobId);
         }} finally {{
-          stopAllBtn.textContent = original;
+          button.textContent = original;
+          if (button === stopAllBtn) updateStopAllButtonState(!!activeJobId);
+          else button.disabled = false;
         }}
-      }});
     }}
+    if (stopAllBtn) {{
+      stopAllBtn.addEventListener("click", () => stopAllAnalysisTasks(stopAllBtn));
+    }}
+    statusBox.addEventListener("click", (event) => {{
+      const button = event.target.closest("[data-stop-queue]");
+      if (button && !button.disabled) stopAllAnalysisTasks(button);
+    }});
 
     studioPanelLinks.forEach((link) => {{
       link.addEventListener("click", (event) => {{
