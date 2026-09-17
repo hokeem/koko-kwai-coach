@@ -1308,7 +1308,9 @@ def reconcile_stale_jobs() -> None:
                     if hydrate_item_from_outputs(item):
                         changed = True
                         job_changed = True
-            if has_queued and not has_running and not has_running_review and job_id not in queued_snapshot:
+            if (has_queued and not has_running and not has_running_review
+                    and job_id not in queued_snapshot and job_id not in active_job_ids
+                    and not job.get("stop_requested")):
                 job["status"] = "queued"
                 job["stage"] = "queued"
                 job["stage_message"] = "Recovered queued task."
@@ -1389,10 +1391,13 @@ def stop_all_tasks() -> dict[str, int]:
                     proc.kill()
                 except Exception:
                     pass
+    remaining = build_system_queue_snapshot()
     return {
         "stopped_jobs": stopped_jobs,
         "stopped_items": stopped_items,
         "stopped_reviews": stopped_reviews,
+        "remaining_running": remaining["running_count"],
+        "remaining_queued": remaining["queued_count"],
     }
 
 
@@ -3701,7 +3706,8 @@ def build_system_queue_snapshot(current_job_id: str | None = None) -> dict[str, 
                 continue
             items = job.get("items") or []
             is_active = any(
-                str(item.get("status") or "").strip() == "running" or str(item.get("review_status") or "").strip() == "running"
+                str(item.get("status") or "").strip() in {"queued", "running"}
+                or str(item.get("review_status") or "").strip() == "running"
                 for item in items
             )
             if is_active:
@@ -3716,7 +3722,7 @@ def build_system_queue_snapshot(current_job_id: str | None = None) -> dict[str, 
                 active_workloads.append(focus)
         for job_id in queued_order:
             job = jobs.get(job_id)
-            if not job or job.get("stop_requested") or not any(
+            if not job or job_id in active_job_ids or job.get("stop_requested") or not any(
                 item.get("status") == "queued" for item in job.get("items") or []
             ):
                 continue
@@ -7464,7 +7470,9 @@ def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "reference_video_replacement_key": item.get("reference_video_replacement_key") or item.get("id") or "",
         "reference_video_updated_at": item.get("reference_video_updated_at") or "",
         "library_date": normalize_library_date(item.get("library_date")) if item.get("library_date") else "",
-        "in_library": bool(item.get("saved_to_library_at")) or library_entry_exists(str(item.get("id") or "")),
+        "in_library": bool(item.get("saved_to_library_at")) or (
+            item.get("status") == "completed" and library_entry_exists(item_id)
+        ),
         "source_video_available": source_video_available,
         "source_video_url": f"/results/{item_id}/{SOURCE_VIDEO_NAME}" if source_video_available else "",
         "storyboard_prompt": item.get("storyboard_prompt") or storyboard_state.get("storyboard_prompt") or "",
@@ -13763,6 +13771,8 @@ def studio_html() -> str:
     let pollInFlight = false;
     let queuedImmediateRepoll = false;
     let activePollController = null;
+    let stoppingAllTasks = false;
+    let stoppedJobId = "";
     const POLL_REQUEST_TIMEOUT_MS = 12000;
     const POLL_RECOVERY_DELAY_MS = 1500;
     const reviewTracker = Object.create(null);
@@ -15735,6 +15745,7 @@ def studio_html() -> str:
     }}
 
     async function pollJob(jobId, options = {{}}) {{
+      if (stoppingAllTasks || jobId === stoppedJobId) return;
       activeJobId = jobId;
       persistActiveJobId(jobId);
       updateStopAllButtonState(true);
@@ -15766,6 +15777,7 @@ def studio_html() -> str:
           }}
         }});
       }} catch (error) {{
+        if (stoppingAllTasks || jobId !== activeJobId) return;
         const aborted = error && error.name === "AbortError";
         if (restoringActiveJob) {{
           restoreAttempts += 1;
@@ -15796,6 +15808,7 @@ def studio_html() -> str:
       }} finally {{
         window.clearTimeout(timeoutId);
       }}
+      if (stoppingAllTasks || jobId !== activeJobId) return;
       if (!res.ok) {{
         if (restoringActiveJob && res.status >= 500) {{
           restoreAttempts += 1;
@@ -15815,6 +15828,7 @@ def studio_html() -> str:
       try {{
         data = await readJsonSafely(res);
       }} catch (error) {{
+        if (stoppingAllTasks || jobId !== activeJobId) return;
         if (restoringActiveJob) {{
           restoreAttempts += 1;
           if (restoreAttempts < RESTORE_RETRY_LIMIT) {{
@@ -15838,6 +15852,7 @@ def studio_html() -> str:
         schedulePoll(jobId, 4000);
         return;
       }}
+      if (stoppingAllTasks || jobId !== activeJobId) return;
       restoringActiveJob = false;
       restoreAttempts = 0;
       persistActiveJobSnapshot(data);
@@ -16279,25 +16294,44 @@ def studio_html() -> str:
     }}
 
     async function stopAllAnalysisTasks(button) {{
+        if (stoppingAllTasks) return;
+        stoppingAllTasks = true;
+        const jobIdAtStop = activeJobId;
+        if (jobPollTimer) clearTimeout(jobPollTimer);
+        jobPollTimer = null;
+        if (activePollController) activePollController.abort("stopping-all-tasks");
         const original = button.textContent;
         button.disabled = true;
         button.textContent = "停止中...";
+        setStatus('<div class="status-empty"><div class="status-empty-title">正在停止全部拆解任务...</div><div class="status-empty-copy">正在等待服务器确认，请勿重复提交。</div></div>');
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 30000);
         try {{
           const res = await fetch("/api/stop-all", {{
             method: "POST",
             headers: {{ "Content-Type": "application/json" }},
+            signal: controller.signal,
           }});
           const data = await readJsonSafely(res);
           if (!res.ok) {{
             throw new Error(data.error || "停止任务失败");
           }}
+          if (Number(data.remaining_running || 0) + Number(data.remaining_queued || 0) > 0) {{
+            throw new Error("服务器仍有任务运行或排队，请稍后重试。");
+          }}
+          stoppedJobId = jobIdAtStop;
           setIdleState();
+          persistActiveJobSnapshot(null);
           setStudioPanel("split-panel");
+          setStatus(`<div class="status-empty"><div class="status-empty-title">全部拆解任务已停止</div><div class="status-empty-copy">服务器已确认停止 ${{Number(data.stopped_jobs || 0)}} 批、${{Number(data.stopped_items || 0)}} 条任务。现在可以重新提交。</div></div>`, true);
           showToast("已停止所有任务", `已停止 ${{data.stopped_items || 0}} 条分析，${{data.stopped_reviews || 0}} 条复盘。`);
         }} catch (error) {{
+          setStatus(`<div class="status-empty"><div class="status-empty-title">停止未得到确认</div><div class="status-empty-copy">${{escapeHtml(String(error.message || error))}}</div><button class="queue-stop-btn" type="button" data-stop-queue="true">重试停止全部任务</button></div>`);
           showToast("停止失败", String(error.message || error));
           updateStopAllButtonState(!!activeJobId);
         }} finally {{
+          window.clearTimeout(timeoutId);
+          stoppingAllTasks = false;
           button.textContent = original;
           if (button === stopAllBtn) updateStopAllButtonState(!!activeJobId);
           else button.disabled = false;
@@ -19212,10 +19246,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(public_translation_job_view(job))
             return
         if parsed.path.startswith("/api/jobs/"):
-            reconcile_stale_jobs()
             job_id = parsed.path.split("/")[-1]
             with job_lock:
-                recompute_job_status(job_id)
                 job = jobs.get(job_id)
             if not job:
                 self.send_json({"error": "Job not found."}, status=404)
