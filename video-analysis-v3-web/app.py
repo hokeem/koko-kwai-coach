@@ -20245,6 +20245,7 @@ def main() -> int:
     start_translation_workers()
     start_watchdog()
     start_resource_janitor()
+    content_radar.import_friend_prank_reference()
     content_radar.import_curated_batch()
     content_radar.hydrate_curated_metadata()
     content_radar.start_thumbnail_cache()

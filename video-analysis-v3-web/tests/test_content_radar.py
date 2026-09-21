@@ -11,10 +11,20 @@ WEB_ROOT = Path(__file__).resolve().parents[1]
 if str(WEB_ROOT) not in sys.path:
     sys.path.insert(0, str(WEB_ROOT))
 
-from content_radar import CHEATING_KEYWORDS, ContentRadar, V2_KEYWORDS, metadata_analysis, normalize_apify_item, validate_content_type, verify_refresh_password
+from content_radar import CHEATING_KEYWORDS, FRIEND_PRANK_KEYWORDS, ContentRadar, V2_KEYWORDS, metadata_analysis, normalize_apify_item, validate_content_type, verify_refresh_password
 
 
 class ContentRadarTests(unittest.TestCase):
+    def test_friend_prank_gate_requires_friend_and_prank_signals(self):
+        reference = validate_content_type({"caption": "Pranking my roommate 😂", "hashtags": ["prank"]}, "friend_prank")
+        portuguese = validate_content_type({"caption": "Pegadinha com meu melhor amigo em casa", "hashtags": []}, "friend_prank")
+        stranger = validate_content_type({"caption": "Public prank on strangers", "hashtags": ["prank"]}, "friend_prank")
+        couple_only = validate_content_type({"caption": "Prank on my girlfriend", "hashtags": []}, "friend_prank")
+        self.assertTrue(reference["eligible"])
+        self.assertTrue(portuguese["eligible"])
+        self.assertFalse(stranger["eligible"])
+        self.assertFalse(couple_only["eligible"])
+
     def test_cheating_gate_requires_both_topic_and_performance_signals(self):
         accepted_en = validate_content_type({"caption": "POV: cheating husband comedy skit", "hashtags": []}, "cheating_comedy")
         accepted_pt = validate_content_type({"caption": "Pegadinha de traição com meu marido 😂", "hashtags": ["comédia"]}, "cheating_comedy")
@@ -261,6 +271,21 @@ class ContentRadarTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "V1"):
                 radar.trigger_refresh(content_type="cheating_comedy", prompt_version="v2")
 
+    def test_friend_prank_uses_its_own_keywords_and_one_million_floor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            items = [
+                {"videoId": str(index), "caption": "Funny roommate prank reaction", "authorUniqueId": f"friend{index}", "views": 2_000_000}
+                for index in range(50)
+            ]
+            with patch.dict(os.environ, {"APIFY_TOKEN": "test-token"}):
+                with patch.object(radar, "_call_apify", return_value=items) as call:
+                    result = radar.refresh(content_type="friend_prank", prompt_version="v1", max_results=50)
+            call.assert_called_once_with("test-token", keywords=FRIEND_PRANK_KEYWORDS, max_results=100, lookback="last30Days", min_views=1_000_000)
+            self.assertTrue(result["run"]["target_met"])
+            self.assertEqual(result["run"]["content_type_label"], "朋友整蛊")
+            self.assertTrue(all(post["content_type"] == "friend_prank" for post in radar.snapshot()["posts"]))
+
     def test_curated_batch_imports_once_without_overwriting_decisions(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "state.json"
@@ -274,6 +299,18 @@ class ContentRadarTests(unittest.TestCase):
             self.assertEqual(radar.import_curated_batch(), 0)
             selected = next(post for post in radar.snapshot()["posts"] if post["id"] == "tiktok:7675481187808300319")
             self.assertEqual(selected["decision"], "selected")
+
+    def test_friend_prank_reference_is_seeded_once_with_correct_badge(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            self.assertEqual(radar.import_friend_prank_reference(), 1)
+            self.assertEqual(radar.import_friend_prank_reference(), 0)
+            post = radar.snapshot()["posts"][0]
+            self.assertEqual(post["id"], "tiktok:6717348453673946373")
+            self.assertEqual(post["content_type"], "friend_prank")
+            self.assertEqual(post["content_type_label"], "朋友整蛊")
+            self.assertEqual(post["metrics"]["views"], 5_400_000)
+            self.assertIn("Pranking My Roommate", post["caption"])
 
     def test_refresh_password_is_checked_against_configured_hash(self):
         import hashlib
@@ -317,6 +354,8 @@ class ContentRadarTests(unittest.TestCase):
         self.assertIn('name="content-type"', html)
         self.assertIn('value="couple_comedy"', html)
         self.assertIn('value="cheating_comedy"', html)
+        self.assertIn('value="friend_prank"', html)
+        self.assertIn("18 个英语 / 葡语关键词", html)
         self.assertIn("出轨 / 抓包喜剧", html)
         self.assertIn('value="v1"', html)
         self.assertIn('value="v2"', html)

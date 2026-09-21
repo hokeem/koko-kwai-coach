@@ -113,6 +113,36 @@ CHEATING_RELAXED_KEYWORDS = [
     "traição relacionamento",
     "amante pegadinha",
 ]
+FRIEND_PRANK_KEYWORDS = [
+    "pranking my roommate",
+    "roommate prank reaction",
+    "funny roommate prank",
+    "best friend prank reaction",
+    "prank on my best friend",
+    "friends pranking each other",
+    "friend prank at home",
+    "hidden camera friend prank",
+    "harmless prank on friend",
+    "housemate prank",
+    "pegadinha com amigo",
+    "pegadinha com melhor amigo",
+    "pegadinha com colega de quarto",
+    "trollagem com amigo",
+    "reação pegadinha amigo",
+    "amigos trolando",
+    "pegadinha entre amigos em casa",
+    "susto no amigo pegadinha",
+]
+FRIEND_PRANK_RELAXED_KEYWORDS = [
+    "friend prank",
+    "roommate prank",
+    "best friend reaction",
+    "prank wars friends",
+    "housemate funny prank",
+    "pegadinha amigo",
+    "trollagem amigo",
+    "colega de quarto pegadinha",
+]
 DEFAULT_CONTENT_TYPE = "couple_comedy"
 CONTENT_TYPE_CONFIG = {
     "couple_comedy": {
@@ -128,12 +158,30 @@ CONTENT_TYPE_CONFIG = {
         "relaxed_keywords": CHEATING_RELAXED_KEYWORDS,
         "min_views": 100_000,
     },
+    "friend_prank": {
+        "label": "朋友整蛊",
+        "short_label": "朋友整蛊",
+        "versions": {"v1": FRIEND_PRANK_KEYWORDS},
+        "relaxed_keywords": FRIEND_PRANK_RELAXED_KEYWORDS,
+        "min_views": 1_000_000,
+    },
 }
 MANUAL_REFRESH_LIMIT = 50
 DEFAULT_ACTOR_ID = "coregent~tiktok-keyword-search-scraper"
 VALID_DECISIONS = {"pending", "selected", "produced", "rejected"}
 CURATED_BATCH_ID = "2026-09-03-apify-tiktok-shortlist"
 CURATED_DATASET_ID = "v09ZyrDkrBEaovxOL"
+FRIEND_PRANK_REFERENCE_BATCH_ID = "2026-09-21-friend-prank-reference"
+FRIEND_PRANK_REFERENCE_POST = {
+    "username": "anthonyriveras",
+    "post_id": "6717348453673946373",
+    "caption": "Pranking My Roommate 😂😂😂 #foryou #foryoupage #prank #challenge",
+    "published_at": "2019-07-24T00:00:00Z",
+    "duration_seconds": 25,
+    "views": 5_400_000,
+    "likes": 836_700,
+    "comments": 1_896,
+}
 DEFAULT_REFRESH_PASSWORD_SHA256 = "65fea9f52c567036ccee405d09f214764054fe64c451b0b4d7f30afdd49a77e4"
 CURATED_TIKTOK_POSTS = [
     ("texasbaz", 36_800_000, "7675481187808300319"),
@@ -222,6 +270,11 @@ def normalize_text(value: Any) -> str:
     return "".join(ch for ch in text if not unicodedata.combining(ch))
 
 
+def contains_term(text: str, term: str) -> bool:
+    normalized = normalize_text(term)
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", text))
+
+
 SIGNALS: dict[str, tuple[str, list[str]]] = {
     "couple": ("夫妻/情侣", ["couple", "relationship", "husband", "wife", "boyfriend", "girlfriend", "marriage", "married", "casal", "marido", "esposa", "namorado", "namorada", "amor", "casamento", "casado", "casada"]),
     "prank": ("整蛊/反转", ["prank", "caught", "reaction", "plot twist", "pegadinha", "trollagem", "trollei", "peguei", "flagra", "flagrante", "brincadeira", "vinganca", "vingança", "desafio"]),
@@ -245,16 +298,50 @@ NON_PERFORMANCE_TERMS = [
     "news", "breaking news", "podcast", "interview", "storytime", "confession", "true story", "documentary", "reddit story",
     "noticia", "noticias", "entrevista", "desabafo", "historia real", "relato real", "documentario", "fofoca de famosos",
 ]
+FRIEND_RELATIONSHIP_TERMS = [
+    "friend", "friends", "best friend", "bestie", "roommate", "room mate", "housemate", "buddy", "bro",
+    "amigo", "amiga", "amigos", "amigas", "melhor amigo", "melhor amiga", "colega de quarto",
+]
+FRIEND_PRANK_TERMS = [
+    "prank", "pranking", "pranked", "reaction", "hidden camera", "prank war", "scare prank", "harmless prank",
+    "pegadinha", "trollagem", "trollei", "trolando", "reacao", "reação", "camera escondida", "câmera escondida", "susto",
+]
+FRIEND_PRANK_EXCLUSIONS = [
+    "stranger prank", "prank on strangers", "random people", "public prank", "social experiment", "prank compilation",
+    "prank fails", "school prank", "teacher prank", "student prank", "pegadinha com desconhecido", "experimento social",
+    "pegadinha na escola", "compilacao de pegadinhas", "compilação de pegadinhas",
+]
 
 
 def validate_content_type(post: dict[str, Any], content_type: str) -> dict[str, Any]:
     """Apply high-precision metadata gates before a post enters a specialized queue."""
-    if content_type != "cheating_comedy":
+    if content_type not in {"cheating_comedy", "friend_prank"}:
         return {"eligible": True, "mode": "default"}
     searchable = normalize_text(" ".join([
         str(post.get("caption") or ""),
         " ".join(str(value) for value in (post.get("hashtags") or [])),
     ]))
+    if content_type == "friend_prank":
+        topic_hits = [term for term in FRIEND_RELATIONSHIP_TERMS if contains_term(searchable, term)]
+        performance_hits = [term for term in FRIEND_PRANK_TERMS if contains_term(searchable, term)]
+        excluded_hits = [term for term in FRIEND_PRANK_EXCLUSIONS if contains_term(searchable, term)]
+        eligible = bool(topic_hits and performance_hits and not excluded_hits)
+        if not topic_hits:
+            reason = "标题或标签没有明确朋友、室友或同伴关系"
+        elif not performance_hits:
+            reason = "标题或标签没有明确整蛊或真实反应语义"
+        elif excluded_hits:
+            reason = "疑似陌生人、街头、校园或整蛊合集内容"
+        else:
+            reason = "同时命中朋友关系与整蛊反应信号"
+        return {
+            "eligible": eligible,
+            "mode": "strict_metadata",
+            "reason": reason,
+            "topic_hits": topic_hits[:5],
+            "performance_hits": performance_hits[:5],
+            "excluded_hits": excluded_hits[:5],
+        }
     topic_hits = [term for term in CHEATING_TOPIC_TERMS if normalize_text(term) in searchable]
     performance_hits = [term for term in PERFORMANCE_TERMS if normalize_text(term) in searchable]
     excluded_hits = [term for term in NON_PERFORMANCE_TERMS if normalize_text(term) in searchable]
@@ -531,6 +618,70 @@ class ContentRadar:
             self._write(state)
             return updated
 
+    def import_friend_prank_reference(self) -> int:
+        """Seed the user-provided roommate-prank reference without calling Apify."""
+        reference = FRIEND_PRANK_REFERENCE_POST
+        post_id = str(reference["post_id"])
+        key = f"tiktok:{post_id}"
+        local_cover_url = f"/content-radar-cover/{post_id}.jpg"
+        try:
+            bundled_cover = Path(__file__).resolve().parent / "assets" / f"content-radar-friend-prank-{post_id}.jpg"
+            if bundled_cover.is_file():
+                self.cover_dir.mkdir(parents=True, exist_ok=True)
+                target = self.cover_dir / f"{post_id}.jpg"
+                if not target.exists():
+                    target.write_bytes(bundled_cover.read_bytes())
+        except OSError:
+            local_cover_url = ""
+        with self.lock:
+            state = self._read()
+            imported_batches = state.setdefault("imported_batches", [])
+            if FRIEND_PRANK_REFERENCE_BATCH_ID in imported_batches:
+                return 0
+            posts = state.setdefault("posts", {})
+            previous = posts.get(key, {})
+            now = iso_now()
+            post = {
+                "id": key,
+                "platform": "tiktok",
+                "creator_username": reference["username"],
+                "creator_name": previous.get("creator_name") or "Anthony Rivera",
+                "creator_avatar_url": previous.get("creator_avatar_url", ""),
+                "creator_tags": ["朋友整蛊", "室友", "隐藏拍摄"],
+                "post_id": post_id,
+                "caption": reference["caption"],
+                "hashtags": ["foryou", "foryoupage", "prank", "challenge"],
+                "published_at": reference["published_at"],
+                "duration_seconds": reference["duration_seconds"],
+                "post_url": f"https://www.tiktok.com/@{reference['username']}/video/{post_id}",
+                "thumbnail_url": local_cover_url,
+                "thumbnail_source_url": local_cover_url,
+                "metrics": {
+                    "views": reference["views"],
+                    "likes": reference["likes"],
+                    "comments": reference["comments"],
+                    "shares": number((previous.get("metrics") or {}).get("shares")),
+                },
+                "matched_keyword": "pranking my roommate",
+                "prompt_version": "v1",
+                "content_type": "friend_prank",
+                "content_type_label": "朋友整蛊",
+                "content_validation": validate_content_type({"caption": reference["caption"], "hashtags": ["prank"]}, "friend_prank"),
+                "discovery_mode": "keyword",
+                "fetched_at": previous.get("fetched_at") or now,
+                "decision": previous.get("decision", "pending"),
+                "operator_note": previous.get("operator_note", "案例视频：室友卫生间透明胶带整蛊"),
+                "decision_updated_at": previous.get("decision_updated_at", ""),
+                "first_seen_at": previous.get("first_seen_at") or now,
+                "search_stage": "reference_seed",
+                "search_stage_label": "用户案例",
+            }
+            post["analysis"] = metadata_analysis(post)
+            posts[key] = post
+            imported_batches.append(FRIEND_PRANK_REFERENCE_BATCH_ID)
+            self._write(state)
+            return 0 if previous else 1
+
     def import_curated_batch(self) -> int:
         """Import the already-paid September 3 shortlist once, without calling Apify."""
         with self.lock:
@@ -703,7 +854,7 @@ class ContentRadar:
         normalized = str(content_type or DEFAULT_CONTENT_TYPE).strip().lower()
         config = CONTENT_TYPE_CONFIG.get(normalized)
         if config is None:
-            raise ValueError("内容类型必须是 couple_comedy 或 cheating_comedy")
+            raise ValueError("内容类型必须是 couple_comedy、cheating_comedy 或 friend_prank")
         return config
 
     def keywords_for(self, prompt_version: str, content_type: str = DEFAULT_CONTENT_TYPE) -> list[str]:
@@ -1135,6 +1286,8 @@ class ContentRadar:
                     shortfall_reason = "Apify抓取阶段发生错误，流程提前停止。"
                 elif content_type == "cheating_comedy" and content_mismatch_total:
                     shortfall_reason = "部分结果没有同时满足“明确出轨语义”和“剧情演绎语义”，已按准确性要求剔除。"
+                elif content_type == "friend_prank" and content_mismatch_total:
+                    shortfall_reason = "部分结果没有同时满足“朋友/室友关系”和“整蛊/反应语义”，已剔除陌生人、街头、校园及合集内容。"
                 elif duplicate_total:
                     shortfall_reason = "搜索结果中已有视频较多，去重后不足50条新内容。"
                 elif below_views_total or outside_time_total:
