@@ -108,7 +108,7 @@ class ScriptTaxonomyTests(unittest.TestCase):
         self.assertIn(".manual-taxonomy-chip {\n      width: auto;", markup)
         self.assertNotIn("data-manual-content-type", markup)
         self.assertIn("data-manual-telekwai", markup)
-        self.assertIn("Telekwai 脚本已隔离", markup)
+        self.assertIn("分享外链仍可访问", markup)
 
     def test_script_admin_has_save_feedback(self) -> None:
         markup = app.creator_admin_html("scripts", library_mode=True)
@@ -122,7 +122,7 @@ class ScriptTaxonomyTests(unittest.TestCase):
         self.assertIn("复制成功，内容已写入剪贴板", markup)
         self.assertIn("已选择 ${count} 条脚本", markup)
 
-    def test_telekwai_is_exclusive_and_unpublished(self) -> None:
+    def test_telekwai_is_exclusive_without_unpublishing_share_link(self) -> None:
         entry = {
             "telekwai": True,
             "published": True,
@@ -137,7 +137,7 @@ class ScriptTaxonomyTests(unittest.TestCase):
 
         self.assertTrue(entry["telekwai"])
         self.assertEqual(entry["script_type"], "telekwai")
-        self.assertFalse(entry["published"])
+        self.assertTrue(entry["published"])
         self.assertEqual(entry["duration_bucket"], "")
         for dimension in app.SCRIPT_TAG_DIMENSIONS:
             self.assertEqual(entry[f"{dimension}_tags"], [])
@@ -169,7 +169,7 @@ class ScriptTaxonomyTests(unittest.TestCase):
             item = app.jobs[created["id"]]["items"][0]
             self.assertTrue(item["telekwai"])
             self.assertEqual(item["script_type"], "telekwai")
-            self.assertFalse(item["published"])
+            self.assertTrue(item["published"])
             self.assertEqual(item["relationship_tags"], [])
         finally:
             app.jobs.pop(created["id"], None)
@@ -218,7 +218,7 @@ class ScriptTaxonomyTests(unittest.TestCase):
             item = app.jobs[job_id]["items"][0]
             self.assertTrue(item["telekwai"])
             self.assertEqual(item["relationship_tags"], [])
-            self.assertFalse(item["published"])
+            self.assertIsNot(item.get("published"), False)
         finally:
             app.jobs = original_jobs
 
