@@ -19405,6 +19405,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     content_type=str(payload.get("content_type") or "couple_comedy"),
                     prompt_version=str(payload.get("prompt_version") or "v1"),
                     max_results=50,
+                    apify_token=str(payload.get("apify_token") or "").strip(),
                 )
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
@@ -20246,6 +20247,7 @@ def main() -> int:
     start_watchdog()
     start_resource_janitor()
     content_radar.import_friend_prank_reference()
+    content_radar.import_friend_prank_live_batch()
     content_radar.import_curated_batch()
     content_radar.hydrate_curated_metadata()
     content_radar.start_thumbnail_cache()

@@ -172,6 +172,7 @@ VALID_DECISIONS = {"pending", "selected", "produced", "rejected"}
 CURATED_BATCH_ID = "2026-09-03-apify-tiktok-shortlist"
 CURATED_DATASET_ID = "v09ZyrDkrBEaovxOL"
 FRIEND_PRANK_REFERENCE_BATCH_ID = "2026-09-21-friend-prank-reference"
+FRIEND_PRANK_LIVE_BATCH_ID = "2026-09-22-friend-prank-apify"
 FRIEND_PRANK_REFERENCE_POST = {
     "username": "anthonyriveras",
     "post_id": "6717348453673946373",
@@ -308,7 +309,9 @@ FRIEND_PRANK_TERMS = [
 ]
 FRIEND_PRANK_EXCLUSIONS = [
     "stranger prank", "prank on strangers", "random people", "public prank", "social experiment", "prank compilation",
-    "prank fails", "school prank", "teacher prank", "student prank", "pegadinha com desconhecido", "experimento social",
+    "prank fails", "top 5", "top 10", "best pranks", "funniest pranks", "school prank", "teacher prank", "student prank",
+    "boyfriend", "girlfriend", "husband", "wife", "couple", "namorado", "namorada", "marido", "esposa", "casal",
+    "pegadinha com desconhecido", "experimento social",
     "pegadinha na escola", "compilacao de pegadinhas", "compilação de pegadinhas",
 ]
 
@@ -681,6 +684,50 @@ class ContentRadar:
             imported_batches.append(FRIEND_PRANK_REFERENCE_BATCH_ID)
             self._write(state)
             return 0 if previous else 1
+
+    def import_friend_prank_live_batch(self) -> int:
+        """Merge the one-off Apify batch into the persistent review queue once."""
+        bundle = Path(__file__).resolve().parent / "assets" / "content-radar-friend-prank-2026-09-22.json"
+        if not bundle.is_file():
+            return 0
+        data = json.loads(bundle.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            raise ValueError("friend prank batch must be a list")
+        with self.lock:
+            state = self._read()
+            imported_batches = state.setdefault("imported_batches", [])
+            if FRIEND_PRANK_LIVE_BATCH_ID in imported_batches:
+                return 0
+            posts = state.setdefault("posts", {})
+            imported = 0
+            for item in data:
+                if not isinstance(item, dict) or item.get("content_type") != "friend_prank":
+                    continue
+                post_id = str(item.get("post_id") or "")
+                key = f"tiktok:{post_id}"
+                if not re.fullmatch(r"\d{15,22}", post_id) or key in posts:
+                    continue
+                if number((item.get("metrics") or {}).get("views")) < 1_000_000:
+                    continue
+                if not validate_content_type(item, "friend_prank")["eligible"]:
+                    continue
+                post = dict(item)
+                post["id"] = key
+                post["platform"] = "tiktok"
+                post["discovery_mode"] = "keyword"
+                post["prompt_version"] = "v1"
+                post["content_type_label"] = "朋友整蛊"
+                post["content_validation"] = validate_content_type(post, "friend_prank")
+                post["analysis"] = metadata_analysis(post)
+                post["decision"] = "pending"
+                post["operator_note"] = ""
+                post["decision_updated_at"] = ""
+                post["first_seen_at"] = post.get("first_seen_at") or iso_now()
+                posts[key] = post
+                imported += 1
+            imported_batches.append(FRIEND_PRANK_LIVE_BATCH_ID)
+            self._write(state)
+            return imported
 
     def import_curated_batch(self) -> int:
         """Import the already-paid September 3 shortlist once, without calling Apify."""
@@ -1101,7 +1148,7 @@ class ContentRadar:
             {"id": "relaxed_300", "label": "放宽关键词 · 近300天", "lookback": "any", "max_age_days": 300, "keywords": relaxed_keywords, "max_results": max(180, target_count * 4), "keywords_relaxed": True},
         ]
 
-    def refresh(self, *, reason: str = "manual", content_type: str = DEFAULT_CONTENT_TYPE, prompt_version: str | None = None, max_results: int | None = None) -> dict[str, Any]:
+    def refresh(self, *, reason: str = "manual", content_type: str = DEFAULT_CONTENT_TYPE, prompt_version: str | None = None, max_results: int | None = None, apify_token: str = "") -> dict[str, Any]:
         content_type = str(content_type or DEFAULT_CONTENT_TYPE).strip().lower()
         content_config = self.content_type_config(content_type)
         version = str(prompt_version or self.prompt_version).strip().lower()
@@ -1139,7 +1186,7 @@ class ContentRadar:
         cancelled = False
         timed_out = False
         try:
-            token = os.environ.get("APIFY_TOKEN", "").strip()
+            token = str(apify_token or "").strip() or os.environ.get("APIFY_TOKEN", "").strip()
             if not token:
                 raise RuntimeError("服务尚未配置 APIFY_TOKEN")
             with self.lock:
@@ -1351,7 +1398,7 @@ class ContentRadar:
             self._refresh_deadline = 0.0
             self.refresh_lock.release()
 
-    def trigger_refresh(self, *, reason: str = "manual", content_type: str = DEFAULT_CONTENT_TYPE, prompt_version: str = "v1", max_results: int = MANUAL_REFRESH_LIMIT) -> dict[str, Any]:
+    def trigger_refresh(self, *, reason: str = "manual", content_type: str = DEFAULT_CONTENT_TYPE, prompt_version: str = "v1", max_results: int = MANUAL_REFRESH_LIMIT, apify_token: str = "") -> dict[str, Any]:
         content_type = str(content_type or DEFAULT_CONTENT_TYPE).strip().lower()
         content_config = self.content_type_config(content_type)
         version = str(prompt_version or "v1").strip().lower()
@@ -1379,7 +1426,7 @@ class ContentRadar:
         }
         threading.Thread(
             target=self.refresh,
-            kwargs={"reason": reason, "content_type": content_type, "prompt_version": version, "max_results": max_results},
+            kwargs={"reason": reason, "content_type": content_type, "prompt_version": version, "max_results": max_results, "apify_token": apify_token},
             name="content-radar-refresh",
             daemon=True,
         ).start()

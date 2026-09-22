@@ -20,10 +20,14 @@ class ContentRadarTests(unittest.TestCase):
         portuguese = validate_content_type({"caption": "Pegadinha com meu melhor amigo em casa", "hashtags": []}, "friend_prank")
         stranger = validate_content_type({"caption": "Public prank on strangers", "hashtags": ["prank"]}, "friend_prank")
         couple_only = validate_content_type({"caption": "Prank on my girlfriend", "hashtags": []}, "friend_prank")
+        couple_disguised = validate_content_type({"caption": "Calling my boyfriend friend to see his reaction", "hashtags": ["prank"]}, "friend_prank")
+        compilation = validate_content_type({"caption": "Top 5 funniest prank my friends", "hashtags": []}, "friend_prank")
         self.assertTrue(reference["eligible"])
         self.assertTrue(portuguese["eligible"])
         self.assertFalse(stranger["eligible"])
         self.assertFalse(couple_only["eligible"])
+        self.assertFalse(couple_disguised["eligible"])
+        self.assertFalse(compilation["eligible"])
 
     def test_cheating_gate_requires_both_topic_and_performance_signals(self):
         accepted_en = validate_content_type({"caption": "POV: cheating husband comedy skit", "hashtags": []}, "cheating_comedy")
@@ -285,6 +289,16 @@ class ContentRadarTests(unittest.TestCase):
             self.assertTrue(result["run"]["target_met"])
             self.assertEqual(result["run"]["content_type_label"], "朋友整蛊")
             self.assertTrue(all(post["content_type"] == "friend_prank" for post in radar.snapshot()["posts"]))
+
+    def test_one_time_apify_key_overrides_server_key_without_persisting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            radar = ContentRadar(Path(folder) / "state.json")
+            with patch.dict(os.environ, {"APIFY_TOKEN": "old-server-key"}):
+                with patch.object(radar, "_call_apify", return_value=[]) as call:
+                    radar.refresh(content_type="friend_prank", apify_token="new-one-time-key")
+            self.assertEqual(call.call_args_list[0].args[0], "new-one-time-key")
+            state = (Path(folder) / "state.json").read_text(encoding="utf-8")
+            self.assertNotIn("new-one-time-key", state)
 
     def test_curated_batch_imports_once_without_overwriting_decisions(self):
         with tempfile.TemporaryDirectory() as folder:
