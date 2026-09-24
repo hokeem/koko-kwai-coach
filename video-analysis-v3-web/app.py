@@ -18111,6 +18111,7 @@ def creator_effective_entries(entries: list[dict[str, Any]]) -> list[dict[str, A
         if str(entry.get("title") or "").strip()
         and not is_telekwai_script(entry)
         and entry.get("published") is not False
+        and entry.get("reference_video_enabled") is not False
         and str(entry.get("whole_video_summary") or "").strip()
         and (entry.get("html_url") or entry.get("zh_html_url") or entry.get("video_url"))
     ]

@@ -147,6 +147,17 @@ class ScriptTaxonomyTests(unittest.TestCase):
         telekwai = {"title": "Telekwai", "whole_video_summary": "Summary", "html_url": "/telekwai", "telekwai": True}
         self.assertEqual(app.creator_effective_entries([telekwai, visible]), [visible])
 
+    def test_disabled_reference_video_is_excluded_from_local_creator_recommendations(self) -> None:
+        visible = {"title": "Visible", "whole_video_summary": "Summary", "html_url": "/visible", "published": True}
+        disabled = {
+            "title": "Disabled",
+            "whole_video_summary": "Summary",
+            "html_url": "/disabled",
+            "published": True,
+            "reference_video_enabled": False,
+        }
+        self.assertEqual(app.creator_effective_entries([disabled, visible]), [visible])
+
     def test_taxonomy_api_reports_unsaved_telekwai_change(self) -> None:
         entry_id = "a" * 32
         entry = {"entry_id": entry_id, "title": "Script", "published": True}
