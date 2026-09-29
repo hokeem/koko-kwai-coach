@@ -862,6 +862,29 @@ def ensure_capacity_for_new_job() -> dict[str, Any]:
         return snapshot
 
 
+def run_agent_resource_cleanup(*, aggressive: bool = True) -> dict[str, Any]:
+    """Reclaim only reproducible artifacts while preserving published assets."""
+    with resource_cleanup_lock:
+        before = runtime_resource_snapshot()
+        understanding = cleanup_finished_understanding_jobs()
+        heavy = cleanup_finished_heavy_artifacts(aggressive=aggressive)
+        orphaned = cleanup_orphan_result_dirs()
+        with job_lock:
+            compacted_fields = compact_completed_job_history()
+            if compacted_fields:
+                write_json_atomic(JOBS_FILE, jobs)
+        after = runtime_resource_snapshot()
+    return {
+        "ok": after["disk_free_mb"] >= MIN_FREE_DISK_MB,
+        "before": before,
+        "after": after,
+        "understanding": understanding,
+        "heavy": heavy,
+        "orphaned": orphaned,
+        "compacted_job_fields": compacted_fields,
+    }
+
+
 def collect_tracked_result_ids() -> set[str]:
     tracked: set[str] = set()
 
@@ -18844,6 +18867,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "submit": "POST /api/agent/v1/video-analysis",
                     "status_and_result": "GET /api/agent/v1/video-analysis/{job_id}",
                     "cancel": "POST /api/agent/v1/video-analysis/{job_id}/cancel",
+                    "maintenance_cleanup": "POST /api/agent/v1/maintenance/cleanup",
                     "reference_video_status": "GET /api/agent/v1/library/{entry_id}/reference-video",
                     "replace_reference_video": "POST /api/agent/v1/library/{entry_id}/reference-video",
                 },
@@ -19376,6 +19400,24 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/agent/v1/maintenance/cleanup":
+            if not self.require_agent_api():
+                return
+            try:
+                payload = self.read_json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"ok": False, "error": "Invalid JSON body."}, status=400)
+                return
+            try:
+                result = run_agent_resource_cleanup(
+                    aggressive=parse_bool_setting(payload.get("aggressive", True), True)
+                )
+            except Exception as exc:
+                log_runtime_warning("agent_resource_cleanup_failed", "Agent cleanup request failed.", error=str(exc))
+                self.send_json({"ok": False, "error": friendly_error(str(exc))}, status=500)
+                return
+            self.send_json(result, status=200 if result.get("ok") else 507)
+            return
         agent_reference_match = re.fullmatch(r"/api/agent/v1/library/([0-9a-f]{32})/reference-video", parsed.path)
         if agent_reference_match:
             if not self.require_agent_api():
