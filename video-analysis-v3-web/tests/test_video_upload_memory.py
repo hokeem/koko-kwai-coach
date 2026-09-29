@@ -17,11 +17,11 @@ import hybrid_v2_pipeline as pipeline  # noqa: E402
 
 
 class VideoUploadMemoryTests(unittest.TestCase):
-    def test_streamlined_pipeline_uses_latest_two_video_models(self) -> None:
-        self.assertEqual(pipeline.DEFAULT_PRIMARY_VIDEO_MODEL, "gemini-3.8-flash")
-        self.assertEqual(pipeline.DEFAULT_SECONDARY_VIDEO_MODEL, "gemini-3.7-flash")
-        self.assertEqual(pipeline.PRIMARY_FALLBACK_MODELS[:2], ["gemini-3.8-flash", "gemini-3.7-flash"])
-        self.assertEqual(pipeline.SUPPLEMENT_FALLBACK_MODELS[:2], ["gemini-3.7-flash", "gemini-3.8-flash"])
+    def test_streamlined_pipeline_prefers_lowest_cost_video_model(self) -> None:
+        self.assertEqual(pipeline.DEFAULT_PRIMARY_VIDEO_MODEL, "gemini-2.5-flash-lite")
+        self.assertEqual(pipeline.DEFAULT_SECONDARY_VIDEO_MODEL, "gemini-2.5-flash-lite")
+        self.assertEqual(pipeline.PRIMARY_FALLBACK_MODELS[:2], ["gemini-2.5-flash-lite", "gemini-3.5-flash-lite"])
+        self.assertEqual(pipeline.SUPPLEMENT_FALLBACK_MODELS[:2], ["gemini-2.5-flash-lite", "gemini-3.5-flash-lite"])
 
     def setUp(self) -> None:
         observe._ACTIVE_FILE_CACHE.clear()

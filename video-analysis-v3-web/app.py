@@ -183,12 +183,13 @@ def parse_model_candidates(*groups: str) -> list[str]:
 
 
 STABLE_VIDEO_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
     "gemini-3.8-flash",
-    "gemini-3.7-flash",
 ]
 MODEL_CANDIDATES = parse_model_candidates(
-    ",".join(STABLE_VIDEO_MODELS),
     os.environ.get("VIDEO_ANALYSIS_MODEL", ""),
+    ",".join(STABLE_VIDEO_MODELS),
 )
 IMAGE_MODEL_CANDIDATES = parse_model_candidates(
     "gemini-3.1-flash-image,gemini-2.5-flash-image",
@@ -10017,7 +10018,7 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
             "--model",
             model_name,
             "--supplement-model",
-            os.environ.get("VIDEO_ANALYSIS_SECONDARY_MODEL", "gemini-3.7-flash"),
+            os.environ.get("VIDEO_ANALYSIS_SECONDARY_MODEL", "gemini-2.5-flash-lite"),
         ]
         analysis_prompt = sanitize_analysis_prompt(item.get("user_prompt") or "")
         if analysis_prompt:

@@ -565,17 +565,19 @@ TRANSLATE_DIALOGUE_PROMPT = """你是一个严格的对白翻译器。
 }
 """
 
-DEFAULT_PRIMARY_VIDEO_MODEL = "gemini-3.8-flash"
-DEFAULT_SECONDARY_VIDEO_MODEL = "gemini-3.7-flash"
+DEFAULT_PRIMARY_VIDEO_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_SECONDARY_VIDEO_MODEL = "gemini-2.5-flash-lite"
 
 PRIMARY_FALLBACK_MODELS = [
     DEFAULT_PRIMARY_VIDEO_MODEL,
-    DEFAULT_SECONDARY_VIDEO_MODEL,
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
 ]
 
 SUPPLEMENT_FALLBACK_MODELS = [
     DEFAULT_SECONDARY_VIDEO_MODEL,
-    DEFAULT_PRIMARY_VIDEO_MODEL,
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
 ]
 
 AUDIO_MULTIVIEW_MAX_BYTES = 18 * 1024 * 1024
