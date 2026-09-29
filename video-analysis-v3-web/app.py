@@ -7612,6 +7612,7 @@ def agent_item_view(item: dict[str, Any], *, include_script: bool = True) -> dic
         "telekwai": bool(public.get("telekwai")),
         "script_type": public.get("script_type") or "standard",
         "manual_tags": item.get("manual_tags") if isinstance(item.get("manual_tags"), dict) else {},
+        "analysis_profile": item.get("analysis_profile") or "standard",
         "taxonomy": {
             dimension: normalize_taxonomy_tag_ids(dimension, item.get(f"{dimension}_tags"))
             for dimension in SCRIPT_TAG_DIMENSIONS
@@ -7662,6 +7663,7 @@ def agent_job_view(job: dict[str, Any], *, include_script: bool = True) -> dict[
         "request_id": job.get("agent_request_id") or "",
         "source": job.get("source") or "web",
         "mode": job.get("mode") or "single",
+        "analysis_profile": job.get("analysis_profile") or "standard",
         "status": job.get("status") or "queued",
         "stage": job.get("stage") or "queued",
         "stage_message": job.get("stage_message") or "",
@@ -10023,6 +10025,8 @@ def execute_single_pipeline(parent_job_id: str, item_index: int, item: dict[str,
         analysis_prompt = sanitize_analysis_prompt(item.get("user_prompt") or "")
         if analysis_prompt:
             cmd.extend(["--user-prompt", analysis_prompt])
+        if str(item.get("analysis_profile") or "") == "bulk_single_pass":
+            cmd.append("--single-pass")
         tried.append(model_name)
         update_job_item(
             parent_job_id,
@@ -10325,11 +10329,15 @@ def create_job(
     manual_tags: dict[str, Any] | None = None,
     taxonomy_tags: dict[str, list[str]] | None = None,
     telekwai: bool = False,
+    analysis_profile: str = "",
 ) -> dict[str, Any]:
     ensure_capacity_for_new_job()
     normalized_mode = str(mode or "").strip().lower()
     job_mode = "understanding" if normalized_mode == "understanding" else ("batch" if len(video_urls) > 1 else "single")
     analysis_prompt = sanitize_analysis_prompt(user_prompt)
+    selected_analysis_profile = (
+        "bulk_single_pass" if str(analysis_profile or "").strip() == "bulk_single_pass" else "standard"
+    )
     selected_content_type = normalize_agent_content_type(content_type)
     selected_location_tag = str(location_tag or "").strip()
     if selected_location_tag not in LOCATION_TAGS:
@@ -10358,6 +10366,7 @@ def create_job(
                 "index": index,
                 "video_url": video_url,
                 "user_prompt": analysis_prompt,
+                "analysis_profile": selected_analysis_profile,
                 "status": "queued",
                 "stage": "queued",
                 "stage_message": "Queued.",
@@ -10411,6 +10420,7 @@ def create_job(
         "video_url": video_urls[0] if len(video_urls) == 1 else "",
         "video_urls": video_urls,
         "user_prompt": analysis_prompt,
+        "analysis_profile": selected_analysis_profile,
         "source": str(source or "web").strip() or "web",
         "agent_request_id": str(agent_request_id or "").strip()[:160],
         "manual_tags": selected_manual_tags,
@@ -19619,6 +19629,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 or payload.get("analysis_prompt")
                 or ""
             )
+            analysis_profile = str(payload.get("analysis_profile") or "standard").strip().lower()
+            if analysis_profile not in {"standard", "bulk_single_pass"}:
+                self.send_json({
+                    "ok": False,
+                    "error": "analysis_profile must be 'standard' or 'bulk_single_pass'.",
+                }, status=400)
+                return
             if supplied_request_id:
                 with job_lock:
                     existing = next(
@@ -19660,6 +19677,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     manual_tags=manual_tags,
                     taxonomy_tags=taxonomy_tags,
                     telekwai=telekwai,
+                    analysis_profile=analysis_profile,
                 )
                 job_id = str(created.get("id") or "")
                 with job_lock:

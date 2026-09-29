@@ -1712,6 +1712,11 @@ def main() -> int:
         ap.add_argument("--api-key")
         ap.add_argument("--api-key-file")
         ap.add_argument("--user-prompt", default="", help="Optional operator guidance for story analysis.")
+        ap.add_argument(
+            "--single-pass",
+            action="store_true",
+            help="Run one primary video analysis only; intended for explicitly opted-in bulk imports.",
+        )
         args = ap.parse_args()
 
         out_dir = Path(args.out)
@@ -1769,7 +1774,11 @@ def main() -> int:
         }
         audio_multiview_model_used = ""
 
-        write_progress(out_dir, "gemini_analysis", "正在并行运行两个独立视频分析")
+        write_progress(
+            out_dir,
+            "gemini_analysis",
+            "正在运行单次主分析" if args.single_pass else "正在并行运行两个独立视频分析",
+        )
 
         def _run_primary_analysis() -> tuple[dict, dict, str]:
             return run_video_json_prompt_with_fallback(
@@ -1788,11 +1797,17 @@ def main() -> int:
                 "secondary analysis",
             )
 
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="koko-video-analyst") as executor:
-            primary_future = executor.submit(_run_primary_analysis)
-            secondary_future = executor.submit(_run_secondary_analysis)
-            primary_result, primary_raw, primary_model_used = primary_future.result()
-            v2_local_payload, v2_local_raw, v2_local_model_used = secondary_future.result()
+        if args.single_pass:
+            primary_result, primary_raw, primary_model_used = _run_primary_analysis()
+            v2_local_payload = {}
+            v2_local_raw = {"skipped": True, "reason": "bulk_single_pass"}
+            v2_local_model_used = ""
+        else:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="koko-video-analyst") as executor:
+                primary_future = executor.submit(_run_primary_analysis)
+                secondary_future = executor.submit(_run_secondary_analysis)
+                primary_result, primary_raw, primary_model_used = primary_future.result()
+                v2_local_payload, v2_local_raw, v2_local_model_used = secondary_future.result()
 
         primary_result = normalize_script_payload(primary_result, args.source_path)
         primary_result["primary_model_used"] = primary_model_used
@@ -1809,6 +1824,85 @@ def main() -> int:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
         type_router = build_type_router(primary_result, audio_multiview_result, metadata, args.source_path)
         type_router_path.write_text(json.dumps(type_router, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if args.single_pass:
+            skipped = {"skipped": True, "reason": "bulk_single_pass"}
+            for path in (
+                supplement_json_path,
+                audio_multiview_path,
+                v2_local_json_path,
+                comparison_report_path,
+                logic_audit_path,
+                conflict_recheck_path,
+                arbitration_path,
+            ):
+                path.write_text(json.dumps(skipped, ensure_ascii=False, indent=2), encoding="utf-8")
+            for path in (
+                supplement_raw_path,
+                audio_multiview_raw_path,
+                v2_local_raw_path,
+                comparison_raw_path,
+                logic_audit_raw_path,
+                conflict_recheck_raw_path,
+                arbitration_raw_path,
+                refine_raw_path,
+            ):
+                path.write_text(json.dumps(skipped, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            final_result = dict(primary_result)
+            final_result.update({
+                "primary_model_used": primary_model_used,
+                "v2_local_model_used": "",
+                "supplement_model_used": "",
+                "audio_multiview_model_used": "",
+                "comparison_model_used": "",
+                "logic_audit_model_used": "",
+                "conflict_recheck_model_used": "",
+                "arbitration_model_used": "",
+                "refine_model_used": "",
+                "pipeline_mode": "bulk_single_pass_v1",
+                "type_router": type_router,
+                "similar_cases_used": [],
+                "comparison_report": skipped,
+                "logic_audit": skipped,
+                "arbitration_result": skipped,
+            })
+            maybe_extract_frames(video, out_dir, final_result)
+            final_json_path.write_text(json.dumps(final_result, ensure_ascii=False, indent=2), encoding="utf-8")
+            case_memory_entry = build_case_memory_entry(args.source_path, type_router, final_result, primary_result)
+            case_memory_entry_path.write_text(json.dumps(case_memory_entry, ensure_ascii=False, indent=2), encoding="utf-8")
+            run_step(
+                "render_script_table",
+                [sys.executable, str(v2_render_script), str(final_json_path), "--output", str(final_html_path)],
+            )
+            write_progress(out_dir, "completed", "单次主分析完成")
+            print(json.dumps({
+                "out_dir": str(out_dir),
+                "html": str(final_html_path),
+                "json": str(final_json_path),
+                "model": args.model,
+                "supplement_model": "",
+                "primary_model_used": primary_model_used,
+                "supplement_model_used": "",
+                "audio_multiview_model_used": "",
+                "v2_local_model_used": "",
+                "comparison_model_used": "",
+                "logic_audit_model_used": "",
+                "conflict_recheck_model_used": "",
+                "arbitration_model_used": "",
+                "refine_model_used": "",
+                "pipeline_mode": "bulk_single_pass_v1",
+                "type_router": str(type_router_path),
+                "media_probe": str(media_probe_path),
+                "v2_local_result": str(v2_local_json_path),
+                "comparison_report": str(comparison_report_path),
+                "logic_audit": str(logic_audit_path),
+                "conflict_recheck": str(conflict_recheck_path),
+                "arbitration_result": str(arbitration_path),
+                "case_memory_entry": str(case_memory_entry_path),
+                "source_metadata": str(metadata_path),
+            }, ensure_ascii=False))
+            return 0
 
         v2_local_result = normalize_script_payload(v2_local_payload, args.source_path)
         v2_local_result["v2_local_model_used"] = v2_local_model_used

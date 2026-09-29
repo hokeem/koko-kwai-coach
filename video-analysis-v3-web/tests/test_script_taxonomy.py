@@ -185,6 +185,23 @@ class ScriptTaxonomyTests(unittest.TestCase):
         finally:
             app.jobs.pop(created["id"], None)
 
+    def test_bulk_single_pass_profile_is_opt_in(self) -> None:
+        with mock.patch.object(app, "ensure_capacity_for_new_job"), mock.patch.object(app, "save_jobs"), mock.patch.object(app, "enqueue_job"):
+            bulk = app.create_job(
+                ["https://example.com/bulk-video"],
+                source="agent_api",
+                analysis_profile="bulk_single_pass",
+            )
+            standard = app.create_job(["https://example.com/standard-video"], source="agent_api")
+        try:
+            self.assertEqual(app.jobs[bulk["id"]]["analysis_profile"], "bulk_single_pass")
+            self.assertEqual(app.jobs[bulk["id"]]["items"][0]["analysis_profile"], "bulk_single_pass")
+            self.assertEqual(app.jobs[standard["id"]]["analysis_profile"], "standard")
+            self.assertEqual(app.jobs[standard["id"]]["items"][0]["analysis_profile"], "standard")
+        finally:
+            app.jobs.pop(bulk["id"], None)
+            app.jobs.pop(standard["id"], None)
+
     def test_manual_item_taxonomy_updates_all_dimensions(self) -> None:
         job_id = "test-job"
         original_jobs = app.jobs
