@@ -17,7 +17,9 @@ services:
       - key: VIDEO_ANALYSIS_MAX_CONCURRENT_JOBS
         value: "1"
       - key: VIDEO_ANALYSIS_PIPELINE_TIMEOUT_SEC
-        value: "480"
+        value: "1200"
+      - key: VIDEO_ANALYSIS_STAGE_TIMEOUT_GEMINI_ANALYSIS
+        value: "600"
       - key: VIDEO_ANALYSIS_MODEL
         value: gemini-2.5-flash-lite
       - key: VIDEO_ANALYSIS_SECONDARY_MODEL
