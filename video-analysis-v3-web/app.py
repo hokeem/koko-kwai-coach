@@ -817,6 +817,74 @@ def cleanup_finished_heavy_artifacts(*, aggressive: bool = False) -> dict[str, A
     return summary
 
 
+def compact_finished_storyboard_images(*, max_dirs: int = 250) -> dict[str, Any]:
+    """Shrink old storyboard bitmaps in bounded batches without changing URLs."""
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    metadata = collect_cleanup_metadata()
+    processed_dirs = 0
+    compacted_files = 0
+    freed_bytes = 0
+
+    for output_dir in RESULTS_ROOT.iterdir():
+        if processed_dirs >= max(1, max_dirs):
+            break
+        if not output_dir.is_dir():
+            continue
+        info = metadata.get(output_dir.name) or {}
+        if str(info.get("status") or "").strip() in {"queued", "running"}:
+            continue
+        marker = output_dir / ".storyboard_compacted_v1"
+        if marker.exists():
+            continue
+        image_paths = [
+            path
+            for pattern in ("storyboard_cover.*", "storyboard_preview.*")
+            for path in output_dir.glob(pattern)
+            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+        ]
+        for image_path in dict.fromkeys(image_paths):
+            temp_path = image_path.with_name(f".{image_path.name}.compact.tmp")
+            try:
+                original_size = image_path.stat().st_size
+                with Image.open(image_path) as image:
+                    image.load()
+                    suffix = image_path.suffix.lower()
+                    if suffix == ".png":
+                        converted = image.convert("RGB").quantize(colors=128)
+                        converted.save(temp_path, format="PNG", optimize=True)
+                    elif suffix in {".jpg", ".jpeg"}:
+                        image.convert("RGB").save(temp_path, format="JPEG", quality=72, optimize=True, progressive=True)
+                    else:
+                        image.convert("RGB").save(temp_path, format="WEBP", quality=72, method=4)
+                compacted_size = temp_path.stat().st_size
+                if compacted_size < original_size:
+                    os.replace(temp_path, image_path)
+                    compacted_files += 1
+                    freed_bytes += original_size - compacted_size
+                else:
+                    temp_path.unlink(missing_ok=True)
+            except Exception as exc:
+                temp_path.unlink(missing_ok=True)
+                log_runtime_warning(
+                    "storyboard_compaction_skipped",
+                    "Could not compact a storyboard image.",
+                    path=str(image_path),
+                    error=str(exc),
+                )
+        try:
+            marker.write_text(now_iso(), encoding="utf-8")
+        except OSError:
+            pass
+        processed_dirs += 1
+
+    return {
+        "processed_dirs": processed_dirs,
+        "compacted_files": compacted_files,
+        "freed_mb": round(freed_bytes / 1024 / 1024, 2),
+        "batch_limit": max(1, max_dirs),
+    }
+
+
 def compact_completed_job_history() -> int:
     """Keep recent jobs editable while dropping duplicate JSON from old jobs."""
     finished = [
@@ -868,6 +936,7 @@ def run_agent_resource_cleanup(*, aggressive: bool = True) -> dict[str, Any]:
         before = runtime_resource_snapshot()
         understanding = cleanup_finished_understanding_jobs()
         heavy = cleanup_finished_heavy_artifacts(aggressive=aggressive)
+        storyboard_images = compact_finished_storyboard_images(max_dirs=250 if aggressive else 50)
         orphaned = cleanup_orphan_result_dirs()
         with job_lock:
             compacted_fields = compact_completed_job_history()
@@ -880,6 +949,7 @@ def run_agent_resource_cleanup(*, aggressive: bool = True) -> dict[str, Any]:
         "after": after,
         "understanding": understanding,
         "heavy": heavy,
+        "storyboard_images": storyboard_images,
         "orphaned": orphaned,
         "compacted_job_fields": compacted_fields,
     }
