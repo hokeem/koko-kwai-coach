@@ -1041,7 +1041,10 @@ def run_text_json_prompt(payload: dict, key: str, model: str, prompt: str) -> tu
                     {"text": json.dumps(payload, ensure_ascii=False)},
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+        },
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     req = urllib.request.Request(

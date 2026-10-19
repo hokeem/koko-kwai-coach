@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import io
+import json
 import tempfile
 import time
 import unittest
@@ -34,6 +36,24 @@ class VideoUploadMemoryTests(unittest.TestCase):
                 pipeline.run_video_json_prompt(video, "key", "model", "prompt")
 
             files_api.assert_called_once()
+
+    def test_text_json_prompt_requests_json_mime_type(self) -> None:
+        response = {
+            "candidates": [
+                {"content": {"parts": [{"text": '{"translated": true}'}]}}
+            ]
+        }
+        with mock.patch.object(
+            pipeline.urllib.request,
+            "urlopen",
+            return_value=io.BytesIO(json.dumps(response).encode("utf-8")),
+        ) as urlopen:
+            parsed, _ = pipeline.run_text_json_prompt({"text": "hello"}, "key", "model", "translate")
+
+        request = urlopen.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(parsed, {"translated": True})
 
     def test_explicit_legacy_inline_limit_still_uses_files_api(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
