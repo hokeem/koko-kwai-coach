@@ -410,11 +410,13 @@ def try_apify(url: str, source: Path, meta: dict) -> bool:
         return False
 
 
-def try_ytdlp(url: str, dest: Path) -> bool:
+def try_ytdlp(url: str, dest: Path, meta: dict | None = None) -> bool:
     if not shutil.which("yt-dlp"):
+        if meta is not None:
+            meta["yt_dlp_error"] = "yt-dlp executable is not installed"
         return False
     tmpl = str(dest / "source.%(ext)s")
-    code, _, _ = run([
+    code, _, stderr = run([
         "yt-dlp",
         "--no-playlist",
         "--retries",
@@ -428,6 +430,9 @@ def try_ytdlp(url: str, dest: Path) -> bool:
         url,
     ])
     if code != 0:
+        if meta is not None:
+            detail = re.sub(r"(?i)(token|signature|sig|key)=([^&\s]+)", r"\1=***", stderr)
+            meta["yt_dlp_error"] = detail.strip()[-700:] or f"yt-dlp exited with status {code}"
         return False
     files = sorted(dest.glob("source.*"), key=lambda p: p.stat().st_size if p.exists() else 0, reverse=True)
     if not files:
@@ -469,16 +474,28 @@ def main() -> int:
     else:
         if try_kuaishou_h5(inp, source, meta):
             pass
-        elif try_ytdlp(inp, out):
+        elif try_ytdlp(inp, out, meta):
             meta.update({"local_video": str(source), "route": "yt-dlp"})
         elif try_apify(inp, source, meta):
             pass
         else:
-            page = fetch_html(inp, out)
-            meta["title"] = extract_title(page)
-            urls = direct_mp4_urls(page)
+            apify_error = meta.get("apify_error")
+            page_error = ""
+            try:
+                page = fetch_html(inp, out)
+                meta["title"] = extract_title(page)
+                urls = direct_mp4_urls(page)
+            except Exception as exc:
+                urls = []
+                page_error = str(exc)
             if not urls:
-                raise SystemExit("No direct mp4 URL found and yt-dlp failed/unavailable")
+                reasons = [
+                    f"yt-dlp: {meta.get('yt_dlp_error', 'no diagnostic available')}",
+                    f"Apify: {apify_error or ('APIFY_TOKEN is not configured' if not APIFY_TOKEN else 'no diagnostic available')}",
+                    f"HTML fallback: {page_error or 'page fetched but contained no direct mp4 URL'}",
+                ]
+                safe_reasons = [re.sub(r"token=[^&\s]+", "token=***", reason) for reason in reasons]
+                raise SystemExit("Video download failed across all configured routes; " + " | ".join(safe_reasons))
             size = download_url(urls[0], source, inp)
             meta.update({"local_video": str(source), "route": "html-mp4", "video_url": urls[0], "downloaded_bytes": size})
 
