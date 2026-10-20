@@ -31,11 +31,22 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('creatorDetailOpenAttr("daily:root")', self.html)
 
     def test_campaign_dashboard_appears_in_creator_overview(self) -> None:
-        self.assertIn('campaignDashboardHtml()', self.html)
+        self.assertIn('data-campaign-view', self.html)
+        self.assertIn('data-campaign-back', self.html)
+        self.assertIn('list.innerHTML=campaignDashboardHtml()', self.html)
+        self.assertNotIn('creatorSummaryCardsHtml()}${campaignDashboardHtml()', self.html)
         self.assertIn('data-campaign-copy', self.html)
         self.assertIn('data-campaign-refresh', self.html)
         self.assertIn('/api/creator-admin/campaign-dashboard?days=30', self.html)
         self.assertIn('推广渠道数据', self.html)
+
+    def test_campaign_link_picker_uses_simple_channels(self) -> None:
+        start = self.html.index('function campaignDashboardHtml()')
+        end = self.html.index('function creatorOverviewHtml()', start)
+        picker = self.html[start:end]
+        self.assertIn('const options=["email","inbox","social","other"]', picker)
+        self.assertIn('inbox:"站内信"', picker)
+        self.assertNotIn('const options=["email","instagram"', picker)
 
 
 if __name__ == "__main__":
