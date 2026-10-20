@@ -30,6 +30,13 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('.filter(key=>key!=="daily:root")', self.html)
         self.assertIn('creatorDetailOpenAttr("daily:root")', self.html)
 
+    def test_campaign_dashboard_appears_in_creator_overview(self) -> None:
+        self.assertIn('campaignDashboardHtml()', self.html)
+        self.assertIn('data-campaign-copy', self.html)
+        self.assertIn('data-campaign-refresh', self.html)
+        self.assertIn('/api/creator-admin/campaign-dashboard?days=30', self.html)
+        self.assertIn('推广渠道数据', self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
