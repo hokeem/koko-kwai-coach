@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import unittest
+import urllib.error
+from unittest.mock import patch
 
 import app
 
@@ -39,6 +42,22 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('data-campaign-refresh', self.html)
         self.assertIn('/api/creator-admin/campaign-dashboard?month=', self.html)
         self.assertIn('推广渠道数据', self.html)
+        self.assertIn('正在查询最新数据', self.html)
+        self.assertIn('campaign-spinner', self.html)
+        self.assertIn('setInterval(()=>{if(creatorCampaignView', self.html)
+        self.assertIn('当前显示上次成功查询的数据', self.html)
+
+    def test_upstream_html_502_is_not_returned_as_error_text(self) -> None:
+        upstream = urllib.error.HTTPError(
+            "https://example.test/api/admin/campaign-dashboard", 502, "Bad Gateway",
+            {"Content-Type": "text/html"}, io.BytesIO(b"<html>huge Render error page</html>"),
+        )
+        with patch.object(app.urllib.request, "build_opener") as build_opener:
+            build_opener.return_value.open.side_effect = upstream
+            status, payload = app.creator_admin_remote_json("/api/admin/campaign-dashboard", attempts=1)
+        self.assertEqual(status, 502)
+        self.assertNotIn("<html>", payload["error"])
+        self.assertIn("暂时不可用", payload["error"])
 
     def test_campaign_link_picker_uses_simple_channels(self) -> None:
         start = self.html.index('function campaignDashboardHtml()')
