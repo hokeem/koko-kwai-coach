@@ -37,7 +37,7 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertNotIn('creatorSummaryCardsHtml()}${campaignDashboardHtml()', self.html)
         self.assertIn('data-campaign-copy', self.html)
         self.assertIn('data-campaign-refresh', self.html)
-        self.assertIn('/api/creator-admin/campaign-dashboard?days=30', self.html)
+        self.assertIn('/api/creator-admin/campaign-dashboard?month=', self.html)
         self.assertIn('推广渠道数据', self.html)
 
     def test_campaign_link_picker_uses_simple_channels(self) -> None:
@@ -47,6 +47,9 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('const options=["email","inbox","social","other"]', picker)
         self.assertIn('inbox:"站内信"', picker)
         self.assertNotIn('const options=["email","instagram"', picker)
+        self.assertIn('data-campaign-month', picker)
+        self.assertIn('campaignSource==="inbox"', self.html)
+        self.assertIn(app.CREATOR_CENTER_BASE_URL + '/inbox', self.html)
 
 
 if __name__ == "__main__":
