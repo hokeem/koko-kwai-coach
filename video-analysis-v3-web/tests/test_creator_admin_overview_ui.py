@@ -48,6 +48,9 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('inbox:"站内信"', picker)
         self.assertNotIn('const options=["email","instagram"', picker)
         self.assertIn('data-campaign-month', picker)
+        self.assertIn('访问账号', picker)
+        self.assertIn('campaignAccountsHtml(r)', picker)
+        self.assertIn('未识别', self.html)
         self.assertIn('campaignSource==="inbox"', self.html)
         self.assertIn(app.CREATOR_CENTER_BASE_URL + '/inbox', self.html)
 
