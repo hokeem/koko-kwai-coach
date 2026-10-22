@@ -29,6 +29,17 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertNotIn("原始事件", summary_source)
         self.assertNotIn("实时查询", summary_source)
 
+    def test_review_board_has_links_actions_and_reason(self) -> None:
+        html = app.creator_admin_html("reviews")
+        self.assertIn('let activeTab="reviews"', html)
+        self.assertIn('href="/koko_admin_2026-kwai/reviews"', html)
+        self.assertIn('function renderReviewTab()', html)
+        self.assertIn('function loadReviews(append=false)', html)
+        self.assertIn('data-review-status="approved"', html)
+        self.assertIn('data-review-status="rejected"', html)
+        self.assertIn('驳回原因（驳回时必填，作者可见）', html)
+        self.assertIn('/api/creator-admin/submissions/review', html)
+
     def test_registration_sort_filters_before_paginating(self) -> None:
         self.assertIn('data-creator-sort="registered_desc"', self.html)
         self.assertIn("creatorRegistrationTime(b)-creatorRegistrationTime(a)", self.html)
