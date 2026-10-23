@@ -1,5 +1,7 @@
 # Video Analysis V3 Web Deploy
 
+> Historical deployment notes. The service now also contains the Koko content center and Creator operations UI. Start with the repository-root `README.md`, `AGENTS.md`, and `render.yaml`; verify actual Render settings before deployment.
+
 ## What this app does
 
 - Public webpage for `video-analysis-v3`
