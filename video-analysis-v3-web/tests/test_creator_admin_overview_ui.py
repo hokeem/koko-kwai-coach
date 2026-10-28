@@ -37,8 +37,38 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('function loadReviews(append=false)', html)
         self.assertIn('data-review-status="approved"', html)
         self.assertIn('data-review-status="rejected"', html)
-        self.assertIn('驳回原因（驳回时必填，作者可见）', html)
+        self.assertIn('驳回原因（可选，作者可见）', html)
+        self.assertIn('Não corresponde ao roteiro original', html)
+        self.assertIn('class="review-grid"', html)
         self.assertIn('/api/creator-admin/submissions/review', html)
+
+    def test_review_proxy_defaults_empty_rejection_reason(self) -> None:
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.object(app, "creator_admin_remote_json", return_value=(200, {"ok": True})) as remote:
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                try:
+                    headers = {
+                        "Cookie": f"{app.CREATOR_ADMIN_AUTH_COOKIE}={urllib.parse.quote(app.CREATOR_ADMIN_PASSWORD)}",
+                        "Content-Type": "application/json",
+                    }
+                    for reason in ("  ", "Motivo personalizado"):
+                        connection.request("POST", "/api/creator-admin/submissions/review", json.dumps({
+                            "submission_id": "example", "status": "rejected", "reason": reason,
+                        }), headers)
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 200)
+                        response.read()
+                finally:
+                    connection.close()
+                self.assertEqual(remote.call_args_list[0].kwargs["payload"]["reason"], "Não corresponde ao roteiro original")
+                self.assertEqual(remote.call_args_list[1].kwargs["payload"]["reason"], "Motivo personalizado")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
     def test_registration_sort_filters_before_paginating(self) -> None:
         self.assertIn('data-creator-sort="registered_desc"', self.html)
