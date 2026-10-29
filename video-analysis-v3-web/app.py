@@ -7100,6 +7100,113 @@ def save_creator_admin_state_for(profile_id: str, patch: dict[str, Any]) -> dict
     return next_state
 
 
+REVIEW_VIDEO_SOURCES: dict[str, str] = {}
+REVIEW_COVER_CACHE: dict[str, tuple[str, bytes]] = {}
+REVIEW_COVER_LOCK = threading.Lock()
+REVIEW_COVER_SLOTS = threading.BoundedSemaphore(3)
+REVIEW_MEDIA_DOMAINS = ("kwai.com", "kwai.net", "kwai-video.com", "kuaishou.com", "gifshow.com", "kwimgs.com")
+
+
+def review_media_url_allowed(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return (
+            parsed.scheme in {"http", "https"} and not parsed.username and not parsed.password
+            and parsed.port in {None, 80, 443}
+            and any(host == domain or host.endswith("." + domain) for domain in REVIEW_MEDIA_DOMAINS)
+        )
+    except ValueError:
+        return False
+
+
+class ReviewMediaRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        if not review_media_url_allowed(newurl):
+            raise ValueError("Unsupported review media redirect")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def remember_review_video_sources(submissions: list[Any]) -> None:
+    with REVIEW_COVER_LOCK:
+        for submission in submissions:
+            if not isinstance(submission, dict):
+                continue
+            submission_id = str(submission.get("submission_id") or "")
+            video_url = str(submission.get("video_url") or "").strip()
+            if re.fullmatch(r"[0-9a-f]{32}", submission_id) and review_media_url_allowed(video_url):
+                if REVIEW_VIDEO_SOURCES.get(submission_id) != video_url:
+                    REVIEW_COVER_CACHE.pop(submission_id, None)
+                REVIEW_VIDEO_SOURCES[submission_id] = video_url
+        while len(REVIEW_VIDEO_SOURCES) > 5000:
+            REVIEW_VIDEO_SOURCES.pop(next(iter(REVIEW_VIDEO_SOURCES)))
+
+
+def enrich_review_script_covers(payload: dict[str, Any]) -> dict[str, Any]:
+    submissions = payload.get("submissions")
+    if not isinstance(submissions, list):
+        return payload
+    cached = load_creator_admin_scripts_cache() or {}
+    entries = cached.get("entries") if isinstance(cached.get("entries"), list) else []
+    by_id = {str(entry.get("entry_id") or ""): entry for entry in entries if isinstance(entry, dict)}
+    for submission in submissions:
+        if not isinstance(submission, dict):
+            continue
+        entry = by_id.get(str(submission.get("entry_id") or ""), {})
+        submission["review_script_cover_url"] = str(
+            entry.get("storyboard_image_url") or entry.get("cover_url") or entry.get("thumbnail_url") or ""
+        )
+    remember_review_video_sources(submissions)
+    return payload
+
+
+def fetch_review_video_cover(submission_id: str) -> tuple[str, bytes] | None:
+    with REVIEW_COVER_LOCK:
+        cached = REVIEW_COVER_CACHE.get(submission_id)
+        video_url = REVIEW_VIDEO_SOURCES.get(submission_id, "")
+    if cached:
+        return cached
+    if not video_url or not REVIEW_COVER_SLOTS.acquire(timeout=15):
+        return None
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), ReviewMediaRedirectHandler())
+        headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"}
+        request = urllib.request.Request(video_url, headers=headers)
+        with opener.open(request, timeout=10) as response:
+            page = response.read(1_000_000)
+            document = page.decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+            final_url = response.geturl()
+        metadata = parse_embedded_json_ld(document)
+        thumbnail = metadata.get("thumbnailUrl") or search_meta_tag(document, ["og:image", "twitter:image"])
+        if isinstance(thumbnail, list):
+            thumbnail = thumbnail[0] if thumbnail else ""
+        image_url = urllib.parse.urljoin(final_url, str(thumbnail or ""))
+        if not review_media_url_allowed(image_url):
+            return None
+        request = urllib.request.Request(image_url, headers={**headers, "Referer": final_url})
+        with opener.open(request, timeout=10) as response:
+            image = response.read(4_000_001)
+        if len(image) > 4_000_000:
+            return None
+        with Image.open(io.BytesIO(image)) as decoded:
+            image_format = decoded.format
+            decoded.verify()
+        content_type = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}.get(image_format)
+        if not content_type:
+            return None
+        result = (content_type, image)
+        with REVIEW_COVER_LOCK:
+            if REVIEW_VIDEO_SOURCES.get(submission_id) == video_url:
+                if len(REVIEW_COVER_CACHE) >= 64:
+                    REVIEW_COVER_CACHE.pop(next(iter(REVIEW_COVER_CACHE)))
+                REVIEW_COVER_CACHE[submission_id] = result
+        return result
+    except Exception:
+        return None
+    finally:
+        REVIEW_COVER_SLOTS.release()
+
+
 def creator_admin_remote_json(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: int = 45, attempts: int | None = None) -> tuple[int, dict[str, Any]]:
     if not path.startswith("/"):
         path = "/" + path
@@ -17880,9 +17987,9 @@ function groupedSubmissions(){{const map=new Map();for(const s of filteredSubmis
 function scriptShareUrl(id){{return `__CREATOR_BASE__/script/${{id}}`}}
 let reviewRows=[];let reviewOffset=0;let reviewHasMore=true;let reviewFilter="pending_review";let reviewLoading=false;const REVIEW_CUTOFF=Date.parse("2026-10-19T16:00:00Z");
 function reviewVideoCover(s){{const value=String(s.thumbnail_url||"").trim();if(!value||/\/api\/creator\/thumbnail\//i.test(value))return "";if(value.startsWith("/"))return `__CREATOR_BASE__${{value}}`;return /^https?:\/\//i.test(value)?value:""}}
-function reviewImage(url,label,link){{const image=url?`<img src="${{esc(url)}}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`:"";const content=`${{esc(label)}}<div class="review-media-frame"><span>暂无封面</span>${{image}}</div>`;return link?`<a href="${{esc(link)}}" target="_blank" rel="noopener">${{content}}</a>`:`<div>${{content}}</div>`}}
+function reviewImage(url,label,link,fallback=""){{const source=url||fallback;const retry=url?fallback:"";const image=source?`<img src="${{esc(source)}}" data-fallback="${{esc(retry)}}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="if(this.dataset.fallback){{this.src=this.dataset.fallback;this.dataset.fallback=''}}else this.remove()">`:"";const content=`${{esc(label)}}<div class="review-media-frame"><span>暂无封面</span>${{image}}</div>`;return link?`<a href="${{esc(link)}}" target="_blank" rel="noopener">${{content}}</a>`:`<div>${{content}}</div>`}}
 function renderReviewTab(){{const body=document.querySelector("#tab-body");if(!body)return;body.innerHTML=`<section class="review-section"><div class="creator-toolbar"><div><h2>回传视频审核</h2></div><div class="creator-toolbar-right"><select id="review-filter" aria-label="审核状态"><option value="pending_review">待审核</option><option value="approved">已通过</option><option value="rejected">已驳回</option></select><button id="refresh-reviews" type="button">刷新</button><button id="logout" type="button">退出</button></div></div><p id="status" class="status" role="status"></p><div id="review-board"></div></section>`;document.querySelector("#review-filter").value=reviewFilter;document.querySelector("#review-filter").addEventListener("change",e=>{{reviewFilter=e.target.value;loadReviews()}});document.querySelector("#refresh-reviews").addEventListener("click",()=>loadReviews());document.querySelector("#logout").addEventListener("click",logout);renderReviews()}}
-function renderReviews(){{const box=document.querySelector("#review-board");if(!box)return;const label={{pending_review:"待审核",approved:"已通过",rejected:"已驳回"}}[reviewFilter];const rows=reviewRows.map(s=>{{const id=String(s.entry_id||"");const scriptUrl=id?scriptShareUrl(id):"";const videoUrl=String(s.video_url||"");const name=s.creator_profile_name||s.creator_profile_kwai_id||s.creator_id||"未知作者";const scriptCover=/^[0-9a-f]{{32}}$/i.test(id)?`__CREATOR_BASE__/api/creator/thumbnail/${{encodeURIComponent(id)}}.webp`:"";return `<article class="review-card"><div class="review-card-top"><h3>${{esc(s.script_title||s.submitted_title||id||"回传视频")}}</h3><span class="pill">${{esc(label)}}</span></div><div class="review-creator"><b>${{esc(name)}}${{s.creator_profile_kwai_id?` · @${{esc(s.creator_profile_kwai_id)}}`:""}}</b><span class="small">账号：${{esc(s.creator_id||"未绑定")}}</span><span class="small">回传：${{esc(timeText(s.created_at))}}</span></div><div class="review-media">${{reviewImage(scriptCover,"脚本封面",scriptUrl)}}${{reviewImage(reviewVideoCover(s),"回传视频封面",videoUrl)}}</div><div class="review-links">${{scriptUrl?`<a href="${{esc(scriptUrl)}}" target="_blank" rel="noopener">查看脚本</a>`:`<a aria-disabled="true">无脚本链接</a>`}}${{videoUrl?`<a href="${{esc(videoUrl)}}" target="_blank" rel="noopener">查看回传视频</a>`:`<a aria-disabled="true">无视频链接</a>`}}</div>${{reviewFilter==="pending_review"?`<label class="review-reason">驳回原因（可选，作者可见）<textarea data-review-reason="${{esc(s.submission_id)}}" placeholder="默认：Não corresponde ao roteiro original"></textarea></label><div class="review-actions"><button class="primary" type="button" data-review-id="${{esc(s.submission_id)}}" data-review-status="approved">审核通过</button><button type="button" data-review-id="${{esc(s.submission_id)}}" data-review-status="rejected">驳回</button></div>`:s.status==="rejected"?`<div class="review-rejected-reason">驳回原因：${{esc(s.review_reason||"未填写")}}</div>`:""}}</article>`}}).join("");box.innerHTML=`<p class="small">仅显示北京时间 2026 年 10 月 20 日之前的回传 · 已显示 ${{reviewRows.length}} 条${{reviewHasMore?"":" · 已加载全部"}}</p>${{rows?`<div class="review-grid">${{rows}}</div>`:`<div class="empty">${{reviewLoading?"正在查找更早的回传...":`暂无符合日期的${{label}}视频。`}}</div>`}}${{reviewHasMore&&!reviewLoading?`<button class="review-more" type="button" data-review-more>加载更多</button>`:""}`}}
+function renderReviews(){{const box=document.querySelector("#review-board");if(!box)return;const label={{pending_review:"待审核",approved:"已通过",rejected:"已驳回"}}[reviewFilter];const rows=reviewRows.map(s=>{{const id=String(s.entry_id||"");const scriptUrl=id?scriptShareUrl(id):"";const videoUrl=String(s.video_url||"");const name=s.creator_profile_name||s.creator_profile_kwai_id||s.creator_id||"未知作者";const scriptFallback=/^[0-9a-f]{{32}}$/i.test(id)?`__CREATOR_BASE__/api/creator/thumbnail/${{encodeURIComponent(id)}}.webp`:"";const cover=String(s.review_script_cover_url||"").trim();const scriptCover=cover.startsWith("/results/")?cover:cover.startsWith("/")?`__CREATOR_BASE__${{cover}}`:/^https?:\/\//i.test(cover)?cover:"";const submissionId=String(s.submission_id||"");const videoFallback=/^[0-9a-f]{{32}}$/i.test(submissionId)?`/api/creator-admin/review-video-cover/${{encodeURIComponent(submissionId)}}`:"";return `<article class="review-card"><div class="review-card-top"><h3>${{esc(s.script_title||s.submitted_title||id||"回传视频")}}</h3><span class="pill">${{esc(label)}}</span></div><div class="review-creator"><b>${{esc(name)}}${{s.creator_profile_kwai_id?` · @${{esc(s.creator_profile_kwai_id)}}`:""}}</b><span class="small">账号：${{esc(s.creator_id||"未绑定")}}</span><span class="small">回传：${{esc(timeText(s.created_at))}}</span></div><div class="review-media">${{reviewImage(scriptCover,"脚本封面",scriptUrl,scriptFallback)}}${{reviewImage(reviewVideoCover(s),"回传视频封面",videoUrl,videoFallback)}}</div><div class="review-links">${{scriptUrl?`<a href="${{esc(scriptUrl)}}" target="_blank" rel="noopener">查看脚本</a>`:`<a aria-disabled="true">无脚本链接</a>`}}${{videoUrl?`<a href="${{esc(videoUrl)}}" target="_blank" rel="noopener">查看回传视频</a>`:`<a aria-disabled="true">无视频链接</a>`}}</div>${{reviewFilter==="pending_review"?`<label class="review-reason">驳回原因（可选，作者可见）<textarea data-review-reason="${{esc(s.submission_id)}}" placeholder="默认：Não corresponde ao roteiro original"></textarea></label><div class="review-actions"><button class="primary" type="button" data-review-id="${{esc(s.submission_id)}}" data-review-status="approved">审核通过</button><button type="button" data-review-id="${{esc(s.submission_id)}}" data-review-status="rejected">驳回</button></div>`:s.status==="rejected"?`<div class="review-rejected-reason">驳回原因：${{esc(s.review_reason||"未填写")}}</div>`:""}}</article>`}}).join("");box.innerHTML=`<p class="small">仅显示北京时间 2026 年 10 月 20 日之前的回传 · 已显示 ${{reviewRows.length}} 条${{reviewHasMore?"":" · 已加载全部"}}</p>${{rows?`<div class="review-grid">${{rows}}</div>`:`<div class="empty">${{reviewLoading?"正在查找更早的回传...":`暂无符合日期的${{label}}视频。`}}</div>`}}${{reviewHasMore&&!reviewLoading?`<button class="review-more" type="button" data-review-more>加载更多</button>`:""}`}}
 async function loadReviews(append=false){{if(reviewLoading)return;reviewLoading=true;const status=document.querySelector("#status");const filter=document.querySelector("#review-filter");if(filter)filter.disabled=true;if(!append){{reviewRows=[];reviewOffset=0;reviewHasMore=true}}const previousCount=reviewRows.length;renderReviews();if(status)status.textContent="正在加载审核记录...";try{{do{{const d=await api(`/api/creator-admin/submissions?status=${{encodeURIComponent(reviewFilter)}}&limit=80&offset=${{reviewOffset}}`);const page=Array.isArray(d.submissions)?d.submissions:[];reviewOffset+=page.length;reviewRows.push(...page.filter(s=>{{const when=Date.parse(s.created_at||"");return Number.isFinite(when)&&when<REVIEW_CUTOFF}}));reviewHasMore=page.length>0&&(typeof d.has_more==="boolean"?d.has_more:reviewOffset<Number(d.total||0));}}while(reviewHasMore&&reviewRows.length===previousCount);if(status)status.textContent=`已显示 ${{reviewRows.length}} 条${{reviewFilter==="pending_review"?"待审核":"记录"}}`}}catch(err){{if(status)status.textContent=`加载失败：${{err.message||String(err)}}`}}finally{{reviewLoading=false;if(filter)filter.disabled=false;renderReviews()}}}}
 document.addEventListener("click",async e=>{{const more=e.target.closest("[data-review-more]");if(more){{e.preventDefault();await loadReviews(true);return}}const button=e.target.closest("[data-review-id]");if(!button)return;e.preventDefault();const id=button.dataset.reviewId;const nextStatus=button.dataset.reviewStatus;const enteredReason=button.closest(".review-card")?.querySelector("[data-review-reason]")?.value.trim()||"";const reason=nextStatus==="rejected"?(enteredReason||"Não corresponde ao roteiro original"):enteredReason;if(!confirm(nextStatus==="approved"?"确认视频按脚本翻拍/改编，审核通过并计入作者奖励？":`确认驳回此视频？\n原因：${{reason}}`))return;button.disabled=true;try{{await api("/api/creator-admin/submissions/review",{{method:"POST",body:JSON.stringify({{submission_id:id,status:nextStatus,reason}})}});setPageStatus(nextStatus==="approved"?"已通过，作者奖励将按审核结果更新。":"已驳回，原因会显示给作者。","success");await loadReviews()}}catch(err){{setPageStatus(`审核失败：${{err.message||String(err)}}`,"error")}}finally{{button.disabled=false}}}});
 function renderSubmissionStats(){{const box=document.querySelector("#submission-stats");if(!box)return;const appHtml=renderAccessApplications();const rows=filteredSubmissions();const groups=groupedSubmissions();const count=rows.length;const total=Number(submissionsTotal||submissions.length||0);const loaded=Number(submissions.length||0);const hasMore=loaded<total;const unmatched=rows.filter(s=>s.creator_unmatched||!s.creator_profile_id);const moreHtml=hasMore?`<div class="recommend-footer"><button class="primary" type="button" data-load-more-submissions ${{submissionsLoading?"disabled":""}}>${{submissionsLoading?"加载中...":`加载更多回传（已加载 ${{loaded}} / ${{total}}）`}}</button></div>`:`<div class="small" style="text-align:center;margin:14px 0">已加载全部 ${{loaded}} 条回传</div>`;const unmatchedHtml=unmatched.length?`<section class="import-panel"><h3 style="margin:0;color:#ff8200">未归类回传 <span class="pill">${{unmatched.length}} 条</span></h3><p class="small">这些回传没有匹配到创作者账号、Kwai ID、UID 或手机号，需要人工补账号或补创作者资料。</p><div class="submission-groups">${{unmatched.map(s=>`<article class="submission-group"><h3>${{esc(s.submitted_title||s.script_title||"未命名回传")}}</h3><div class="small">脚本：${{esc(s.script_title||s.entry_id||"")}} · 检测到 Kwai：${{esc(s.detected_kwai_id||"未识别")}} · 提交账号：${{esc(s.creator_id||"未绑定账号")}}</div><div class="submission-row"><div><b>作者回传链接</b><br><a href="${{esc(s.video_url)}}" target="_blank" rel="noopener">${{esc(s.video_url)}}</a><div class="small">${{esc(timeText(s.created_at))}} · ${{esc(s.unmatched_reason||"未归类")}}</div></div><button type="button" data-copy="${{esc(s.video_url)}}">复制回传链接</button></div></article>`).join("")}}</div></section>`:"";if(!groups.length){{box.innerHTML=`${{appHtml}}<section class="submission-summary"><div><h2>回传数据</h2><p class="copy">还没有匹配的回传。用户在脚本详情页粘贴链接后，会自动出现在这里。</p><div class="small">已加载 ${{loaded}} / ${{total}} 条历史回传。</div></div><div class="submission-count"><b>0</b><span>条回传</span></div></section>${{moreHtml}}`;return}}box.innerHTML=`${{appHtml}}<section class="submission-summary"><div><h2>回传数据</h2><p class="copy">按脚本分组展示。首屏只加载最近回传，旧数据可继续加载，避免页面卡死。</p><div class="small">当前筛选 ${{count}} 条 · 已加载 ${{loaded}} / ${{total}} 条历史回传。</div></div><div class="submission-count"><b>${{count}}</b><span>当前显示</span></div><div class="submission-count" style="background:${{unmatched.length?'#e11d48':'#16a34a'}}"><b>${{unmatched.length}}</b><span>未归类</span></div></section>${{unmatchedHtml}}<div class="submission-groups">${{groups.map(([id,items])=>{{const first=items[0]||{{}};const title=first.script_title||entries.find(e=>e.entry_id===id)?.title||id;const scriptUrl=scriptShareUrl(id);return `<article class="submission-group"><h3>${{esc(title)}} <span class="pill">${{items.length}} 条</span></h3><div class="small">脚本 ID：${{esc(id)}} · 分类：${{esc(first.script_content_type||"未分类")}}</div><div class="submission-row"><div><b>脚本链接</b><br><a href="${{esc(scriptUrl)}}" target="_blank" rel="noopener">${{esc(scriptUrl)}}</a></div><button type="button" data-copy="${{esc(scriptUrl)}}">复制脚本链接</button></div>${{items.map(s=>`<div class="submission-row"><div><b>作者回传链接</b><br><a href="${{esc(s.video_url)}}" target="_blank" rel="noopener">${{esc(s.video_url)}}</a><div class="small">标题：${{esc(s.submitted_title||"未抓到标题")}} · 归类：${{esc(s.creator_profile_name||"未归类")}}${{s.creator_profile_kwai_id?` (@${{esc(s.creator_profile_kwai_id)}})`:""}} · 提交账号：${{esc(s.creator_id||"未绑定账号")}} · ${{esc(timeText(s.created_at))}} · ${{esc(s.status||"pending_review")}}</div></div><button type="button" data-copy="${{esc(s.video_url)}}">复制回传链接</button></div>`).join("")}}</article>`}}).join("")}}</div>${{moreHtml}}`}}
@@ -19311,7 +19418,27 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             remote_query = urllib.parse.urlencode({"limit": limit, "offset": offset, "status": review_status})
             status, payload = creator_admin_remote_json(f"/api/admin/submissions?{remote_query}", timeout=20)
+            if status == 200 and isinstance(payload, dict):
+                payload = enrich_review_script_covers(payload)
             self.send_json(payload, status=status)
+            return
+        review_cover_match = re.fullmatch(r"/api/creator-admin/review-video-cover/([0-9a-f]{32})", parsed.path)
+        if review_cover_match:
+            if not has_creator_admin_access(self):
+                self.send_error(HTTPStatus.UNAUTHORIZED)
+                return
+            cover = fetch_review_video_cover(review_cover_match.group(1))
+            if not cover:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            content_type, image = cover
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(image)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(image)
             return
         if parsed.path == "/api/creator-admin/intakes":
             if not has_creator_admin_access(self):
