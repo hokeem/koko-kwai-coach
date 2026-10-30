@@ -7210,13 +7210,21 @@ def fetch_review_video_cover(submission_id: str) -> tuple[str, bytes] | None:
 def creator_admin_remote_json(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: int = 45, attempts: int | None = None) -> tuple[int, dict[str, Any]]:
     if not path.startswith("/"):
         path = "/" + path
+    preview_proxy = os.environ.get("KOKO_CREATOR_PREVIEW_PROXY", "").strip().rstrip("/")
+    if preview_proxy and method.upper() == "GET" and path.startswith("/api/admin/"):
+        target_base = preview_proxy
+        path = path.replace("/api/admin/", "/api/creator-admin/", 1)
+        remote_cookie = CREATOR_ADMIN_AUTH_COOKIE
+    else:
+        target_base = CREATOR_CENTER_BASE_URL
+        remote_cookie = CREATOR_REMOTE_ADMIN_COOKIE
     data = None if method.upper() == "GET" else json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     attempts = attempts if attempts is not None else (3 if method.upper() == "GET" else 1)
     last_error = "Creator admin returned a non-JSON response."
     for attempt in range(attempts):
         request = urllib.request.Request(
-            CREATOR_CENTER_BASE_URL + path,
+            target_base + path,
             data=data,
             method=method.upper(),
             headers={
@@ -7224,7 +7232,7 @@ def creator_admin_remote_json(path: str, *, method: str = "GET", payload: dict[s
                 "Accept-Encoding": "identity",
                 "Connection": "close",
                 "User-Agent": "KokoCreatorOps/1.0",
-                "Cookie": f"{CREATOR_REMOTE_ADMIN_COOKIE}={urllib.parse.quote(CREATOR_ADMIN_PASSWORD)}",
+                "Cookie": f"{remote_cookie}={urllib.parse.quote(CREATOR_ADMIN_PASSWORD)}",
             },
         )
         try:
@@ -18086,6 +18094,8 @@ document.addEventListener("click",async e=>{{const tab=e.target.closest("[data-t
     )
     if library_mode:
         html = html.replace("<title>Koko Creator 运营后台</title>", "<title>Koko 脚本管理</title>")
+    if initial_tab == "dashboard":
+        html = html.replace("</body></html>", '<script src="/creator-dashboard-integrated.js"></script></body></html>')
     return html
 
 
@@ -19031,6 +19041,8 @@ class AppHandler(BaseHTTPRequestHandler):
             content_type = "text/html; charset=utf-8"
         elif path.suffix == ".json":
             content_type = "application/json; charset=utf-8"
+        elif path.suffix == ".js":
+            content_type = "text/javascript; charset=utf-8"
         elif path.suffix == ".mp4":
             content_type = "video/mp4"
         elif path.suffix == ".png":
@@ -19261,6 +19273,18 @@ class AppHandler(BaseHTTPRequestHandler):
         if creator_admin_tab:
             self.send_html(creator_admin_html(creator_admin_tab))
             return
+        if parsed.path == "/creator-dashboard-integrated.js":
+            self.send_file(Path(__file__).parent / "creator_dashboard_integrated.js")
+            return
+        if parsed.path == "/api/creator-admin/production-stats":
+            if not has_creator_admin_access(self):
+                self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            if os.environ.get("KOKO_CREATOR_PREVIEW_PROXY"):
+                self.send_json({"error": "本地预览无法读取线上脚本生产记录。"}, status=503)
+                return
+            self.send_json({"ok": True, **build_stats_payload()})
+            return
         if parsed.path == "/api/creator-admin/scripts":
             if not has_creator_admin_access(self):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
@@ -19270,22 +19294,27 @@ class AppHandler(BaseHTTPRequestHandler):
                 limit = max(1, min(5000, int((query.get("limit") or ["100"])[0] or "100")))
             except Exception:
                 limit = 100
+            try:
+                offset = max(0, int((query.get("offset") or ["0"])[0] or "0"))
+            except (TypeError, ValueError):
+                offset = 0
             scope = str((query.get("scope") or ["portal_visible"])[0] or "portal_visible").strip()
             if scope not in {"portal_visible", "hidden", "incomplete", "telekwai", "all"}:
                 scope = "portal_visible"
             remote_scope = "all" if scope == "telekwai" else scope
-            search = urllib.parse.urlencode({"limit": limit, "scope": remote_scope})
+            search = urllib.parse.urlencode({"limit": limit, "offset": offset, "scope": remote_scope})
             status, payload = creator_admin_remote_json(f"/api/admin/scripts?{search}")
             if status == 200 and isinstance(payload.get("entries"), list):
                 payload = normalize_creator_admin_scripts_payload(payload)
-                save_creator_admin_scripts_cache(payload)
+                if offset == 0:
+                    save_creator_admin_scripts_cache(payload)
                 if scope == "telekwai":
                     payload["entries"] = [entry for entry in payload["entries"] if is_telekwai_script(entry)]
                     payload["scope"] = "telekwai"
                     counts = dict(payload.get("scope_counts") or {})
                     counts["telekwai"] = len(payload["entries"])
                     payload["scope_counts"] = counts
-            elif status >= 500:
+            elif status >= 500 and offset == 0:
                 cached = load_creator_admin_scripts_cache()
                 if cached:
                     payload = normalize_creator_admin_scripts_payload(dict(cached))
@@ -19391,6 +19420,10 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/creator-admin/state":
             if not has_creator_admin_access(self):
                 self.send_json({"error": "请先登录 Creator 运营后台。"}, status=401)
+                return
+            if os.environ.get("KOKO_CREATOR_PREVIEW_PROXY"):
+                status, payload = creator_admin_remote_json("/api/admin/state")
+                self.send_json(payload, status=status)
                 return
             self.send_json({"ok": True, "state": load_creator_admin_state()})
             return
