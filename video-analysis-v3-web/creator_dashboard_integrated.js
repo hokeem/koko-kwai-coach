@@ -9,7 +9,7 @@
   let neverExpanded = false;
   const expandedSections = new Set();
   const layout = document.createElement('style');
-  layout.textContent = '.dashboard-app{grid-template-columns:minmax(0,1fr)} .dashboard-sidebar{display:none}';
+  layout.textContent = '.dashboard-app{grid-template-columns:minmax(0,1fr)} .dashboard-sidebar{display:none} .dashboard-overall-group .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))} @media(max-width:700px){.dashboard-overall-group .dashboard-kpis{grid-template-columns:1fr}}';
   document.head.append(layout);
   const esc = value => dashboardEsc(String(value ?? ''));
   const date = value => value ? timeText(value) : '未记录';
@@ -147,6 +147,38 @@
       if (label) label.textContent = '视频回传';
       if (value) value.textContent = String(actions.length);
       if (note) note.textContent = '所选周期 · 回传记录数';
+    }
+    const kpiGrid = root.querySelector('.dashboard-kpis');
+    const newAuthorCard = kpis[0];
+    const cohortLayout = root.querySelector('.dashboard-layout-two');
+    const trendLayout = root.querySelector('.dashboard-layout-trend');
+    const newAuthors = panel.querySelector('#integrated-authors');
+    const usage = panel.querySelector('#integrated-usage');
+    if (kpiGrid && newAuthorCard) {
+      const overall = document.createElement('section');
+      overall.className = 'dashboard-overall-group';
+      overall.innerHTML = '<h2 style="margin:0 0 14px;font-size:22px">作者总体行为数据</h2>';
+      kpiGrid.before(overall);
+      overall.append(kpiGrid);
+      if (behavior) overall.append(behavior);
+      if (usage) overall.append(usage);
+      overall.style.display = 'grid';
+      overall.style.gap = '16px';
+      const newcomers = document.createElement('section');
+      newcomers.className = 'dashboard-newcomer-group';
+      newcomers.style.display = 'grid';
+      newcomers.style.gap = '16px';
+      newcomers.innerHTML = '<h2 style="margin:0;font-size:22px">新作者行为汇总</h2>';
+      overall.after(newcomers);
+      const newGrid = document.createElement('div');
+      newGrid.className = 'dashboard-kpis';
+      newGrid.style.gridTemplateColumns = 'minmax(0,1fr)';
+      newGrid.append(newAuthorCard);
+      newcomers.append(newGrid);
+      if (cohortLayout) newcomers.append(cohortLayout);
+      if (trendLayout) newcomers.append(trendLayout);
+      if (newAuthors) newcomers.append(newAuthors);
+      if (channel) channel.insertAdjacentHTML('beforeend', '<p class="dashboard-panel-meta">新增作者按渠道归因；活跃、脚本打开和回传包含新老作者。</p>');
     }
   }
   renderDashboard = function () {
