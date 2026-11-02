@@ -17662,7 +17662,7 @@ const activeScriptTaxonomy={{relationship:new Set(),format:new Set(),location:ne
 let analyticsSummaryData=null;let analyticsSummaryLoading=false;
 function campaignMonthNow(){{const parts=new Intl.DateTimeFormat("en-US",{{timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit"}}).formatToParts(new Date());return `${{parts.find(x=>x.type==="year")?.value}}-${{parts.find(x=>x.type==="month")?.value}}`}}
 let campaignDashboardData=null;let campaignDashboardError="";let campaignDashboardLoading=false;let campaignDashboardLoadedAt=0;let campaignDashboardRequest=0;let campaignDashboardMonth="";let campaignSource="email";let campaignName="campaign";let campaignMonth=campaignMonthNow();let creatorCampaignView=false;
-let dashboardData=null;let dashboardLoading=false;let dashboardRange=30;
+let dashboardData=null;let dashboardLoading=false;let dashboardRange=7;
 function esc(s){{return String(s??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}}[c]))}}
 function noCacheUrl(url){{const methodUrl=String(url||"");if(!methodUrl.startsWith("/"))return methodUrl;const sep=methodUrl.includes("?")?"&":"?";return `${{methodUrl}}${{sep}}_=${{Date.now()}}`}}
 async function api(url,opts={{}}){{const method=String(opts.method||"GET").toUpperCase();const requestUrl=method==="GET"?noCacheUrl(url):url;const r=await fetch(requestUrl,{{credentials:"same-origin",cache:"no-store",headers:{{"Content-Type":"application/json","Cache-Control":"no-store"}},...opts}});const d=await r.json().catch(()=>({{}}));if(!r.ok||d.ok===false)throw new Error(d.error||"请求失败");return d}}

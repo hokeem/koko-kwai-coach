@@ -6,6 +6,10 @@
   let extras = null;
   let generation = 0;
   let exportsByType = {};
+  let neverExpanded = false;
+  const layout = document.createElement('style');
+  layout.textContent = '.dashboard-app{grid-template-columns:minmax(0,1fr)} .dashboard-sidebar{display:none}';
+  document.head.append(layout);
   const esc = value => dashboardEsc(String(value ?? ''));
   const date = value => value ? timeText(value) : '未记录';
   const title = value => esc(value || '未命名');
@@ -26,7 +30,7 @@
   const identity = item => String(item?.account_id || item?.creator_id || item?.phone || item?.kwai_id || '').toLowerCase();
   const aliases = item => new Set([item?.account_id, item?.creator_id, item?.phone, item?.kwai_id, item?.uid, item?.detected_kwai_id, item?.creator_profile_kwai_id, ...(item?.login_aliases || [])].filter(Boolean).map(x => String(x).trim().replace(/^@/, '').toLowerCase()));
   const matches = (a, b) => { const keys = aliases(a); return [...aliases(b)].some(key => keys.has(key)); };
-  dashboardRenderScriptTable = rows => table(['排名','脚本标题','打开次数','去重打开作者','已回传','审核通过'], rows.map((row,index) => [esc(index + 1), link(row.id ? `https://kokocomedy.com/script/${encodeURIComponent(row.id)}` : '', row.title || row.id), esc(row.opens), esc(row.authors.size), esc(row.returns), esc(row.approved || 0)]), '此分类暂无脚本');
+  dashboardRenderScriptTable = rows => table(['排名','脚本标题','打开次数','去重打开作者','已回传'], rows.map((row,index) => [esc(index + 1), link(row.id ? `https://kokocomedy.com/script/${encodeURIComponent(row.id)}` : '', row.title || row.id), esc(row.opens), esc(row.authors.size), esc(row.returns)]), '此分类暂无脚本');
 
   // Fetch all pages; silently truncating gives incorrect totals and rankings.
   loadDashboardSubmissions = async function (first) {
@@ -97,24 +101,42 @@
       section('integrated-channels', '推广渠道明细', `最近 ${dashboardRange} 天 · 巴西时间，首次渠道归因`, campaign ? table(['渠道 / 活动','访问次数','去重访客','新增作者','活跃作者','脚本打开','回传','访问账号'], campaignRows) : '<div class="dashboard-empty">渠道数据加载中或暂不可用</div>') +
       section('integrated-authors', '新增作者明细', `近 ${dashboardRange} 天 · 北京时间，打开和回传为所选周期`, '<button type="button" data-dashboard-export="authors">导出作者明细</button>' + table(['作者','Kwai ID','注册时间','渠道','主页','打开脚本','匹配回传'], authorRows)) +
       section('integrated-usage', '作者使用统计', '巴西时间 · 根据所选周期内事件去重；首尾月份或周可能不完整', open('按月',table(['月份','活跃作者','脚本打开次数'],groupUsage(day => day.slice(0,7)))) + open('按周（周一开始）',table(['周开始','活跃作者','脚本打开次数'],groupUsage(weekOf))) + open('按日及作者明细',table(['日期','活跃作者','脚本打开次数','打开脚本数','作者明细'], usageRows))) +
-      section('integrated-never', '没有历史打开记录的脚本', `仅覆盖保留的历史事件${data.summary?.history_start ? `，最早 ${date(data.summary.history_start)}` : ''}；不代表更早从未打开`, Array.isArray(historicalIds) ? table(['脚本','链接','状态'],historicalRows) : '<div class="dashboard-empty">历史事件接口尚未提供数据</div>') +
       section('integrated-behavior', '作者行为明细', '所选周期；停留时间以秒计，— 表示接口未提供', table(['作者','Kwai ID','平台打开','脚本打开','平台停留','脚本停留','功能点击'], activityRows)) +
       section('integrated-feed', '投喂记录', '所选周期 · 内容中台记录的投喂；与视频回传分开统计', extras?.state ? '<button type="button" data-dashboard-export="feeds">导出投喂明细</button>' + table(['作者','投喂日期','脚本','状态','回传链接'],feedRows) : '<div class="dashboard-empty">投喂数据加载中或暂不可用</div>') +
       section('integrated-production', '脚本生产', '生成、复盘和整稿编辑 · 北京时间', production ? `<p class="dashboard-panel-meta">近 24 小时 ${esc(productionSummary.last_24h)} · 近 7 天 ${esc(productionSummary.last_7d)} · 近 30 天 ${esc(productionSummary.last_30d)} · 历史累计 ${esc(productionSummary.all_time)} · 近 30 天复盘 ${esc(productionSummary.review_count_30d)} · 近 30 天编辑 ${esc(productionSummary.edited_count_30d)}</p>${table(['日期','生成','复盘','编辑','脚本明细'],productionRows)}` : '<div class="dashboard-empty">生产数据加载中或暂不可用</div>') +
       section('integrated-review', '回传审核明细', `所选周期 · 待审核 ${counts.pending_review || 0} · 已通过 ${counts.approved || 0} · 未通过 ${counts.rejected || 0}`, `<p><a href="/koko_admin_2026-kwai/reviews">进入回传审核</a> <button type="button" data-dashboard-export="reviews">导出回传明细</button></p>${table(['提交时间','作者','脚本','脚本链接','视频链接','状态','原因'],reviewRows)}`);
     root.append(panel);
+    const behavior = panel.querySelector('#integrated-behavior');
+    if (behavior) panel.prepend(behavior);
+    const scriptPanel = [...root.children].find(x => x.querySelector?.(':scope > .dashboard-panel-head > h2')?.textContent === '脚本表现');
+    if (scriptPanel) root.append(scriptPanel);
+    const never = document.createElement('details');
+    never.id = 'integrated-never';
+    never.className = 'dashboard-panel';
+    never.open = neverExpanded;
+    never.innerHTML = `<summary><strong>没有历史打开记录的脚本</strong> <span class="dashboard-panel-meta">${historicalRows.length} 条</span></summary><p class="dashboard-panel-meta">仅覆盖保留的历史事件${data.summary?.history_start ? `，最早 ${esc(date(data.summary.history_start))}` : ''}；不代表更早从未打开。</p>${Array.isArray(historicalIds) ? table(['脚本','链接','状态'],historicalRows) : '<div class="dashboard-empty">历史事件接口尚未提供数据</div>'}`;
+    never.addEventListener('toggle', () => { neverExpanded = never.open; });
+    root.append(never);
     // Restrict each stage to the same newly registered authors; event order is not assumed.
     const conversion = [...root.querySelectorAll('.dashboard-panel')].find(x => x.querySelector('h2')?.textContent === '创作者转化');
     if (conversion) {
       const cohort = authors.filter(a => inRange(a.registered_at || a.last_registered_at));
       const opened = cohort.filter(a => users.some(u => matches(u,a) && Number(u.script_share_open_count || 0) > 0));
       const returned = opened.filter(a => actions.some(r => matches(r,a)));
-      const approved = returned.filter(a => actions.some(r => matches(r,a) && r.status === 'approved'));
-      const stages = [['新增作者',cohort.length],['打开脚本',opened.length],['有回传',returned.length],['审核通过',approved.length]];
+      const stages = [['新增作者',cohort.length],['打开脚本',opened.length],['有回传',returned.length]];
       conversion.innerHTML = `<div class="dashboard-panel-head"><h2>新作者行为</h2></div><div class="dashboard-funnel">${stages.map(([label,value],i) => `<div class="dashboard-funnel-step"><span class="dashboard-funnel-label">${esc(label)}</span><div class="dashboard-funnel-bar">${value}</div><div class="dashboard-funnel-rate">${i && stages[i-1][1] ? `${Math.round(value / stages[i-1][1] * 1000) / 10}%` : '—'}</div></div>`).join('')}</div><p class="dashboard-panel-meta">同一批周期内新注册作者，统计周期内的行为；不判断先后顺序。账号无法匹配的回传不计入。访客到注册的转化暂无法可靠关联。</p>`;
     }
     const channel = [...root.querySelectorAll('.dashboard-panel')].find(x => x.querySelector('h2')?.textContent === '渠道表现');
-    if (channel) channel.innerHTML = '<div class="dashboard-panel-head"><h2>渠道表现</h2></div><div class="dashboard-empty">真实渠道访问和归因数据见下方“推广渠道明细”。</div>';
+    if (channel) channel.innerHTML = `<div class="dashboard-panel-head"><h2>渠道表现</h2><span class="dashboard-panel-meta">近 ${dashboardRange} 天 · 巴西时间</span></div>${campaign ? table(['渠道 / 活动','访问次数','去重访客','新增作者','活跃作者','脚本打开','回传'], campaignRows.map(row => row.slice(0,7)), '该周期暂无渠道记录') : '<div class="dashboard-empty">渠道数据加载中或暂不可用</div>'}`;
+    const kpis = root.querySelectorAll('.dashboard-kpi');
+    if (kpis[3]) {
+      const label = kpis[3].querySelector('.dashboard-kpi-label');
+      const value = kpis[3].querySelector('.dashboard-kpi-value');
+      const note = kpis[3].querySelector('.dashboard-kpi-note');
+      if (label) label.textContent = '视频回传';
+      if (value) value.textContent = String(actions.length);
+      if (note) note.textContent = '所选周期 · 回传记录数';
+    }
   }
   renderDashboard = function () {
     if (!dashboardData) return originalRender();
