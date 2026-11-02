@@ -7,6 +7,7 @@
   let generation = 0;
   let exportsByType = {};
   let neverExpanded = false;
+  const expandedSections = new Set();
   const layout = document.createElement('style');
   layout.textContent = '.dashboard-app{grid-template-columns:minmax(0,1fr)} .dashboard-sidebar{display:none}';
   document.head.append(layout);
@@ -24,7 +25,9 @@
   const table = (heads, rows, empty = '暂无记录') => rows.length
     ? `<div style="overflow:auto"><table class="dashboard-channel-table"><thead><tr>${heads.map(x => `<th>${esc(x)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
     : `<div class="dashboard-empty">${esc(empty)}</div>`;
-  const section = (id, name, note, content) => `<article class="dashboard-panel" id="${id}"><div class="dashboard-panel-head"><h2>${esc(name)}</h2><span class="dashboard-panel-meta">${esc(note)}</span></div>${content}</article>`;
+  const section = (id, name, note, content) => ['integrated-authors', 'integrated-behavior', 'integrated-production'].includes(id)
+    ? `<details class="dashboard-panel" id="${id}" data-collapsible ${expandedSections.has(id) ? 'open' : ''}><summary><strong>${esc(name)}</strong> <span class="dashboard-panel-meta">${esc(note)}</span></summary><div style="margin-top:16px">${content}</div></details>`
+    : `<article class="dashboard-panel" id="${id}"><div class="dashboard-panel-head"><h2>${esc(name)}</h2><span class="dashboard-panel-meta">${esc(note)}</span></div>${content}</article>`;
   const open = (label, content) => `<details><summary>${esc(label)}</summary>${content}</details>`;
   const inRange = value => dashboardInsideRange(value);
   const identity = item => String(item?.account_id || item?.creator_id || item?.phone || item?.kwai_id || '').toLowerCase();
@@ -103,13 +106,30 @@
       section('integrated-usage', '作者使用统计', '巴西时间 · 根据所选周期内事件去重；首尾月份或周可能不完整', open('按月',table(['月份','活跃作者','脚本打开次数'],groupUsage(day => day.slice(0,7)))) + open('按周（周一开始）',table(['周开始','活跃作者','脚本打开次数'],groupUsage(weekOf))) + open('按日及作者明细',table(['日期','活跃作者','脚本打开次数','打开脚本数','作者明细'], usageRows))) +
       section('integrated-behavior', '作者行为明细', '所选周期；停留时间以秒计，— 表示接口未提供', table(['作者','Kwai ID','平台打开','脚本打开','平台停留','脚本停留','功能点击'], activityRows)) +
       section('integrated-feed', '投喂记录', '所选周期 · 内容中台记录的投喂；与视频回传分开统计', extras?.state ? '<button type="button" data-dashboard-export="feeds">导出投喂明细</button>' + table(['作者','投喂日期','脚本','状态','回传链接'],feedRows) : '<div class="dashboard-empty">投喂数据加载中或暂不可用</div>') +
-      section('integrated-production', '脚本生产', '生成、复盘和整稿编辑 · 北京时间', production ? `<p class="dashboard-panel-meta">近 24 小时 ${esc(productionSummary.last_24h)} · 近 7 天 ${esc(productionSummary.last_7d)} · 近 30 天 ${esc(productionSummary.last_30d)} · 历史累计 ${esc(productionSummary.all_time)} · 近 30 天复盘 ${esc(productionSummary.review_count_30d)} · 近 30 天编辑 ${esc(productionSummary.edited_count_30d)}</p>${table(['日期','生成','复盘','编辑','脚本明细'],productionRows)}` : '<div class="dashboard-empty">生产数据加载中或暂不可用</div>') +
-      section('integrated-review', '回传审核明细', `所选周期 · 待审核 ${counts.pending_review || 0} · 已通过 ${counts.approved || 0} · 未通过 ${counts.rejected || 0}`, `<p><a href="/koko_admin_2026-kwai/reviews">进入回传审核</a> <button type="button" data-dashboard-export="reviews">导出回传明细</button></p>${table(['提交时间','作者','脚本','脚本链接','视频链接','状态','原因'],reviewRows)}`);
+      section('integrated-production', '脚本生产', '生成、复盘和整稿编辑 · 北京时间', production ? `<p class="dashboard-panel-meta">近 24 小时 ${esc(productionSummary.last_24h)} · 近 7 天 ${esc(productionSummary.last_7d)} · 近 30 天 ${esc(productionSummary.last_30d)} · 历史累计 ${esc(productionSummary.all_time)} · 近 30 天复盘 ${esc(productionSummary.review_count_30d)} · 近 30 天编辑 ${esc(productionSummary.edited_count_30d)}</p>${table(['日期','生成','复盘','编辑','脚本明细'],productionRows)}` : '<div class="dashboard-empty">生产数据加载中或暂不可用</div>');
     root.append(panel);
+    panel.querySelectorAll('[data-collapsible]').forEach(detail => detail.addEventListener('toggle', () => {
+      if (!detail.isConnected) return;
+      if (detail.open) expandedSections.add(detail.id); else expandedSections.delete(detail.id);
+    }));
     const behavior = panel.querySelector('#integrated-behavior');
     if (behavior) panel.prepend(behavior);
     const scriptPanel = [...root.children].find(x => x.querySelector?.(':scope > .dashboard-panel-head > h2')?.textContent === '脚本表现');
-    if (scriptPanel) root.append(scriptPanel);
+    if (scriptPanel) {
+      const wrapper = document.createElement('details');
+      wrapper.className = 'dashboard-panel';
+      wrapper.id = 'integrated-scripts';
+      wrapper.open = expandedSections.has(wrapper.id);
+      wrapper.innerHTML = '<summary><strong>脚本表现</strong></summary>';
+      scriptPanel.querySelector('.dashboard-panel-head')?.remove();
+      while (scriptPanel.firstChild) wrapper.append(scriptPanel.firstChild);
+      wrapper.addEventListener('toggle', () => {
+        if (!wrapper.isConnected) return;
+        if (wrapper.open) expandedSections.add(wrapper.id); else expandedSections.delete(wrapper.id);
+      });
+      scriptPanel.remove();
+      root.append(wrapper);
+    }
     const never = document.createElement('details');
     never.id = 'integrated-never';
     never.className = 'dashboard-panel';
