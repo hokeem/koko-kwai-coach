@@ -64,22 +64,14 @@
       const channel = (extras?.campaign?.rows || []).find(row => (row.new_creator_accounts || []).some(person => matches(person, a)));
       return [title(a.display_name || a.account_id), esc(a.kwai_id || '未记录'), esc(date(a.registered_at || a.last_registered_at)), esc(channel?.source || a.source || '未归因'), link(profile?.kwai_url || a.kwai_url || a.profile_url || a.share_url, '主页'), esc(u?.script_share_open_count || 0), esc(returns.length)];
     });
-    const days = data.summary?.daily_usage || [];
-    const usageRows = days.map(d => [esc(d.day), esc(d.active_users), esc(d.script_opens), esc(d.unique_scripts_opened), open('作者', (d.people || []).map(p => `<div>${esc(p.display_name || p.kwai_id || p.account_id)}</div>`).join('') || '无作者明细')]);
-    const groupUsage = keyFor => {
-      const groups = new Map();
-      for (const day of days) {
-        const key = keyFor(day.day), group = groups.get(key) || {people: new Set(), opens: 0};
-        for (const person of day.people || []) { const id = identity(person); if (id) group.people.add(id); }
-        group.opens += Number(day.script_opens || 0); groups.set(key, group);
-      }
-      return [...groups].sort((a,b) => b[0].localeCompare(a[0])).map(([key,g]) => [esc(key),esc(g.people.size),esc(g.opens)]);
-    };
-    const weekOf = day => { const d = new Date(`${day}T12:00:00Z`); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0,10); };
+    const endDay = dashboardDateKey(new Date());
+    const beginDate = new Date(`${endDay}T00:00:00+08:00`);
+    beginDate.setUTCDate(beginDate.getUTCDate() - dashboardRange + 1);
+    const period = `${dashboardDateKey(beginDate)} 至 ${endDay} · 北京时间`;
     const historicalIds = data.summary?.historical_script_opened_ids;
     const historicalSet = new Set(historicalIds || []);
     const historicalRows = Array.isArray(historicalIds) ? data.scripts.filter(s => !historicalSet.has(String(s.entry_id || s.id || ''))).map(s => [title(s.title || s.entry_id), link(s.entry_id ? `https://kokocomedy.com/script/${encodeURIComponent(s.entry_id)}` : '', '查看脚本'), esc(s.published === false ? '未发布' : '已发布')]) : [];
-    const activityRows = users.filter(u => !analyticsIsTestUser(u)).map(u => [title(u.display_name || u.account_id), esc(u.kwai_id || '—'), esc(u.platform_open_count || 0), esc(u.script_share_open_count || 0), u.platform_duration_seconds == null ? '—' : esc(Math.round(u.platform_duration_seconds)), u.script_duration_seconds == null ? '—' : esc(Math.round(u.script_duration_seconds)), u.click_counts ? open('功能点击', Object.entries(u.click_counts).map(([k,v]) => `<div>${esc(k)}: ${esc(v)}</div>`).join('') || '无记录') : '—']);
+    const activityRows = users.filter(u => !analyticsIsTestUser(u)).map(u => [title(u.display_name || u.account_id), esc(u.kwai_id || '—'), esc(u.platform_open_count || 0), esc(u.script_share_open_count || 0), u.platform_duration_seconds == null ? '—' : esc(Math.round(u.platform_duration_seconds)), u.script_duration_seconds == null ? '—' : esc(Math.round(u.script_duration_seconds))]);
     const reviewRows = actions.slice().sort((a,b) => String(b.created_at).localeCompare(String(a.created_at))).map(r => [esc(date(r.created_at || r.submitted_at)), title(r.creator_profile_name || r.creator_name || r.display_name || r.detected_kwai_id || r.creator_id), title(r.script_title || r.entry_id), link(r.entry_id ? `https://kokocomedy.com/script/${encodeURIComponent(r.entry_id)}` : '', '脚本'), link(r.video_url, '视频'), esc(({pending_review:'待审核',approved:'已通过',rejected:'未通过'})[r.status] || r.status || '待审核'), esc(r.review_reason || r.rejection_reason || r.reason || '—')]);
     const counts = actions.reduce((acc, r) => { const s = r.status || 'pending_review'; acc[s] = (acc[s] || 0) + 1; return acc; }, {});
     const production = extras?.production;
@@ -95,8 +87,7 @@
     panel.innerHTML = `${errors.length ? `<div class="dashboard-empty">${esc(errors.join('；'))}</div>` : ''}` +
       section('integrated-channels', '推广渠道明细', `最近 ${dashboardRange} 天 · 巴西时间，首次渠道归因`, campaign ? table(['渠道 / 活动','访问次数','去重访客','新增作者','活跃作者','脚本打开','回传','访问账号'], campaignRows) : '<div class="dashboard-empty">渠道数据加载中或暂不可用</div>') +
       section('integrated-authors', '新增作者明细', `近 ${dashboardRange} 天 · 北京时间，打开和回传为所选周期`, '<button type="button" data-dashboard-export="authors">导出作者明细</button>' + table(['作者','Kwai ID','注册时间','渠道','主页','打开脚本','匹配回传'], authorRows)) +
-      section('integrated-usage', '作者使用统计', '巴西时间 · 根据所选周期内事件去重；首尾月份或周可能不完整', open('按月',table(['月份','活跃作者','脚本打开次数'],groupUsage(day => day.slice(0,7)))) + open('按周（周一开始）',table(['周开始','活跃作者','脚本打开次数'],groupUsage(weekOf))) + open('按日及作者明细',table(['日期','活跃作者','脚本打开次数','打开脚本数','作者明细'], usageRows))) +
-      section('integrated-behavior', '作者行为明细', '所选周期；停留时间以秒计，— 表示接口未提供', table(['作者','Kwai ID','平台打开','脚本打开','平台停留','脚本停留','功能点击'], activityRows)) +
+      section('integrated-behavior', '作者行为明细', `${period} · 停留时间：秒`, table(['作者','Kwai ID','平台打开','脚本打开','平台停留','脚本停留'], activityRows)) +
       section('integrated-production', '脚本生产', '生成、复盘和整稿编辑 · 北京时间', production ? `<p class="dashboard-panel-meta">近 24 小时 ${esc(productionSummary.last_24h)} · 近 7 天 ${esc(productionSummary.last_7d)} · 近 30 天 ${esc(productionSummary.last_30d)} · 历史累计 ${esc(productionSummary.all_time)} · 近 30 天复盘 ${esc(productionSummary.review_count_30d)} · 近 30 天编辑 ${esc(productionSummary.edited_count_30d)}</p>${table(['日期','生成','复盘','编辑','脚本明细'],productionRows)}` : '<div class="dashboard-empty">生产数据加载中或暂不可用</div>');
     root.append(panel);
     panel.querySelectorAll('[data-collapsible]').forEach(detail => detail.addEventListener('toggle', () => {
@@ -153,15 +144,13 @@
     const cohortLayout = root.querySelector('.dashboard-layout-two');
     const trendLayout = root.querySelector('.dashboard-layout-trend');
     const newAuthors = panel.querySelector('#integrated-authors');
-    const usage = panel.querySelector('#integrated-usage');
     if (kpiGrid && newAuthorCard) {
       const overall = document.createElement('section');
       overall.className = 'dashboard-overall-group';
-      overall.innerHTML = '<h2 style="margin:0 0 14px;font-size:22px">作者总体行为数据</h2>';
+      overall.innerHTML = `<h2 style="margin:0;font-size:30px">作者总体行为数据</h2><p class="dashboard-panel-meta" style="margin:0">${esc(period)}</p>`;
       kpiGrid.before(overall);
       overall.append(kpiGrid);
       if (behavior) overall.append(behavior);
-      if (usage) overall.append(usage);
       overall.style.display = 'grid';
       overall.style.gap = '16px';
       const newcomers = document.createElement('section');
