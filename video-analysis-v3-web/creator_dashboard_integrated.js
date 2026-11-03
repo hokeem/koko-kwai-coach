@@ -7,10 +7,11 @@
   let generation = 0;
   let exportsByType = {};
   let workbookRows = {};
+  let expandedMetric = '';
   let neverExpanded = false;
   const expandedSections = new Set();
   const layout = document.createElement('style');
-  layout.textContent = '.dashboard-app{grid-template-columns:minmax(0,1fr)} .dashboard-sidebar{display:none} .dashboard-overall-group .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))} @media(max-width:700px){.dashboard-overall-group .dashboard-kpis{grid-template-columns:1fr}}';
+  layout.textContent = '.dashboard-app{grid-template-columns:minmax(0,1fr)} .dashboard-sidebar{display:none} .dashboard-overall-group .dashboard-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.dashboard-overall-group .dashboard-kpi{min-width:0;min-height:160px;grid-template-rows:1fr auto;cursor:pointer}.dashboard-overall-group .dashboard-kpi:focus-within,.dashboard-overall-group .dashboard-kpi:hover{border-color:#ffab7c}.dashboard-overall-group .dashboard-kpi-note{line-height:1.4;overflow-wrap:anywhere}.dashboard-kpi-actions{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;flex-wrap:wrap}.dashboard-kpi-actions button{width:auto;min-height:34px;padding:0 12px;white-space:nowrap;font-size:12px;line-height:1.2}.dashboard-kpi-actions [data-metric-toggle]{border:0;background:transparent;color:#b54d10;font-weight:800}.dashboard-kpi-actions [data-dashboard-export]{border:1px solid #f4b995;background:#fff7f0;color:#ad470b}.dashboard-metric-list{min-width:0}.dashboard-metric-list[hidden]{display:none!important}@media(max-width:700px){.dashboard-overall-group .dashboard-kpis{grid-template-columns:1fr}.dashboard-overall-group .dashboard-kpi{min-height:140px}}';
   document.head.append(layout);
   const esc = value => dashboardEsc(String(value ?? ''));
   const date = value => value ? timeText(value) : '未记录';
@@ -85,6 +86,8 @@
       active: activeUsers.map(u => { const real = Number(u.script_share_open_count || 0), converted = independentFor(u) * 2; return [String(u.account_id || ''), String(u.kwai_id || ''), String(u.display_name || ''), Number(u.platform_open_count || 0), real, converted, real + converted, Number(u.platform_duration_seconds || 0), Number(u.script_duration_seconds || 0)]; }),
       returns: actions.map(r => { const account = authors.find(a => matches(a, r)); return [String(r.created_at || r.submitted_at || ''), String(r.account_id || r.creator_id || account?.account_id || ''), String(r.creator_profile_kwai_id || r.detected_kwai_id || account?.kwai_id || ''), String(r.creator_profile_name || r.creator_name || account?.display_name || ''), r.submission_type === 'independent' ? '自主回传' : '脚本回传', String(r.video_url || ''), r.entry_id ? `https://kokocomedy.com/script/${encodeURIComponent(r.entry_id)}` : '', String(r.status || 'pending_review')]; })
     };
+    workbookRows.opens = workbookRows.active.filter(row => row[6] > 0).map(row => [row[0], row[1], row[2], row[4], row[5], row[6]]);
+    const openRows = workbookRows.opens.map(row => [esc(row[2] || row[0]), esc(row[1] || '—'), esc(row[3]), esc(row[4]), esc(row[5])]);
     const reviewRows = actions.slice().sort((a,b) => String(b.created_at).localeCompare(String(a.created_at))).map(r => [esc(date(r.created_at || r.submitted_at)), title(r.creator_profile_name || r.creator_name || r.display_name || r.detected_kwai_id || r.creator_id), title(r.script_title || r.entry_id), link(r.entry_id ? `https://kokocomedy.com/script/${encodeURIComponent(r.entry_id)}` : '', '脚本'), link(r.video_url, '视频'), esc(({pending_review:'待审核',approved:'已通过',rejected:'未通过'})[r.status] || r.status || '待审核'), esc(r.review_reason || r.rejection_reason || r.reason || '—')]);
     const counts = actions.reduce((acc, r) => { const s = r.status || 'pending_review'; acc[s] = (acc[s] || 0) + 1; return acc; }, {});
     const production = extras?.production;
@@ -170,13 +173,14 @@
       if (value) value.textContent = String(actions.length);
       if (note) note.textContent = '所选周期 · 回传记录数';
     }
-    for (const [index, kind, label] of [[1, 'active', '导出活跃作者 Excel'], [3, 'returns', '导出视频回传 Excel']]) {
+    for (const [index, kind] of [[1, 'active'], [2, 'opens'], [3, 'returns']]) {
       const card = kpis[index];
       if (!card) continue;
-      const button = document.createElement('button');
-      button.type = 'button'; button.dataset.dashboardExport = kind; button.textContent = label;
-      button.style.cssText = 'margin-top:8px;padding:6px 10px;font-size:12px;min-height:30px';
-      card.append(button);
+      card.dataset.dashboardMetric = kind;
+      const actionsBar = document.createElement('div');
+      actionsBar.className = 'dashboard-kpi-actions';
+      actionsBar.innerHTML = `<button type="button" data-metric-toggle="${kind}" aria-controls="dashboard-metric-${kind}" aria-expanded="${expandedMetric === kind}">${expandedMetric === kind ? '收起明细 ↑' : '查看明细 ↓'}</button><button type="button" data-dashboard-export="${kind}">导出 Excel</button>`;
+      card.append(actionsBar);
     }
     const kpiGrid = root.querySelector('.dashboard-kpis');
     const newAuthorCard = kpis[0];
@@ -189,6 +193,10 @@
       overall.innerHTML = `<h2 style="margin:0;font-size:30px">作者总体行为数据</h2><p class="dashboard-panel-meta" style="margin:0">${esc(period)}</p>`;
       kpiGrid.before(overall);
       overall.append(kpiGrid);
+      const metricLists = document.createElement('div');
+      metricLists.className = 'dashboard-metric-lists';
+      metricLists.innerHTML = `<section class="dashboard-panel dashboard-metric-list" id="dashboard-metric-active" ${expandedMetric === 'active' ? '' : 'hidden'}><div class="dashboard-panel-head"><h2>活跃作者明细</h2><span class="dashboard-panel-meta">${esc(period)}</span></div>${table(['作者','Kwai ID','平台打开','脚本打开（含折算）','平台停留(秒)','脚本停留(秒)'], activityRows)}</section><section class="dashboard-panel dashboard-metric-list" id="dashboard-metric-opens" ${expandedMetric === 'opens' ? '' : 'hidden'}><div class="dashboard-panel-head"><h2>脚本打开明细</h2><span class="dashboard-panel-meta">真实打开 + 自主回传折算</span></div>${table(['作者','Kwai ID','真实打开','自主回传折算','合计'], openRows)}</section><section class="dashboard-panel dashboard-metric-list" id="dashboard-metric-returns" ${expandedMetric === 'returns' ? '' : 'hidden'}><div class="dashboard-panel-head"><h2>视频回传明细</h2><span class="dashboard-panel-meta">${esc(period)}</span></div>${table(['提交时间','作者','脚本','脚本链接','视频链接','审核状态','原因'], reviewRows)}</section>`;
+      overall.append(metricLists);
       if (behavior) overall.append(behavior);
       overall.style.display = 'grid';
       overall.style.gap = '16px';
@@ -219,10 +227,25 @@
     renderExtras();
   };
   document.addEventListener('click', event => {
+    if (!event.target.closest('[data-dashboard-export]')) {
+      const card = event.target.closest('[data-dashboard-metric]');
+      if (card) {
+        const kind = card.dataset.dashboardMetric;
+        expandedMetric = expandedMetric === kind ? '' : kind;
+        document.querySelectorAll('.dashboard-metric-list').forEach(list => { list.hidden = list.id !== `dashboard-metric-${expandedMetric}`; });
+        document.querySelectorAll('[data-metric-toggle]').forEach(toggle => {
+          const open = toggle.dataset.metricToggle === expandedMetric;
+          toggle.setAttribute('aria-expanded', String(open));
+          toggle.textContent = open ? '收起明细 ↑' : '查看明细 ↓';
+        });
+        if (expandedMetric) document.querySelector(`#dashboard-metric-${expandedMetric}`)?.scrollIntoView({block:'nearest',behavior:'smooth'});
+        return;
+      }
+    }
     const button = event.target.closest('[data-dashboard-export]');
     if (!button) return;
     const kind = button.dataset.dashboardExport;
-    if (kind === 'active' || kind === 'returns') {
+    if (kind === 'active' || kind === 'opens' || kind === 'returns') {
       button.disabled = true;
       fetch('/api/creator-admin/dashboard-export', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind, rows: workbookRows[kind] || []})})
         .then(async response => { if (!response.ok) throw new Error((await response.json()).error || '导出失败'); return response.blob(); })
@@ -275,5 +298,6 @@
       if (status) status.textContent = errors.length ? '部分数据暂不可用，请查看各版块提示。' : '数据已更新。';
     } finally { /* A later range selection supersedes this request. */ }
   };
+  if (dashboardDemoEnabled && dashboardData) renderDashboard();
   if (dashboardLoading && !dashboardDemoEnabled) loadDashboard(true);
 })();

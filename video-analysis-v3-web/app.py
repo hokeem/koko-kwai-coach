@@ -20303,6 +20303,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 kind, rows = payload.get("kind"), payload.get("rows")
                 headers = {
                     "active": ["作者账号 ID", "Kwai ID", "作者", "平台打开", "脚本真实打开", "自主回传折算打开", "脚本打开合计", "平台停留(秒)", "脚本停留(秒)"],
+                    "opens": ["作者账号 ID", "Kwai ID", "作者", "真实打开", "自主回传折算打开", "脚本打开合计"],
                     "returns": ["提交时间", "作者账号 ID", "Kwai ID", "作者", "类型", "视频链接", "脚本链接", "审核状态"],
                 }.get(kind)
                 if not headers or not isinstance(rows, list) or len(rows) > 100000 or any(not isinstance(row, list) or len(row) != len(headers) or any(not isinstance(cell, (str, int, float, type(None))) for cell in row) for row in rows):

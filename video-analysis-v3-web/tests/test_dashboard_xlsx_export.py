@@ -12,6 +12,36 @@ import app
 
 
 class DashboardXlsxExportTests(unittest.TestCase):
+    def test_script_open_export_separates_real_and_independent_counts(self) -> None:
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                headers = {
+                    "Cookie": f"{app.CREATOR_ADMIN_AUTH_COOKIE}={urllib.parse.quote(app.CREATOR_ADMIN_PASSWORD)}",
+                    "Content-Type": "application/json",
+                }
+                row = ["author-1", "kwai-1", "Creator", 3, 2, 5]
+                connection.request("POST", "/api/creator-admin/dashboard-export", json.dumps({"kind": "opens", "rows": [row]}), headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                with zipfile.ZipFile(io.BytesIO(response.read())) as workbook:
+                    shared = workbook.read("xl/sharedStrings.xml").decode("utf-8")
+                    self.assertIn("真实打开", shared)
+                    self.assertIn("自主回传折算打开", shared)
+                    sheet = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
+                    self.assertIn('<v>3</v>', sheet)
+                    self.assertIn('<v>2</v>', sheet)
+                    self.assertIn('<v>5</v>', sheet)
+            finally:
+                connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_return_export_keeps_independent_video_url_and_is_real_xlsx(self) -> None:
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
