@@ -6,6 +6,7 @@
   let extras = null;
   let generation = 0;
   let exportsByType = {};
+  let workbookRows = {};
   let neverExpanded = false;
   const expandedSections = new Set();
   const layout = document.createElement('style');
@@ -67,11 +68,22 @@
     const endDay = dashboardDateKey(new Date());
     const beginDate = new Date(`${endDay}T00:00:00+08:00`);
     beginDate.setUTCDate(beginDate.getUTCDate() - dashboardRange + 1);
-    const period = `${dashboardDateKey(beginDate)} 至 ${endDay} · 北京时间`;
+    const period = dashboardRange === 0 ? `累计全部可用记录 · 截至 ${endDay} · 北京时间` : `${dashboardDateKey(beginDate)} 至 ${endDay} · 北京时间`;
+    const retainedHistoryNote = dashboardRange === 0 ? `行为与渠道仅覆盖仍保留的事件${data.summary?.history_start ? `（最早 ${date(data.summary.history_start)}）` : ''}；更早已清理的日志无法恢复。` : '';
     const historicalIds = data.summary?.historical_script_opened_ids;
     const historicalSet = new Set(historicalIds || []);
     const historicalRows = Array.isArray(historicalIds) ? data.scripts.filter(s => !historicalSet.has(String(s.entry_id || s.id || ''))).map(s => [title(s.title || s.entry_id), link(s.entry_id ? `https://kokocomedy.com/script/${encodeURIComponent(s.entry_id)}` : '', '查看脚本'), esc(s.published === false ? '未发布' : '已发布')]) : [];
-    const activityRows = users.filter(u => !analyticsIsTestUser(u)).map(u => [title(u.display_name || u.account_id), esc(u.kwai_id || '—'), esc(u.platform_open_count || 0), esc(u.script_share_open_count || 0), u.platform_duration_seconds == null ? '—' : esc(Math.round(u.platform_duration_seconds)), u.script_duration_seconds == null ? '—' : esc(Math.round(u.script_duration_seconds))]);
+    const independentActions = actions.filter(r => r.submission_type === 'independent');
+    const activeUsers = users.filter(u => !analyticsIsTestUser(u) && (u.has_activity || Number(u.platform_open_count || 0) || Number(u.script_share_open_count || 0) || (u.recent_events || []).length || independentActions.some(r => matches(r, u))));
+    for (const author of authors) {
+      if (independentActions.some(r => matches(r, author)) && !activeUsers.some(u => matches(u, author))) activeUsers.push(author);
+    }
+    const independentFor = u => actions.filter(r => r.submission_type === 'independent' && matches(r, u)).length;
+    const activityRows = activeUsers.map(u => [title(u.display_name || u.account_id), esc(u.kwai_id || '—'), esc(u.platform_open_count || 0), esc(Number(u.script_share_open_count || 0) + independentFor(u) * 2), u.platform_duration_seconds == null ? '—' : esc(Math.round(u.platform_duration_seconds)), u.script_duration_seconds == null ? '—' : esc(Math.round(u.script_duration_seconds))]);
+    workbookRows = {
+      active: activeUsers.map(u => { const real = Number(u.script_share_open_count || 0), converted = independentFor(u) * 2; return [String(u.account_id || ''), String(u.kwai_id || ''), String(u.display_name || ''), Number(u.platform_open_count || 0), real, converted, real + converted, Number(u.platform_duration_seconds || 0), Number(u.script_duration_seconds || 0)]; }),
+      returns: actions.map(r => { const account = authors.find(a => matches(a, r)); return [String(r.created_at || r.submitted_at || ''), String(r.account_id || r.creator_id || account?.account_id || ''), String(r.creator_profile_kwai_id || r.detected_kwai_id || account?.kwai_id || ''), String(r.creator_profile_name || r.creator_name || account?.display_name || ''), r.submission_type === 'independent' ? '自主回传' : '脚本回传', String(r.video_url || ''), r.entry_id ? `https://kokocomedy.com/script/${encodeURIComponent(r.entry_id)}` : '', String(r.status || 'pending_review')]; })
+    };
     const reviewRows = actions.slice().sort((a,b) => String(b.created_at).localeCompare(String(a.created_at))).map(r => [esc(date(r.created_at || r.submitted_at)), title(r.creator_profile_name || r.creator_name || r.display_name || r.detected_kwai_id || r.creator_id), title(r.script_title || r.entry_id), link(r.entry_id ? `https://kokocomedy.com/script/${encodeURIComponent(r.entry_id)}` : '', '脚本'), link(r.video_url, '视频'), esc(({pending_review:'待审核',approved:'已通过',rejected:'未通过'})[r.status] || r.status || '待审核'), esc(r.review_reason || r.rejection_reason || r.reason || '—')]);
     const counts = actions.reduce((acc, r) => { const s = r.status || 'pending_review'; acc[s] = (acc[s] || 0) + 1; return acc; }, {});
     const production = extras?.production;
@@ -84,10 +96,10 @@
     panel.id = 'integrated-detail';
     panel.style.display = 'grid'; panel.style.gap = '16px';
     const errors = extras?.errors || [];
-    panel.innerHTML = `${errors.length ? `<div class="dashboard-empty">${esc(errors.join('；'))}</div>` : ''}` +
-      section('integrated-channels', '推广渠道明细', `最近 ${dashboardRange} 天 · 巴西时间，首次渠道归因`, campaign ? table(['渠道 / 活动','访问次数','去重访客','新增作者','活跃作者','脚本打开','回传','访问账号'], campaignRows) : '<div class="dashboard-empty">渠道数据加载中或暂不可用</div>') +
-      section('integrated-authors', '新增作者明细', `近 ${dashboardRange} 天 · 北京时间，打开和回传为所选周期`, '<button type="button" data-dashboard-export="authors">导出作者明细</button>' + table(['作者','Kwai ID','注册时间','渠道','主页','打开脚本','匹配回传'], authorRows)) +
-      section('integrated-behavior', '作者行为明细', `${period} · 停留时间：秒`, table(['作者','Kwai ID','平台打开','脚本打开','平台停留','脚本停留'], activityRows)) +
+    panel.innerHTML = `${retainedHistoryNote ? `<div class="dashboard-empty">${esc(retainedHistoryNote)}</div>` : ''}${errors.length ? `<div class="dashboard-empty">${esc(errors.join('；'))}</div>` : ''}` +
+      section('integrated-channels', '推广渠道明细', dashboardRange === 0 ? '累计全部 · 巴西时间，首次渠道归因' : `最近 ${dashboardRange} 天 · 巴西时间，首次渠道归因`, campaign ? table(['渠道 / 活动','访问次数','去重访客','新增作者','活跃作者','脚本打开','回传','访问账号'], campaignRows) : '<div class="dashboard-empty">渠道数据加载中或暂不可用</div>') +
+      section('integrated-authors', '新增作者明细', `${period}，打开和回传为所选周期`, '<button type="button" data-dashboard-export="authors">导出作者明细</button>' + table(['作者','Kwai ID','注册时间','渠道','主页','打开脚本','匹配回传'], authorRows)) +
+      section('integrated-behavior', '作者行为明细', `${period} · 停留时间：秒`, '<button type="button" data-dashboard-export="active">导出活跃作者 Excel</button>' + table(['作者','Kwai ID','平台打开','脚本打开（含折算）','平台停留','脚本停留'], activityRows)) +
       section('integrated-production', '脚本生产', '生成、复盘和整稿编辑 · 北京时间', production ? `<p class="dashboard-panel-meta">近 24 小时 ${esc(productionSummary.last_24h)} · 近 7 天 ${esc(productionSummary.last_7d)} · 近 30 天 ${esc(productionSummary.last_30d)} · 历史累计 ${esc(productionSummary.all_time)} · 近 30 天复盘 ${esc(productionSummary.review_count_30d)} · 近 30 天编辑 ${esc(productionSummary.edited_count_30d)}</p>${table(['日期','生成','复盘','编辑','脚本明细'],productionRows)}` : '<div class="dashboard-empty">生产数据加载中或暂不可用</div>');
     root.append(panel);
     panel.querySelectorAll('[data-collapsible]').forEach(detail => detail.addEventListener('toggle', () => {
@@ -123,14 +135,32 @@
     const conversion = [...root.querySelectorAll('.dashboard-panel')].find(x => x.querySelector('h2')?.textContent === '创作者转化');
     if (conversion) {
       const cohort = authors.filter(a => inRange(a.registered_at || a.last_registered_at));
-      const opened = cohort.filter(a => users.some(u => matches(u,a) && Number(u.script_share_open_count || 0) > 0));
+      const opened = cohort.filter(a => users.some(u => matches(u,a) && Number(u.script_share_open_count || 0) > 0) || actions.some(r => r.submission_type === 'independent' && matches(r,a)));
       const returned = opened.filter(a => actions.some(r => matches(r,a)));
       const stages = [['新增作者',cohort.length],['打开脚本',opened.length],['有回传',returned.length]];
       conversion.innerHTML = `<div class="dashboard-panel-head"><h2>新作者行为</h2></div><div class="dashboard-funnel">${stages.map(([label,value],i) => `<div class="dashboard-funnel-step"><span class="dashboard-funnel-label">${esc(label)}</span><div class="dashboard-funnel-bar">${value}</div><div class="dashboard-funnel-rate">${i && stages[i-1][1] ? `${Math.round(value / stages[i-1][1] * 1000) / 10}%` : '—'}</div></div>`).join('')}</div><p class="dashboard-panel-meta">同一批周期内新注册作者，统计周期内的行为；不判断先后顺序。账号无法匹配的回传不计入。访客到注册的转化暂无法可靠关联。</p>`;
     }
     const channel = [...root.querySelectorAll('.dashboard-panel')].find(x => x.querySelector('h2')?.textContent === '渠道表现');
-    if (channel) channel.innerHTML = `<div class="dashboard-panel-head"><h2>渠道表现</h2><span class="dashboard-panel-meta">近 ${dashboardRange} 天 · 巴西时间</span></div>${campaign ? table(['渠道 / 活动','访问次数','去重访客','新增作者','活跃作者','脚本打开','回传'], campaignRows.map(row => row.slice(0,7)), '该周期暂无渠道记录') : '<div class="dashboard-empty">渠道数据加载中或暂不可用</div>'}`;
+    if (channel) channel.innerHTML = `<div class="dashboard-panel-head"><h2>渠道表现</h2><span class="dashboard-panel-meta">${dashboardRange === 0 ? '累计全部' : `近 ${dashboardRange} 天`} · 巴西时间</span></div>${campaign ? table(['渠道 / 活动','访问次数','去重访客','新增作者','活跃作者','脚本打开','回传'], campaignRows.map(row => row.slice(0,7)), '该周期暂无渠道记录') : '<div class="dashboard-empty">渠道数据加载中或暂不可用</div>'}`;
     const kpis = root.querySelectorAll('.dashboard-kpi');
+    if (kpis[1]) {
+      const value = kpis[1].querySelector('.dashboard-kpi-value');
+      const note = kpis[1].querySelector('.dashboard-kpi-note');
+      if (value) value.textContent = String(activeUsers.length);
+      if (note) note.textContent = '周期内有浏览、点击或自主回传';
+    }
+    if (kpis[0] && dashboardRange === 0) {
+      const note = kpis[0].querySelector('.dashboard-kpi-note');
+      if (note) note.textContent = '累计全部注册账号 · 按注册日期去重';
+    }
+    if (kpis[2]) {
+      const opens = users.reduce((sum, u) => sum + (analyticsIsTestUser(u) ? 0 : Number(u.script_share_open_count || 0)), 0);
+      const independent = actions.filter(s => s.submission_type === 'independent').length;
+      const value = kpis[2].querySelector('.dashboard-kpi-value');
+      const note = kpis[2].querySelector('.dashboard-kpi-note');
+      if (value) value.textContent = String(opens + independent * 2);
+      if (note) note.textContent = `真实打开 ${opens} 次 + 自主回传 ${independent} 条 × 2；未计入脚本排行`;
+    }
     if (kpis[3]) {
       const label = kpis[3].querySelector('.dashboard-kpi-label');
       const value = kpis[3].querySelector('.dashboard-kpi-value');
@@ -138,6 +168,14 @@
       if (label) label.textContent = '视频回传';
       if (value) value.textContent = String(actions.length);
       if (note) note.textContent = '所选周期 · 回传记录数';
+    }
+    for (const [index, kind, label] of [[1, 'active', '导出活跃作者 Excel'], [3, 'returns', '导出视频回传 Excel']]) {
+      const card = kpis[index];
+      if (!card) continue;
+      const button = document.createElement('button');
+      button.type = 'button'; button.dataset.dashboardExport = kind; button.textContent = label;
+      button.style.cssText = 'margin-top:8px;padding:6px 10px;font-size:12px;min-height:30px';
+      card.append(button);
     }
     const kpiGrid = root.querySelector('.dashboard-kpis');
     const newAuthorCard = kpis[0];
@@ -182,7 +220,17 @@
   document.addEventListener('click', event => {
     const button = event.target.closest('[data-dashboard-export]');
     if (!button) return;
-    const rows = exportsByType[button.dataset.dashboardExport] || [];
+    const kind = button.dataset.dashboardExport;
+    if (kind === 'active' || kind === 'returns') {
+      button.disabled = true;
+      fetch('/api/creator-admin/dashboard-export', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind, rows: workbookRows[kind] || []})})
+        .then(async response => { if (!response.ok) throw new Error((await response.json()).error || '导出失败'); return response.blob(); })
+        .then(blob => { const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `koko-${kind}-${dashboardRange || 'all'}.xlsx`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); })
+        .catch(error => alert(error.message || '导出失败'))
+        .finally(() => { button.disabled = false; });
+      return;
+    }
+    const rows = exportsByType[kind] || [];
     const csv = rows.map(row => row.map(value => {
       const element = document.createElement('div'); element.innerHTML = String(value ?? '');
       let text = element.querySelector('a')?.href || element.textContent || '';
@@ -208,7 +256,7 @@
       const status = document.querySelector('#status');
       if (status?.textContent?.includes('缓存')) errors.push('部分核心数据来自缓存');
       if (status) status.textContent = '核心数据已加载，正在补充渠道及明细…';
-      extras.campaign = await optional(`/api/creator-admin/campaign-dashboard?days=${dashboardRange}`, '渠道数据');
+      extras.campaign = await optional(`/api/creator-admin/campaign-dashboard?days=${dashboardRange || 90}&all=${dashboardRange === 0 ? 1 : 0}`, '渠道数据');
       if (request !== generation) return;
       renderDashboard();
       while (snapshot.scripts.length < snapshot.scriptTotal) {
