@@ -41,6 +41,9 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('Não corresponde ao roteiro original', html)
         self.assertIn('class="review-grid"', html)
         self.assertIn('/api/creator-admin/submissions/review', html)
+        review_click = html.split('document.addEventListener("click",async e=>{const more=e.target.closest("[data-review-more]")', 1)[1][:2000]
+        self.assertIn('reviewRows=reviewRows.filter', review_click)
+        self.assertNotIn('await loadReviews()', review_click)
 
     def test_review_proxy_defaults_empty_rejection_reason(self) -> None:
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
