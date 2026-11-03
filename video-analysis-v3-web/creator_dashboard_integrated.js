@@ -63,7 +63,8 @@
       const returns = actions.filter(x => matches(x, a));
       const profile = (extras?.creators?.creators || []).find(p => matches(p, a));
       const channel = (extras?.campaign?.rows || []).find(row => (row.new_creator_accounts || []).some(person => matches(person, a)));
-      return [title(a.display_name || a.account_id), esc(a.kwai_id || '未记录'), esc(date(a.registered_at || a.last_registered_at)), esc(channel?.source || a.source || '未归因'), link(profile?.kwai_url || a.kwai_url || a.profile_url || a.share_url, '主页'), esc(u?.script_share_open_count || 0), esc(returns.length)];
+      const convertedOpens = returns.filter(r => r.submission_type === 'independent').length * 2;
+      return [title(a.display_name || a.account_id), esc(a.kwai_id || '未记录'), esc(date(a.registered_at || a.last_registered_at)), esc(channel?.source || a.source || '未归因'), link(profile?.kwai_url || a.kwai_url || a.profile_url || a.share_url, '主页'), esc(Number(u?.script_share_open_count || 0) + convertedOpens), esc(returns.length)];
     });
     const endDay = dashboardDateKey(new Date());
     const beginDate = new Date(`${endDay}T00:00:00+08:00`);
@@ -91,14 +92,14 @@
     const productionRows = (production?.days || []).filter(d => inRange(`${d.date}T12:00:00+08:00`)).map(d => [esc(d.date), esc(d.script_count), esc(d.review_count), esc(d.edited_count), open('查看脚本', (d.items || []).map(i => `<div>${title(i.title)} · ${esc(i.completed_at_bj)} · ${link(i.video_url,'来源视频')} · ${i.reviewed?'已复盘':'未复盘'} · ${i.edited?'已编辑':'未编辑'}</div>`).join(''))]);
     const campaign = extras?.campaign;
     const campaignRows = (campaign?.rows || []).map(r => [esc(r.source + (r.source === 'inbox' ? '' : ' / ' + (r.campaign || ''))), esc(r.visits), esc(r.unique_visitors), esc(r.new_creators), esc(r.active_creators), esc(r.script_opens), esc(r.submissions), open(`已识别 ${(r.visit_accounts || []).length} 人 · 未识别 ${r.unidentified_visits || 0} 次`, (r.visit_accounts || []).map(p => `<div>${title(p.display_name)} · ${esc(p.kwai_id || p.account_id)} · ${esc(p.visits)} 次 · ${esc(date(p.last_visit))}</div>`).join('') || '无已识别账号')]);
-    exportsByType = {authors: [['作者','Kwai ID','注册时间','渠道','主页','打开脚本','匹配回传'], ...authorRows], reviews: [['提交时间','作者','脚本','脚本链接','视频链接','状态','原因'], ...reviewRows]};
+    exportsByType = {authors: [['作者','Kwai ID','注册时间','渠道','主页','脚本打开（含折算）','匹配回传'], ...authorRows], reviews: [['提交时间','作者','脚本','脚本链接','视频链接','状态','原因'], ...reviewRows]};
     const panel = document.createElement('div');
     panel.id = 'integrated-detail';
     panel.style.display = 'grid'; panel.style.gap = '16px';
     const errors = extras?.errors || [];
     panel.innerHTML = `${retainedHistoryNote ? `<div class="dashboard-empty">${esc(retainedHistoryNote)}</div>` : ''}${errors.length ? `<div class="dashboard-empty">${esc(errors.join('；'))}</div>` : ''}` +
       section('integrated-channels', '推广渠道明细', dashboardRange === 0 ? '累计全部 · 巴西时间，首次渠道归因' : `最近 ${dashboardRange} 天 · 巴西时间，首次渠道归因`, campaign ? table(['渠道 / 活动','访问次数','去重访客','新增作者','活跃作者','脚本打开','回传','访问账号'], campaignRows) : '<div class="dashboard-empty">渠道数据加载中或暂不可用</div>') +
-      section('integrated-authors', '新增作者明细', `${period}，打开和回传为所选周期`, '<button type="button" data-dashboard-export="authors">导出作者明细</button>' + table(['作者','Kwai ID','注册时间','渠道','主页','打开脚本','匹配回传'], authorRows)) +
+      section('integrated-authors', '新增作者明细', `${period}，打开和回传为所选周期`, '<button type="button" data-dashboard-export="authors">导出作者明细</button>' + table(['作者','Kwai ID','注册时间','渠道','主页','脚本打开（含折算）','匹配回传'], authorRows)) +
       section('integrated-behavior', '作者行为明细', `${period} · 停留时间：秒`, '<button type="button" data-dashboard-export="active">导出活跃作者 Excel</button>' + table(['作者','Kwai ID','平台打开','脚本打开（含折算）','平台停留','脚本停留'], activityRows)) +
       section('integrated-production', '脚本生产', '生成、复盘和整稿编辑 · 北京时间', production ? `<p class="dashboard-panel-meta">近 24 小时 ${esc(productionSummary.last_24h)} · 近 7 天 ${esc(productionSummary.last_7d)} · 近 30 天 ${esc(productionSummary.last_30d)} · 历史累计 ${esc(productionSummary.all_time)} · 近 30 天复盘 ${esc(productionSummary.review_count_30d)} · 近 30 天编辑 ${esc(productionSummary.edited_count_30d)}</p>${table(['日期','生成','复盘','编辑','脚本明细'],productionRows)}` : '<div class="dashboard-empty">生产数据加载中或暂不可用</div>');
     root.append(panel);
