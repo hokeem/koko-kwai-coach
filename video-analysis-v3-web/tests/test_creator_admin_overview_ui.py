@@ -44,6 +44,21 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         review_click = html.split('document.addEventListener("click",async e=>{const more=e.target.closest("[data-review-more]")', 1)[1][:2000]
         self.assertIn('reviewRows=reviewRows.filter', review_click)
         self.assertNotIn('await loadReviews()', review_click)
+        self.assertIn('/api/creator-admin/review-title-translations', html)
+        self.assertIn('review-title-source', html)
+
+    def test_review_title_translation_is_cached(self) -> None:
+        source = 'O marido viu um homem desconhecido fugir pela janela.'
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(app, 'REVIEW_TITLE_CACHE_FILE', Path(directory) / 'titles.json'), \
+                patch.object(app, 'GOOGLE_API_KEY', 'test-key'), \
+                patch.object(app, 'run_text_json_prompt_with_fallback', return_value=(
+                    {'translations': [{'source': source, 'zh': '丈夫看到一个陌生男人从窗户逃走。'}]}, {}, 'test-model',
+                )) as translate:
+            expected = {source: '丈夫看到一个陌生男人从窗户逃走。'}
+            self.assertEqual(app.translate_review_titles([source]), expected)
+            self.assertEqual(app.translate_review_titles([source]), expected)
+            translate.assert_called_once()
 
     def test_review_proxy_defaults_empty_rejection_reason(self) -> None:
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
