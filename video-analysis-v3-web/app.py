@@ -7180,6 +7180,16 @@ def enrich_review_script_covers(payload: dict[str, Any]) -> dict[str, Any]:
     cached = load_creator_admin_scripts_cache() or {}
     entries = cached.get("entries") if isinstance(cached.get("entries"), list) else []
     by_id = {str(entry.get("entry_id") or ""): entry for entry in entries if isinstance(entry, dict)}
+    titles = list(dict.fromkeys(
+        str(row.get("script_title") or row.get("submitted_title") or "").strip()
+        for row in submissions if isinstance(row, dict)
+    ))
+    translations = read_json(REVIEW_TITLE_CACHE_FILE)
+    if titles:
+        try:
+            translations.update(translate_review_titles(titles[:20]))
+        except Exception:
+            pass
     for submission in submissions:
         if not isinstance(submission, dict):
             continue
@@ -7187,6 +7197,8 @@ def enrich_review_script_covers(payload: dict[str, Any]) -> dict[str, Any]:
         submission["review_script_cover_url"] = str(
             entry.get("storyboard_image_url") or entry.get("cover_url") or entry.get("thumbnail_url") or ""
         )
+        title = str(submission.get("script_title") or submission.get("submitted_title") or "").strip()
+        submission["review_script_title_zh"] = str(translations.get(title) or "")
     remember_review_video_sources(submissions)
     return payload
 
@@ -18065,7 +18077,7 @@ const reviewTitleZh=new Map();const reviewTitlePending=new Set();
 function applyReviewTitleTranslations(){{document.querySelectorAll("#review-board .review-card").forEach((card,index)=>{{const row=reviewRows[index];if(!row)return;const original=String(row.script_title||row.submitted_title||"").trim();const translated=reviewTitleZh.get(original);if(!translated)return;const heading=card.querySelector(".review-card-top h3");if(!heading)return;heading.textContent=translated;heading.lang="zh-CN";let source=card.querySelector(".review-title-source");if(!source){{source=document.createElement("div");source.className="review-title-source";heading.parentElement.after(source)}}source.textContent=original}})}}
 async function queueReviewTitleTranslations(){{const titles=[...new Set(reviewRows.map(row=>String(row.script_title||row.submitted_title||"").trim()))].filter(title=>title&&!/[\u3400-\u9fff]/.test(title)&&!reviewTitleZh.has(title)&&!reviewTitlePending.has(title));for(let i=0;i<titles.length;i+=30){{const batch=titles.slice(i,i+30);batch.forEach(title=>reviewTitlePending.add(title));api("/api/creator-admin/review-title-translations",{{method:"POST",body:JSON.stringify({{titles:batch}})}}).then(data=>{{for(const [source,zh] of Object.entries(data.translations||{{}}))if(zh)reviewTitleZh.set(source,zh);applyReviewTitleTranslations()}}).catch(()=>{{}}).finally(()=>batch.forEach(title=>reviewTitlePending.delete(title)))}}}}
 const renderReviewsWithStatus=renderReviews;
-renderReviews=function(){{renderReviewsWithStatus();applyReviewTitleTranslations();if(reviewRows.length)queueReviewTitleTranslations()}};
+renderReviews=function(){{for(const row of reviewRows){{const title=String(row.script_title||row.submitted_title||"").trim();if(title&&row.review_script_title_zh)reviewTitleZh.set(title,row.review_script_title_zh)}}renderReviewsWithStatus();applyReviewTitleTranslations();if(reviewRows.length)queueReviewTitleTranslations()}};
 loadReviews=async function(append=false){{if(reviewLoading)return;reviewLoading=true;reviewError="";const status=document.querySelector("#status");const filter=document.querySelector("#review-filter");if(filter)filter.disabled=true;const previous={{rows:reviewRows,offset:reviewOffset,more:reviewHasMore}};if(!append){{reviewRows=[];reviewOffset=0;reviewHasMore=true}}renderReviews();if(status)status.textContent="正在加载审核记录...";try{{const exclude=reviewFilter==="pending_review"?"&exclude_independent=1":"";const d=await api(`/api/creator-admin/submissions?status=${{encodeURIComponent(reviewFilter)}}&limit=80&offset=${{reviewOffset}}${{exclude}}`);const page=Array.isArray(d.submissions)?d.submissions:[];reviewOffset+=page.length;reviewRows.push(...page.filter(s=>reviewFilter!=="pending_review"||s.submission_type!=="independent"));reviewHasMore=typeof d.has_more==="boolean"?d.has_more:reviewOffset<Number(d.total||0);if(status)status.textContent=`已显示 ${{reviewRows.length}} 条${{reviewFilter==="pending_review"?"待审核":"记录"}}`}}catch(err){{if(!append){{reviewRows=previous.rows;reviewOffset=previous.offset;reviewHasMore=previous.more}}reviewError=err.message||String(err);if(status)status.textContent=`加载失败：${{reviewError}}`}}finally{{reviewLoading=false;if(filter)filter.disabled=false;renderReviews()}}}};
 document.addEventListener("click",e=>{{if(e.target.closest("[data-review-retry]")){{e.preventDefault();loadReviews()}}}});
 function reviewVideoCover(s){{const value=String(s.thumbnail_url||"").trim();if(!value||/\/api\/creator\/thumbnail\//i.test(value))return "";if(value.startsWith("/"))return `__CREATOR_BASE__${{value}}`;return /^https?:\/\//i.test(value)?value:""}}

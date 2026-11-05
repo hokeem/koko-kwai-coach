@@ -60,6 +60,16 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
             self.assertEqual(app.translate_review_titles([source]), expected)
             translate.assert_called_once()
 
+    def test_review_list_returns_chinese_title_with_original(self) -> None:
+        source = 'O marido viu um homem desconhecido fugir pela janela.'
+        payload = {'submissions': [{'script_title': source, 'entry_id': 'example'}]}
+        with patch.object(app, 'load_creator_admin_scripts_cache', return_value={}), \
+                patch.object(app, 'read_json', return_value={}), \
+                patch.object(app, 'translate_review_titles', return_value={source: '丈夫看到陌生男人从窗户逃走。'}):
+            result = app.enrich_review_script_covers(payload)
+        self.assertEqual(result['submissions'][0]['script_title'], source)
+        self.assertEqual(result['submissions'][0]['review_script_title_zh'], '丈夫看到陌生男人从窗户逃走。')
+
     def test_review_proxy_defaults_empty_rejection_reason(self) -> None:
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
