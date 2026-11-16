@@ -47,6 +47,30 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('/api/creator-admin/review-title-translations', html)
         self.assertIn('review-title-source', html)
 
+    def test_dashboard_submissions_skip_review_enrichment(self) -> None:
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        try:
+            headers = {"Cookie": f"{app.CREATOR_ADMIN_AUTH_COOKIE}={urllib.parse.quote(app.CREATOR_ADMIN_PASSWORD)}"}
+            payload = {"total": 1, "submissions": [{"submission_id": "test"}]}
+            with patch.object(app, "creator_admin_remote_json", return_value=(200, payload)), \
+                    patch.object(app, "enrich_review_script_covers", return_value=payload) as enrich:
+                for query in ("?dashboard=1", "?status=pending_review"):
+                    connection.request("GET", "/api/creator-admin/submissions" + query, headers=headers)
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.loads(response.read()), payload)
+                    if query == "?dashboard=1":
+                        enrich.assert_not_called()
+                enrich.assert_called_once()
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_review_title_translation_is_cached(self) -> None:
         source = 'O marido viu um homem desconhecido fugir pela janela.'
         with tempfile.TemporaryDirectory() as directory, \
