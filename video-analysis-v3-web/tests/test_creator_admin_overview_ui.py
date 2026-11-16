@@ -47,6 +47,32 @@ class CreatorAdminOverviewUiTests(unittest.TestCase):
         self.assertIn('/api/creator-admin/review-title-translations', html)
         self.assertIn('review-title-source', html)
 
+    def test_dashboard_submissions_reuse_complete_snapshot_during_upstream_failure(self) -> None:
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        try:
+            payload = {"total": 1, "submissions": [{"submission_id": "test"}]}
+            headers = {"Cookie": f"{app.CREATOR_ADMIN_AUTH_COOKIE}={urllib.parse.quote(app.CREATOR_ADMIN_PASSWORD)}"}
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch.object(app, "DATA_ROOT", Path(directory)), \
+                    patch.object(app, "creator_admin_remote_json", side_effect=[
+                        (200, payload), (502, {"error": "unavailable"}),
+                    ]):
+                for expect_cache in (False, True):
+                    connection.request("GET", "/api/creator-admin/dashboard-submissions", headers=headers)
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    result = json.loads(response.read())
+                    self.assertEqual(result["submissions"], payload["submissions"])
+                    self.assertEqual(bool(result.get("from_cache")), expect_cache)
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_dashboard_submissions_skip_review_enrichment(self) -> None:
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.AppHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

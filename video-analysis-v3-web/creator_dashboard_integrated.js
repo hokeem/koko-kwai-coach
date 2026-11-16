@@ -37,20 +37,6 @@
   const matches = (a, b) => { const keys = aliases(a); return [...aliases(b)].some(key => keys.has(key)); };
   dashboardRenderScriptTable = rows => table(['排名','脚本标题','打开次数','去重打开作者','已回传'], rows.map((row,index) => [esc(index + 1), link(row.id ? `https://kokocomedy.com/script/${encodeURIComponent(row.id)}` : '', row.title || row.id), esc(row.opens), esc(row.authors.size), esc(row.returns)]), '此分类暂无脚本');
 
-  // Fetch all pages; silently truncating gives incorrect totals and rankings.
-  loadDashboardSubmissions = async function (first) {
-    const rows = Array.isArray(first.submissions) ? first.submissions.slice() : [];
-    let page = first;
-    while (page.has_more && rows.length < Number(first.total || Infinity)) {
-      const offset = rows.length;
-      page = await dashboardApi(`/api/creator-admin/submissions?limit=300&offset=${offset}`);
-      const batch = Array.isArray(page.submissions) ? page.submissions : [];
-      if (!batch.length) throw new Error('回传分页不完整，请重试');
-      rows.push(...batch);
-    }
-    return rows;
-  };
-
   function renderExtras() {
     const root = document.querySelector('#dashboard-board .dashboard-content');
     if (!root || !dashboardData) return;
@@ -270,8 +256,11 @@
     extras = null;
     while (dashboardLoading && request === generation) await new Promise(resolve => setTimeout(resolve, 100));
     if (request !== generation) return;
-    if (!reuseExisting || !dashboardData) await originalLoad();
+    const previous = dashboardData;
+    const shouldReload = reuseExisting !== true || !previous;
+    if (shouldReload) await originalLoad();
     if (request !== generation || !dashboardData || dashboardDemoEnabled) return;
+    if (shouldReload && dashboardData === previous) return;
     const snapshot = dashboardData;
     try {
       const errors = [];
